@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>05 · Triton编程入门</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.7}a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}.nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;justify-content:space-between;position:sticky;top:0;z-index:100}.nav span{color:#8b949e;font-size:0.9em}.nav a{color:#58a6ff}.container{max-width:900px;margin:0 auto;padding:30px 20px}h1{color:#58a6ff;font-size:2em;margin:20px 0 10px}h2{color:#f0f6fc;border-left:4px solid #58a6ff;padding-left:14px;margin:35px 0 15px;font-size:1.4em}h3{color:#d2a8ff;margin:20px 0 10px;font-size:1.15em}p{margin:10px 0}ul,ol{margin:10px 0 10px 24px}li{margin:4px 0}code{background:#21262d;color:#79c0ff;padding:2px 6px;border-radius:4px;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;overflow-x:auto;margin:12px 0}pre code{background:none;color:#c9d1d9;padding:0}table{border-collapse:collapse;width:100%;margin:12px 0}th{background:#161b22;color:#58a6ff;text-align:left;padding:10px 14px;border:1px solid #30363d}td{padding:10px 14px;border:1px solid #21262d}tr:nth-child(even){background:#161b2233}.tip{background:#0d1d30;border-left:4px solid #58a6ff;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.tip strong{color:#58a6ff}.warn{background:#2d1b00;border-left:4px solid #d29922;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.warn strong{color:#d29922}.exercise{background:#0d2818;border-left:4px solid #238636;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.exercise strong{color:#3fb950}.deep{background:#1a1024;border-left:4px solid #a371f7;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.deep strong{color:#a371f7}.ascii{background:#161b22;border:1px solid #30363d;padding:16px;font-family:monospace;font-size:0.85em;line-height:1.4;overflow-x:auto;margin:12px 0;white-space:pre}.formula{background:#161b22;border:1px solid #30363d;padding:14px 18px;border-radius:6px;margin:12px 0;text-align:center;font-size:1.1em;color:#d2a8ff}.footer{text-align:center;padding:30px;border-top:1px solid #21262d;margin-top:30px;color:#8b949e;font-size:0.85em}.glossary{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin:16px 0}.glossary dt{color:#58a6ff;font-weight:bold;margin-top:8px}.glossary dd{color:#8b949e;margin-left:16px}</style>
+</head>
+<body>
+<div class="nav"><a href="04-内存层次与数据搬运.html">&larr; 04-内存层次与数据搬运</a><span>模块 05/08 · Triton编程</span><a href="06-FlashAttention的算子实现.html">06-FlashAttention的算子实现 &rarr;</a></div>
+<div class="container">
+
+<h1>🐍 05 · Triton 编程入门 — Python 写 GPU Kernel</h1>
+<p style="color:#8b949e;font-size:1.05em;">从Python到GPU kernel的桥梁 · 向量加法/矩阵乘法/Softmax实战 · 自动调优</p>
+
+<h2>一、背景与动机</h2>
+<h3>一、背景与动机</h3>要掌握 C++、GPU 架构细节、内存管理等底层知识——学习曲线陡峭。<strong>Triton</strong> 是 OpenAI 开发的 GPU 编程框架，让你用 Python 写出接近手写 CUDA 性能的 kernel。</p>
+<p>Triton 的核心优势：① Python 级别的易用性 ② 自动处理内存合并、bank conflict 等底层细节 ③ 编译到高效的 PTX/CUBIN 代码 ④ PyTorch 生态无缝集成。vLLM、FlashAttention 的部分实现都使用了 Triton。</p>
+
+<div class="tip"><strong>💡 定位：</strong>Triton 介于 PyTorch(高层抽象)和 CUDA(底层控制)之间。它自动处理了 80% 的底层优化，同时保留了 20% 的关键控制(tile size、内存布局)。对于大多数自定义 kernel，Triton 是最优选择。</div>
+
+<h2>二、名字由来</h2>
+<h3>二、名字由来</h3>
+<p><strong>Triton</strong>：海卫一(土星最大的卫星)。OpenAI 以天体命名的惯例。也暗示"三"(tri)——因为 Triton 的编程模型基于三级层次：程序→块→元素。</p>
+
+<h2>三、核心原理</h2>
+
+<h3>3.1 Triton 编程模型</h3>
+<div class="ascii">Triton vs CUDA 编程模型:
+
+CUDA:
+  Grid → Block → Thread
+  每个线程处理一个元素
+  需要手动管理 Shared Memory
+
+Triton:
+  Program → Block (一组元素)
+  每个 program 处理一个 block 的数据
+  Shared Memory 自动管理
+
+  CUDA:                              Triton:
+  for each thread:                   for each block:
+    idx = blockIdx.x * blockDim.x      pid = program_id(0)
+              + threadIdx.x            offsets = pid * BLOCK_SIZE + arange
+    if idx < n:                        data = tl.load(ptr + offsets)
+      c[idx] = a[idx] + b[idx]         result = data * 2
+                                       tl.store(ptr + offsets, result)</div>
+
+<h3>3.2 Triton 核心 API</h3>
+<table>
+<tr><th>API</th><th>功能</th><th>示例</th></tr>
+<tr><td><code>tl.program_id(axis)</code></td><td>获取当前程序ID</td><td>pid = tl.program_id(0)</td></tr>
+<tr><td><code>tl.arange(start, end)</code></td><td>创建范围向量</td><td>offs = tl.arange(0, BLOCK)</td></tr>
+<tr><td><code>tl.load(ptr, mask)</code></td><td>从内存加载数据</td><td>x = tl.load(ptr + offs)</td></tr>
+<tr><td><code>tl.store(ptr, val, mask)</code></td><td>存储数据到内存</td><td>tl.store(ptr + offs, y)</td></tr>
+<tr><td><code>tl.dot(a, b)</code></td><td>矩阵乘法</td><td>c = tl.dot(a, b)</td></tr>
+<tr><td><code>tl.softmax(x)</code></td><td>Softmax</td><td>p = tl.softmax(qk)</td></tr>
+<tr><td><code>tl.max(x, axis)</code></td><td>求最大值</td><td>m = tl.max(x, axis=0)</td></tr>
+<tr><td><code>tl.sum(x, axis)</code></td><td>求和</td><td>s = tl.sum(x, axis=0)</td></tr>
+</table>
+
+<h3>3.3 实战：向量加法</h3>
+<pre><code><span class="keyword">import</span> triton
+<span class="keyword">import</span> triton.language <span class="keyword">as</span> tl
+
+<span class="keyword">@triton.jit</span>
+<span class="keyword">def</span> vec_add_kernel(
+    a_ptr, b_ptr, c_ptr,  <span class="comment"># 指针</span>
+    n,                      <span class="comment"># 向量长度</span>
+    BLOCK_SIZE: tl.constexpr,  <span class="comment"># 编译时常量</span>
+):
+    <span class="comment"># 获取当前block的ID</span>
+    pid = tl.program_id(axis=0)
+    <span class="comment"># 计算当前block处理的元素偏移</span>
+    offsets = pid * BLOCK_SIZE + tl.arange(<span class="string">0</span>, BLOCK_SIZE)
+    <span class="comment"># 创建mask防止越界</span>
+    mask = offsets < n
+    <span class="comment"># 从全局内存加载数据</span>
+    a = tl.load(a_ptr + offsets, mask=mask)
+    b = tl.load(b_ptr + offsets, mask=mask)
+    <span class="comment"># 计算</span>
+    c = a + b
+    <span class="comment"># 写回全局内存</span>
+    tl.store(c_ptr + offsets, c, mask=mask)
+
+<span class="comment"># 调用</span>
+n = 1000000
+BLOCK_SIZE = 1024
+grid = (triton.cdiv(n, BLOCK_SIZE),)
+vec_add_kernel[grid](a, b, c, n, BLOCK_SIZE)</code></pre>
+
+<h3>3.4 实战：矩阵乘法</h3>
+<pre><code><span class="keyword">@triton.jit</span>
+<span class="keyword">def</span> matmul_kernel(
+    A, B, C, M, N, K,
+    BLOCK_M: tl.constexpr,  <span class="comment"># 如 128</span>
+    BLOCK_N: tl.constexpr,  <span class="comment"># 如 128</span>
+    BLOCK_K: tl.constexpr,  <span class="comment"># 如 32</span>
+):
+    <span class="comment"># 2D program: (pid_m, pid_n)</span>
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    <span class="comment"># 计算当前block的C矩阵范围</span>
+    offs_m = pid_m * BLOCK_M + tl.arange(<span class="string">0</span>, BLOCK_M)
+    offs_n = pid_n * BLOCK_N + tl.arange(<span class="string">0</span>, BLOCK_N)
+    offs_k = tl.arange(<span class="string">0</span>, BLOCK_K)
+
+    <span class="comment"># 初始化累加器</span>
+    acc = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+
+    <span class="comment"># 沿K维度循环</span>
+    <span class="keyword">for</span> k <span class="keyword">in</span> range(<span class="string">0</span>, K, BLOCK_K):
+        <span class="comment"># 加载A和B的tile</span>
+        a = tl.load(A + offs_m[:, None] * K + (k + offs_k[None, :]))
+        b = tl.load(B + (k + offs_k[:, None]) * N + offs_n[None, :])
+        <span class="comment"># 矩阵乘法累加 (自动利用Tensor Core)</span>
+        acc += tl.dot(a, b)
+
+    <span class="comment"># 写回结果</span>
+    tl.store(C + offs_m[:, None] * N + offs_n[None, :], acc)</code></pre>
+
+<h3>3.5 Triton 编译流程</h3>
+<div class="ascii">Triton 的编译流程:
+
+  Python 代码 (@triton.jit)
+       │
+       ▼
+  Triton IR (中间表示)
+       │  ← 自动tiling、内存优化
+       ▼
+  LLVM IR
+       │  ← LLVM后端优化
+       ▼
+  PTX (NVIDIA汇编)
+       │
+       ▼
+  CUBIN (GPU二进制)
+
+  关键: Triton 在 IR 层面自动做了很多优化:
+    • 自动选择合并访问模式
+    • 自动处理 Shared Memory 分配
+    • 自动 pipelining (数据预取)</div>
+
+<h3>3.6 自动调优 (Autotuning)</h3>
+<pre><code><span class="keyword">@triton.autotune</span>(
+    configs=[
+        triton.Config({'BLOCK_M': <span class="string">128</span>, 'BLOCK_N': <span class="string">256</span>, 'BLOCK_K': <span class="string">64</span>}, num_stages=<span class="string">3</span>),
+        triton.Config({'BLOCK_M': <span class="string">256</span>, 'BLOCK_N': <span class="string">128</span>, 'BLOCK_K': <span class="string">32</span>}, num_stages=<span class="string">4</span>),
+        triton.Config({'BLOCK_M': <span class="string">64</span>,  'BLOCK_N': <span class="string">256</span>, 'BLOCK_K': <span class="string">32</span>}, num_stages=<span class="string">3</span>),
+    ],
+    key=['M', 'N', 'K'],  <span class="comment"># 根据矩阵尺寸选择最优config</span>
+)
+<span class="keyword">@triton.jit</span>
+<span class="keyword">def</span> matmul_kernel(A, B, C, M, N, K, ...):
+    ...</code></pre>
+
+<h2>四、技术细节</h2>
+
+<h3>4.1 Triton vs CUDA vs cuDNN</h3>
+<table>
+<tr><th>对比</th><th>CUDA</th><th>Triton</th><th>cuDNN</th></tr>
+<tr><td>编程语言</td><td>C/C++</td><td>Python</td><td>C API</td></tr>
+<tr><td>学习曲线</td><td>陡峭</td><td>平缓</td><td>中等</td></tr>
+<tr><td>灵活性</td><td>最高</td><td>高</td><td>低(预定义算子)</td></tr>
+<tr><td>性能</td><td>最高(手动优化)</td><td>接近CUDA(90-95%)</td><td>很高(已优化)</td></tr>
+<tr><td>开发速度</td><td>慢</td><td>快</td><td>最快(调用API)</td></tr>
+<tr><td>适用场景</td><td>极致性能优化</td><td>自定义算子开发</td><td>标准算子(GEMM等)</td></tr>
+</table>
+
+<h3>4.2 Triton 的限制</h3>
+<table>
+<tr><th>限制</th><th>描述</th><th>解决方法</th></tr>
+<tr><td>不支持动态控制流</td><td>if/else 受限</td><td>用 tl.where 替代</td></tr>
+<tr><td>Shared Memory 有限</td><td>自动管理，无法精细控制</td><td>调整 tile size</td></tr>
+<tr><td>不支持递归</td><td>kernel 不能递归调用</td><td>拆分多个 kernel</td></tr>
+<tr><td>AMD 支持有限</td><td>ROCm 后端不完全</td><td>等社区完善</td></tr>
+</table>
+
+<h2>五、使用场景</h2>
+程中做出更合理的技术选择和优化决策。</p>
+
+<h3>五、使用场景</h3>
+<ul>
+<li><strong>自定义 Attention kernel</strong>：FlashAttention 的 Triton 实现</li>
+<li><strong>自定义激活函数</strong>：SwiGLU、GeGLU 等融合实现</li>
+<li><strong>量化/反量化 kernel</strong>：FP8/INT4 的高效转换</li>
+<li><strong>Loss 函数</strong>：自定义损失函数的高效实现</li>
+<li><strong>稀疏计算</strong>：稀疏矩阵乘法的自定义 kernel</li>
+</ul>
+
+<h2>六、实际效果</h2>
+<h3>六、实际效果</h3>
+<table>
+<tr><th>Kernel</th><th>PyTorch</th><th>Triton</th><th>手写CUDA</th></tr>
+<tr><td>向量加法</td><td>1×</td><td>0.95×</td><td>1×</td></tr>
+<tr><td>矩阵乘法</td><td>1×</td><td>0.90-0.95×</td><td>1×(cuBLAS)</td></tr>
+<tr><td>Softmax</td><td>1×</td><td>1.5-2×</td><td>1.5-2×</td></tr>
+<tr><td>FlashAttention</td><td>N/A</td><td>0.90×</td><td>1×(原版)</td></tr>
+</table>
+
+<h3>📖 术语速查表</h3>
+<dl class="glossary">
+<dt>Triton</dt><dd>OpenAI开发的Python级GPU编程框架</dd>
+<dt>@triton.jit</dt><dd>Triton的JIT编译装饰器</dd>
+<dt>tl.constexpr</dt><dd>编译时常量，用于tile size等参数</dd>
+<dt>program_id</dt><dd>当前并行程序的ID(类似CUDA的blockIdx)</dd>
+<dt>autotuning</dt><dd>自动搜索最优kernel配置的技术</dd>
+</dl>
+
+
+<div class="exercise"><strong>✏️ 练习题：</strong>
+<ol>
+<li>用 Triton 实现一个融合的 SiLU 激活函数 kernel：y = x * sigmoid(x)。</li>
+<li>Triton 的 matmul kernel 为什么能自动利用 Tensor Core？tl.dot() 底层做了什么？</li>
+<li>对比 Triton 和手写 CUDA 实现 Softmax 的代码量和性能差异。</li>
+</ol></div>
+
+<div class="warn"><strong>⚠️ 常见误区：Triton性能和CUDA一样好：</strong>对于简单的element-wise操作(向量加法、激活函数)，Triton确实能达到95-100%的CUDA性能。但对于复杂的GEMM kernel，Triton通常只有85-95%。原因：① 无法精确控制寄存器分配；② Shared Memory的swizzle模式有限；③ 无法实现Warp Specialization。如果追求极致性能，最终还是需要手写CUDA或用CUTLASS。</div>
+
+<div class="warn"><strong>⚠️ 常见误区：Triton的autotuning是免费的：</strong>autotuning第一次运行非常慢——要尝试所有配置组合并benchmark。对于matmul可能有几十种(BLOCK_M, BLOCK_N, BLOCK_K, num_stages, num_warps)组合。建议：① 开发时用少量配置快速迭代；② 生产环境中预热时执行autotuning并缓存结果。</div>
+
+<div class="deep"><strong>🔬 深入探讨：Triton编译器的IR优化</strong><br><br>
+Triton编译器在Python→PTX的转换过程中做了大量优化：<br>
+① <strong>指针分析</strong>：分析load/store的指针表达式，判断访问模式是否连续，自动生成合并访问的load指令。<br>
+② <strong>Shared Memory推断</strong>：当tl.dot(a, b)的操作数来自全局内存时，自动插入Shared Memory分配和copy操作。<br>
+③ <strong>Pipeline调度</strong>：Triton 2.0+支持自动software pipelining——在等待一个tile的全局内存加载时，计算上一个tile。通过num_stages参数控制流水线深度。</div>
+
+<div class="deep"><strong>🔬 深入探讨：tl.dot()底层调用了什么？</strong><br><br>
+<code>acc += tl.dot(a, b)</code>编译器根据dtype选择底层指令：<br>
+• FP16/BF16 → <code>mma.sync.aligned.m16n8k16</code><br>
+• FP8 → <code>mma.sync.aligned.m16n8k32</code><br>
+• INT8 → <code>mma.sync.aligned.m16n8k32</code><br>
+Triton自动处理数据的swizzle和layout转换，确保Tensor Core指令正确执行。但你<strong>无法控制具体的MMA指令选择</strong>。</div>
+
+<div class="ascii">Triton 编译优化流水线:
+
+  Python (@triton.jit)
+       │
+       ▼
+  Triton IR (中间表示)
+       │  优化1: 指针分析 → 识别合并访问模式
+       │  优化2: 自动Shared Memory分配 (for tl.dot)
+       │  优化3: 内存访问重排序 (减少bank conflict)
+       │  优化4: 循环展开和流水线化
+       ▼
+  Triton GPU IR (GPU特定IR)
+       │  优化5: Warp级调度
+       │  优化6: 寄存器分配
+       ▼
+  LLVM IR → PTX → CUBIN
+
+  与CUDA编译对比:
+  CUDA:   C++ → NVCC → PTX → CUBIN (手动优化)
+  Triton: Python → Triton IR → LLVM IR → PTX → CUBIN (自动优化)</div>
+
+<table>
+<tr><th>Triton调试技巧</th><th>方法</th><th>示例</th></tr>
+<tr><td>打印中间值</td><td>tl.static_print 或 assert</td><td>assert tl.max(x) &lt; 100</td></tr>
+<tr><td>查看生成的PTX</td><td>Triton JIT缓存目录</td><td>~/.triton/cache/</td></tr>
+<tr><td>单block调试</td><td>grid=(1,)只启动一个block</td><td>kernel[(1,)](args)</td></tr>
+<tr><td>性能分析</td><td>triton.testing.do_bench</td><td>ms = do_bench(lambda: ...)</td></tr>
+<tr><td>autotuning可视化</td><td>设置verbose=True</td><td>@triton.autotune(..., verbose=True)</td></tr>
+</table>
+
+<div class="tip"><strong>💡 通俗类比：Triton像自动挡汽车：</strong>手写CUDA像开手动挡——你能精确控制换挡时机和油门深度，但需要很高技术。Triton像自动挡——大部分情况下(90-95%)性能接近手动挡，学习成本低很多。但如果你是F1赛车手(极致性能需求)，还是需要手动挡。</div>
+
+<div class="ascii">Triton vs CUDA 代码量对比 (Softmax kernel):
+
+  CUDA (~50行):
+  __global__ void softmax(float* x, int n) {
+    extern __shared__ float smem[];
+    // 1. 找最大值 (reduction)
+    // 2. 计算exp和sum (reduction)
+    // 3. 归一化
+    // 每步都需要 warp reduction + __syncthreads
+  }
+
+  Triton (~10行):
+  @triton.jit
+  def softmax(x_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    x = tl.load(x_ptr + offs, mask=offs < n)
+    x = x - tl.max(x, axis=0)
+    num = tl.exp(x)
+    den = tl.sum(num, axis=0)
+    out = num / den
+    tl.store(x_ptr + offs, out, mask=offs < n)</div>
+
+</div>
+<div class="footer"><p>🖥️ GPU架构与算子 · 05 · Triton编程入门</p><p><a href="index.html">返回目录</a> · <a href="../index.html">返回总览</a></p></div>
+
+<div class="tip"><strong>向前串联：</strong>
+一、背景与动机的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

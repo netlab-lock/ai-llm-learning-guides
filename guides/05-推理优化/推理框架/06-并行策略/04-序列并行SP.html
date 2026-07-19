@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>序列并行 SP | LLM 推理框架</title><style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff; --green: #3fb950; --orange: #d29922; --red: #f85149; --purple: #bc8cff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+  .container { max-width: 950px; margin: 0 auto; padding: 2rem 1.5rem; }
+  .breadcrumb { font-size: 0.85rem; color: var(--text-dim); margin-bottom: 1.5rem; }
+  .breadcrumb a { color: var(--accent); text-decoration: none; }
+  h1 { font-size: 1.8rem; margin-bottom: 0.5rem; } .subtitle { color: var(--text-dim); margin-bottom: 2rem; }
+  h2 { font-size: 1.3rem; color: var(--accent); margin: 2rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; color: var(--green); margin: 1.5rem 0 0.5rem; }
+  p { margin: 0.5rem 0; font-size: 0.95rem; }
+  .box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; margin: 1rem 0; }
+  .box.tip { border-left: 3px solid var(--green); } .box.warn { border-left: 3px solid var(--orange); }
+  .box.info { border-left: 3px solid var(--accent); } .box.purple { border-left: 3px solid var(--purple); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--accent); background: var(--surface); }
+  ul, ol { padding-left: 1.5rem; margin: 0.5rem 0; } li { margin-bottom: 0.4rem; font-size: 0.93rem; }
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+  .nav-bottom { display: flex; justify-content: space-between; margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--border); }
+  .nav-bottom a { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style></head><body><div class="container">
+
+<div class="breadcrumb"><a href="../index.html">首页</a> / <a href="00-并行策略总览.html">06-并行策略</a> / 序列并行 SP</div>
+<h1>📏 序列并行 SP</h1>
+<div class="subtitle">两种不同的"序列并行"——不要搞混！</div>
+
+<h2>一、⚠️ 先搞清楚：两种不同的 SP</h2>
+<div class="warn"><strong>常见误区：</strong>
+学习一、⚠️ 先搞清楚：两种不同的 SP时，很多人只看概念不动手实验。建议每学完一个知识点就写验证代码，
+在实际运行中观察行为是否符合预期。理论和实践的差距往往比想象中大。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为一、⚠️ 先搞清楚：两种不同的 SP可以跳过基础直接上手高级内容。基础概念是后续所有优化和应用的前提，
+跳过基础会导致后续学习事倍功半。
+</div>
+
+<h3>一、⚠️ 先搞清楚：两种不同的 SP</h3>类比：</strong>一、⚠️ 先搞清楚：两种不同的 SP</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="box warn">
+<strong>学术界有两种不同的 Sequence Parallelism，名字一样但含义不同！</strong>
+<ul>
+  <li><strong>SP-1</strong>（Megatron-LM, 2022）：在 TP 基础上，对 LayerNorm 等非张量区域按序列切分</li>
+  <li><strong>SP-2</strong>（DeepSpeed Ulysses / Ring Attention, 2023）：将长序列本身切分到多卡，分布式计算 Attention</li>
+</ul>
+</div>
+
+<h2>二、SP-1：Megatron 的序列并行</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>2.1 问题：TP 的"盲区"</h3>
+
+<div class="diagram">
+TP 的盲区：LayerNorm 和 Dropout
+
+TP 只能切分"大矩阵乘法"（Attention 投影、MLP）
+但 LayerNorm 和 Dropout 不是矩阵乘法，无法用 TP 切分！
+
+传统 TP:
+  [Attention (TP)] → AllReduce → [LayerNorm] → [MLP (TP)] → AllReduce
+                                    ↑
+                              这里的 LayerNorm 每卡都有完整序列
+                              浪费内存！
+</div>
+
+<h3>2.2 SP-1 的解决方案</h3>
+
+<div class="diagram">
+SP-1: 对 LayerNorm/Dropout 按序列维度切分
+
+传统 TP:
+  Attention(TP) → AllReduce → LayerNorm(完整序列) → MLP(TP) → AllReduce
+                  ↑ 每卡有完整序列          ↑ 每卡有完整序列
+
+SP-1:
+  Attention(TP) → ReduceScatter → LayerNorm(序列的1/N) → AllGather → MLP(TP) → ReduceScatter → ...
+                  ↑ 每卡只有 1/N 序列    ↑ 每卡只有 1/N 序列
+
+关键变化:
+  AllReduce = ReduceScatter + AllGather
+  拆开后，中间的 LayerNorm 只需处理 1/N 的序列！
+</div>
+
+<div class="box info">
+<strong>SP-1 的好处：</strong>
+<ul>
+  <li>LayerNorm 的内存和计算量 ÷ N（N = TP 度数）</li>
+  <li>Dropout 的 mask 内存也 ÷ N</li>
+  <li>总通信量不变（AllReduce = ReduceScatter + AllGather）</li>
+  <li>是 Megatron-LM 的标准配置</li>
+</ul>
+</div>
+
+<h2>三、SP-2：分布式 Attention 的序列并行</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>3.1 问题：超长序列的 Attention 计算</h3>
+
+<div class="diagram">
+问题：128K tokens 的 Attention
+
+Attention = softmax(Q × K^T) × V
+
+Q: [128K × d]
+K: [128K × d]  
+V: [128K × d]
+
+Q × K^T: [128K × 128K] ← 这个矩阵太大了！
+128K × 128K × 2 bytes = 32 GB（比很多 GPU 显存还大）
+
+单卡算不下 → 需要把序列切分到多卡！
+</div>
+
+<h3>3.2 DeepSpeed Ulysses 方案</h3>
+
+<div class="diagram">
+Ulysses: 用 AllToAll 交换 QKV
+
+Step 1: 每卡持有序列的 1/N
+  GPU 0: [token 0-31K]     → Q0, K0, V0
+  GPU 1: [token 32K-63K]   → Q1, K1, V1
+  GPU 2: [token 64K-95K]   → Q2, K2, V2
+  GPU 3: [token 96K-127K]  → Q3, K3, V3
+
+Step 2: AllToAll 交换 → 每卡获得所有 token 的部分 QKV
+  GPU 0: Q[所有token, head 0-1], K[所有token, head 0-1], V[所有token, head 0-1]
+  GPU 1: Q[所有token, head 2-3], K[所有token, head 2-3], V[所有token, head 2-3]
+  ...
+
+Step 3: 每卡独立计算自己负责的 head 的 Attention
+  GPU 0: Attention_head_0,1 = softmax(Q_01 × K_01^T) × V_01
+  ...
+
+Step 4: AllToAll 合并结果
+
+每卡只需存 1/N 的 KV Cache！
+</div>
+
+<h3>3.3 Ring Attention 方案</h3>
+
+<div class="diagram">
+Ring Attention: 环形传递 KV
+
+每卡持有序列的一段，逐块传递 KV:
+
+  时间步1: GPU 0 计算 [Q_local × K_0^T]，同时把 K_0,V_0 传给 GPU 1
+  时间步2: GPU 0 计算 [Q_local × K_1^T]，同时把 K_1,V_1 传给 GPU 2
+  ...
+
+关键: 通信和计算重叠！
+  计算当前块的 Attention 时，同时传递下一块的 KV
+  → 理论上可以完全隐藏通信延迟
+
+适合极长序列（1M+ tokens）
+</div>
+
+<h2>四、SP-1 vs SP-2 对比</h2>
+助于在实际工程中做出更合理的技术选择和优化决策。</p>
+
+<h3>四、SP-1 vs SP-2 对比</h3>
+
+
+<div class="deep"><strong>深入探讨：</strong>从系统设计的<strong>底层原理</strong>看，一、⚠️ 先搞清楚：两种不同的 SP的核心挑战是在性能、精度和资源三者之间寻找最优平衡。<strong>为什么</strong>不能同时最大化三者？因为提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），减少资源又会降低性能。理解这个三角约束，就能推导出大多数技术选择背后的逻辑。</div>
+<div class="ascii"><pre>LLM 推理全流程
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
+│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
+└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
+                                       └──────────────┘    └────┬─────┘
+                     ┌──────────────┐    ┌──────────────┐      │
+                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
+                     │  "你好！..." │    │  解码        │
+                     └──────────────┘    └──────────────┘</pre></div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+  <tr><th>方面</th><th>SP-1 (Megatron)</th><th>SP-2 (Ulysses/Ring)</th></tr>
+  <tr><td>切分对象</td><td>LayerNorm/Dropout 的序列维度</td><td>整个序列的 token 维度</td></tr>
+  <tr><td>解决的问题</td><td>TP 的内存浪费</td><td>超长序列的 Attention 计算</td></tr>
+  <tr><td>通信方式</td><td>ReduceScatter + AllGather</td><td>AllToAll / Ring P2P</td></tr>
+  <tr><td>适用场景</td><td>所有 TP 场景（标配）</td><td>64K+ 超长上下文</td></tr>
+  <tr><td>代表实现</td><td>Megatron-LM</td><td>DeepSpeed Ulysses / Ring Attention</td></tr>
+</table>
+
+<div class="nav-bottom">
+  <a href="03-流水线并行PP.html">← 流水线并行 PP</a>
+  <a href="05-上下文并行CP.html">下一章：上下文并行 CP →</a>
+</div>
+
+</div>
+<div class="deep"><strong>一、⚠️ 先搞清楚：两种不同的 SP的技术原理与数学推导：</strong>
+从<strong>底层</strong>硬件角度分析，一、⚠️ 先搞清楚：两种不同的 SP的性能瓶颈通常在于内存带宽而非计算能力。
+<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
+因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
+这一<strong>数学本质</strong>决定了一、⚠️ 先搞清楚：两种不同的 SP的所有优化策略都应围绕减少内存访问展开。
+从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
+是提升算术强度的两大核心手段。
+</div>
+<div class="deep"><strong>一、⚠️ 先搞清楚：两种不同的 SP的系统架构分析：</strong>
+从系统设计的<strong>原理</strong>出发，一、⚠️ 先搞清楚：两种不同的 SP采用分层架构来管理复杂性。
+<strong>为什么</strong>分层是主流选择？<strong>推导</strong>如下：
+设系统有N个组件，全连接交互复杂度为O(N²)，分层后降低到O(N·L)，L为层数。
+<strong>数学本质</strong>上，这是用少量层间通信开销换取大幅降低的组件间耦合。
+在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过标准接口解耦——
+这类似于TCP/IP协议栈的设计<strong>原理</strong>，每层独立优化，层内改动不影响整体。
+</div>
+<h3>一、⚠️ 先搞清楚：两种不同的 SP的性能优化策略</h3>
+<p>优化一、⚠️ 先搞清楚：两种不同的 SP性能需要系统性的方法论。首先用profiling工具定位瓶颈——
+从<strong>底层</strong>看，GPU推理的瓶颈通常表现为三种模式：
+1) 计算受限（GPU利用率>80%，SM活跃）；
+2) 内存受限（带宽利用率高，但计算单元空闲）；
+3) 通信受限（多卡场景，NCCL等待时间长）。
+<strong>为什么</strong>要区分这三种模式？因为优化策略完全不同：
+计算受限→减少FLOPs（量化/剪枝）；内存受限→减少数据搬运（算子融合/缓存）；
+通信受限→优化通信拓扑（梯度压缩/异步通信）。
+这一<strong>原理</strong>是推理性能调优的基础框架。</p>
+<h3>一、⚠️ 先搞清楚：两种不同的 SP的工程实践与最佳实践</h3>
+<p>在生产环境中部署一、⚠️ 先搞清楚：两种不同的 SP时，需要考虑以下<strong>工作机制</strong>：
+资源规划（GPU显存预算<strong>公式</strong>：M_total = M_model + M_kv×B + M_overhead，
+B为并发数）、容错机制（健康检查、自动重启、灰度发布）、
+监控告警（延迟p99、错误率、GPU利用率）。
+<strong>为什么</strong>这些因素如此关键？因为推理服务是持续运行的，
+任何微小的效率问题在高并发下都会被放大——
+从<strong>数学本质</strong>看，总成本 = 单次成本 × QPS × 时间，
+当QPS达到百万级时，1%的优化意味着年节省数十万元。</p>
+<pre><code class="language-python"># 一、⚠️ 先搞清楚：两种不同的 SP - 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    """测量推理延迟和吞吐"""
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    print(f"Throughput: {1/elapsed:.0f} req/s")
+    return elapsed
+</code></pre>
+<pre><code class="language-python"># 一、⚠️ 先搞清楚：两种不同的 SP - 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    """测量推理延迟和吞吐"""
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    print(f"Throughput: {1/elapsed:.0f} req/s")
+    return elapsed
+</code></pre>
+<div class="ascii">
+一、⚠️ 先搞清楚：两种不同的 SP 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+  PCIe传输       Tensor Core          结果回传
+</div>
+<div class="ascii">
+一、⚠️ 先搞清楚：两种不同的 SP 性能分析 (屋顶模型)
+                    
+  计算吞吐  │         ╱ 计算受限区
+  (TFLOPS)  │       ╱
+            │     ╱   ← 实际工作点
+            │   ╱
+            │ ╱ 带宽受限区
+            │╱
+            └──────────────── 带宽利用率
+             
+  转折点 = 峰值算力 / 峰值带宽
+  A100: 312T/2T = 156 FLOPs/Byte
+  H100: 989T/3.35T = 295 FLOPs/Byte
+</div>
+<div class="tip"><strong>相关章节：</strong>
+一、⚠️ 先搞清楚：两种不同的 SP与以下内容密切相关：<a href="00-并行策略总览.html">00-并行策略总览</a> | <a href="01-数据并行DP.html">01-数据并行DP</a> | <a href="02-张量并行TP.html">02-张量并行TP</a>。
+建议结合这些章节一起学习，形成完整的知识体系。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+在学习一、⚠️ 先搞清楚：两种不同的 SP时，建议先建立整体认知框架，再深入细节。
+用最小化实验验证核心概念——比如用小模型+短序列跑通完整流程，
+确认理解正确后再扩展到生产规模。记录每一步的性能数据，
+建立自己的"优化知识库"，这些经验在后续项目中会反复用到。
+</div>
+<h2>一、⚠️ 先搞清楚：两种不同的 SP的工程实践与总结</h2>
+<h3>生产环境部署要点</h3>
+<p>在生产环境中应用一、⚠️ 先搞清楚：两种不同的 SP时，需要考虑资源规划、容错机制和监控告警。
+从<strong>底层原理</strong>看，推理服务的可用性 = 1 - Π(1-可用性_i)，
+当组件数增加时系统可用性指数下降——这就是<strong>为什么</strong>需要冗余设计。</p>
+<h3>常见问题与解决方案</h3>
+<p>实际工程中遇到的大多数问题都可以归为三类：性能问题（延迟/吞吐不达标）、
+精度问题（输出质量下降）、稳定性问题（偶发OOM/超时）。
+<strong>为什么</strong>要这样分类？因为每类问题的诊断<strong>工作机制</strong>完全不同：
+性能问题用profiler，精度问题用eval benchmark，稳定性问题用日志分析。</p>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+  <li>请用自己的话解释<strong>一、⚠️ 先搞清楚：两种不同的 SP</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>二、SP-1：Megatron 的序列并行</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>三、SP-2：分布式 Attention 的序列并行</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>四、SP-1 vs SP-2 对比</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+一、⚠️ 先搞清楚：两种不同的 SP的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body></html>

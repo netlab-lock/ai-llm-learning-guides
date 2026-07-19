@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>05 代码修复Agent | 代码生成专项</title>
+<style>:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--heading:#f0f6fc;--blue:#58a6ff;--green:#3fb950;--yellow:#d29922;--red:#f85149;--purple:#a371f7;--cyan:#39d2c0}*{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.8;font-size:16px}.container{max-width:900px;margin:0 auto;padding:2rem 1.5rem}h1{color:var(--blue);font-size:2rem;margin:1rem 0 .5rem}h2{color:var(--heading);font-size:1.5rem;margin:2rem 0 .8rem;padding-left:.8rem;border-left:4px solid var(--blue)}h3{color:var(--cyan);font-size:1.2rem;margin:1.5rem 0 .5rem}p{margin:.6rem 0}a{color:var(--blue);text-decoration:none}code{background:#21262d;color:#79c0ff;padding:.15em .4em;border-radius:4px;font-size:.9em}pre{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;overflow-x:auto;margin:1rem 0;font-size:.9em;line-height:1.6}pre code{background:none;padding:0}table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9em}th,td{border:1px solid var(--border);padding:.5rem .8rem;text-align:left}th{background:#161b22;color:var(--blue);font-weight:600}tr:nth-child(even){background:rgba(22,27,34,.5)}.nav{background:var(--card);border-bottom:1px solid var(--border);padding:.6rem 1.5rem;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.nav a{color:var(--blue);font-size:.9rem}.nav span{color:var(--heading);font-weight:600;font-size:.95rem}.footer{text-align:center;margin-top:3rem;padding:1.5rem;border-top:1px solid var(--border);color:#8b949e;font-size:.85rem}.tip,.warn,.exercise,.deep{border-radius:8px;padding:1rem 1.2rem;margin:1rem 0}.tip{background:#0d1d30;border-left:4px solid var(--blue)}.warn{background:#2d1b00;border-left:4px solid var(--yellow)}.exercise{background:#0d2818;border-left:4px solid var(--green)}.deep{background:#1a1024;border-left:4px solid var(--purple)}.ascii{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;font-family:'Cascadia Code','Fira Code',monospace;font-size:.85em;line-height:1.5;white-space:pre;overflow-x:auto;margin:1rem 0}.badge{display:inline-block;padding:.15em .6em;border-radius:4px;font-size:.8em;font-weight:600}.badge-blue{background:#0d1d30;color:var(--blue)}.badge-yellow{background:#2d1b00;color:var(--yellow)}.badge-cyan{background:#0d2818;color:var(--cyan)}.svg-diagram{margin:1rem 0;text-align:center}.next-prev{display:flex;justify-content:space-between;margin:2rem 0}</style>
+</head>
+<body>
+<div class="nav"><a href="04-代码评测体系.html">&larr; 04</a><span>模块 05 · 代码修复</span><a href="06-代码LLM前沿方向.html">06 &rarr;</a></div>
+<div class="container">
+
+<h1>🔧 05 · 代码修复 Agent</h1>
+<p><span class="badge badge-yellow">进阶</span></p>
+
+<h2>1. SWE-bench 的挑战</h2>
+<p><a href="https://swebench.com">SWE-bench</a> 是代码修复的标准评测：给定 GitHub Issue 描述，模型需要生成 Patch 修复代码。SWE-bench 已成为衡量代码智能体能力的黄金标准，它模拟了真实软件开发中最常见的场景——根据 Bug 报告修复代码。SWE-bench 的核心难点在于：(1) 需要理解自然语言描述的语义；(2) 在数万行代码仓库中精准定位问题；(3) 生成与项目风格一致的修复代码；(4) 修复不能引入新的回归问题。</p>
+
+<div class="ascii">SWE-bench 任务流程:
+
+  输入:
+    Issue: "在 Django 中，当使用 SQLite 时，
+            DateTimeField 的默认值解析错误"
+    仓库: django/django
+    相关文件: django/db/models/fields/__init__.py
+
+  输出:
+    Patch: 修改 DateTimeField 的 to_python 方法
+    --- a/django/db/models/fields/__init__.py
+    +++ b/django/db/models/fields/__init__.py
+    @@ -1234,7 +1234,7 @@ class DateTimeField:
+    -    def to_python(self, value):
+    +    def to_python(self, value):  # 修复默认值解析
+
+  评测: 运行仓库的测试套件，检查是否通过
+
+  关键约束:
+    - 不能访问互联网
+    - 只能修改代码,不能修改测试
+    - 有时间/步数限制
+    - 必须在原始仓库状态下修复</div>
+
+<h3>1.1 SWE-bench 数据集构成</h3>
+<p>SWE-bench 包含来自 12 个 Python 开源项目的真实 Pull Request，每个样本包含 Issue 描述、相关的文件上下文和需要通过的测试用例。SWE-bench Lite 是一个更小的子集（300 个样本），用于快速评估。每个样本的难度取决于：(1) Bug 涉及的文件数量；(2) 需要理解的代码上下文深度；(3) 修复的复杂度。</p>
+
+<table>
+<tr><th>数据集</th><th>样本数</th><th>项目数</th><th>特点</th><th>难度</th></tr>
+<tr><td>SWE-bench Full</td><td>2294</td><td>12</td><td>完整评测集</td><td>高</td></tr>
+<tr><td>SWE-bench Lite</td><td>300</td><td>12</td><td>快速评估子集</td><td>中</td></tr>
+<tr><td>SWE-bench Verified</td><td>500</td><td>12</td><td>人工验证正确性</td><td>中-高</td></tr>
+<tr><td>SWE-bench Multimodal</td><td>175</td><td>多</td><td>含截图/IU问题</td><td>极高</td></tr>
+</table>
+
+<h3>1.2 为什么 SWE-bench 如此困难？</h3>
+<p>SWE-bench 的核心挑战不是"写代码"，而是"理解代码库"。模型需要：(1) 从 Issue 描述中提取关键信息（哪些功能出错、什么条件触发）；(2) 在庞大代码库中找到问题根源——可能涉及多个文件的交互；(3) 理解现有代码的设计意图，确保修复不破坏原有功能；(4) 生成符合项目编码规范的代码。这与简单的代码生成有本质区别，因为修复需要深入理解现有代码的上下文。</p>
+
+<div class="warn"><strong>SWE-bench 评测陷阱：</strong>1) "通过测试"不等于"正确修复"——测试覆盖可能不完整，某些修复可能绕过了测试但没有真正解决问题；2) SWE-bench Lite 的样本偏简单——在 Lite 上 50% 的解决率，在 Full 上可能只有 20%；3) 成本不可忽视——完整评测一次可能花费数百美元的 API 费用，需要在准确率和成本间取舍。</div>
+
+<h2>2. Agentless 方法</h2>
+<p><a href="https://arxiv.org/abs/2407.01489">Agentless</a> 用简单的 3 阶段 Pipeline 修复代码，无需 Agent 循环。它的核心理念是：大多数代码修复可以分解为三个独立的步骤，每个步骤用 LLM 完成，无需复杂的 Agent 框架。这种方法的优雅之处在于它的简洁性——不需要定义工具集、不需要管理 Agent 状态、不需要设计重试逻辑。</p>
+
+<div class="svg-diagram"><svg viewBox="0 0 700 660" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .svg-diagram text { font-family: 'Cascadia Code','Fira Code',monospace; }
+    .svg-diagram .lbl { font-size:13px; fill:#fbbf24; font-weight:700 }
+    .svg-diagram .st1 { font-size:12.5px; fill:#22d3ee; font-weight:700 }
+    .svg-diagram .st2 { font-size:12.5px; fill:#34d399; font-weight:700 }
+    .svg-diagram .st3 { font-size:12.5px; fill:#a78bfa; font-weight:700 }
+    .svg-diagram .tx { font-size:12px; fill:#c9d1d9 }
+    .svg-diagram .b1 { fill:#161b22; stroke:#22d3ee; stroke-width:2; rx:8 }
+    .svg-diagram .b2 { fill:#161b22; stroke:#34d399; stroke-width:2; rx:8 }
+    .svg-diagram .b3 { fill:#161b22; stroke:#a78bfa; stroke-width:2; rx:8 }
+    .svg-diagram .ar { stroke:#58a6ff; stroke-width:2; fill:none; marker-end:url(#ah1) }
+  </style>
+  <defs><marker id="ah1" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#58a6ff"/></marker></defs>
+  <text x="350" y="24" text-anchor="middle" class="lbl">Issue 描述</text>
+  <line x1="350" y1="36" x2="350" y2="56" class="ar"/>
+  <rect x="50" y="60" width="600" height="195" class="b1"/>
+  <text x="350" y="84" text-anchor="middle" class="st1">Stage 1: 定位 (Localization)</text>
+  <text x="78" y="112" class="tx">1. 文件级定位:</text>
+  <text x="98" y="132" class="tx">- Embedding 检索相关文件</text>
+  <text x="98" y="152" class="tx">- 分析 import 关系</text>
+  <text x="98" y="172" class="tx">- 输出: Top-5 相关文件</text>
+  <text x="78" y="198" class="tx">2. 函数级定位:</text>
+  <text x="98" y="218" class="tx">- 分析文件中的函数/类, 与 Issue 描述匹配</text>
+  <text x="98" y="238" class="tx">- 输出: Top-3 相关函数</text>
+  <text x="78" y="252" class="tx">3. 行级定位: 精确确定修改位置</text>
+  <line x1="350" y1="255" x2="350" y2="278" class="ar"/>
+  <rect x="50" y="282" width="600" height="140" class="b2"/>
+  <text x="350" y="306" text-anchor="middle" class="st2">Stage 2: 修复 (Repair)</text>
+  <text x="78" y="332" class="tx">LLM 生成 Patch:</text>
+  <text x="98" y="352" class="tx">输入: Issue + 定位的代码上下文</text>
+  <text x="98" y="372" class="tx">输出: unified diff Patch</text>
+  <text x="78" y="400" class="tx">多次采样: 生成 5-10 个候选 Patch</text>
+  <line x1="350" y1="422" x2="350" y2="448" class="ar"/>
+  <rect x="50" y="452" width="600" height="170" class="b3"/>
+  <text x="350" y="476" text-anchor="middle" class="st3">Stage 3: 验证 (Validation)</text>
+  <text x="78" y="504" class="tx">对每个候选 Patch:</text>
+  <text x="98" y="524" class="tx">1. 应用 Patch 到代码</text>
+  <text x="98" y="544" class="tx">2. 运行相关测试</text>
+  <text x="98" y="564" class="tx">3. 选择通过测试的 Patch</text>
+  <text x="78" y="594" class="tx">如果多个通过 → 选择最小改动的</text>
+  <text x="78" y="614" class="tx">如果都失败 → 回退到 Stage 2</text>
+</svg></div>
+
+<h3>2.1 Agentless 的关键创新</h3>
+<ul>
+<li><strong>无 Agent 循环</strong>：不需要 LLM 自主决定下一步行动，避免了 Agent 的不确定性</li>
+<li><strong>确定性流程</strong>：定位→修复→验证，每步都是确定性的，可复现性强</li>
+<li><strong>低成本</strong>：SWE-bench Lite ~32%，成本仅 $0.70，远低于 Agent 方法</li>
+<li><strong>分层定位</strong>：文件级→函数级→行级，逐层缩小范围</li>
+</ul>
+
+<h3>2.2 Agentless 定位算法详解</h3>
+<p>Agentless 的定位阶段采用了"自顶向下"的策略：首先用 Embedding 检索找到最相关的文件（文件级），然后在这些文件中用 LLM 识别最相关的函数（函数级），最后精确定位到需要修改的行。这种分层策略的效率远高于直接让 LLM 分析整个代码库。</p>
+
+<div class="ascii">Agentless 分层定位过程:
+
+  ┌─────────────────────────────────────────────┐
+  │  代码仓库 (100+ 文件)                        │
+  └────────────────┬────────────────────────────┘
+                   │ Embedding 检索 (cosine similarity)
+                   ▼
+  ┌─────────────────────────────────────────────┐
+  │  Top-5 文件                                  │
+  │  1. models/fields/__init__.py  (sim: 0.89)  │
+  │  2. db/backends/base/operations.py (0.76)   │
+  │  3. db/models/lookups.py        (0.71)      │
+  └────────────────┬────────────────────────────┘
+                   │ LLM 分析 (理解文件内容)
+                   ▼
+  ┌─────────────────────────────────────────────┐
+  │  Top-3 函数                                  │
+  │  1. DateTimeField.to_python()  (相关度:高)   │
+  │  2. DateTimeField.get_prep_value() (中)      │
+  │  3. DateTimeField.value_to_string() (低)     │
+  └────────────────┬────────────────────────────┘
+                   │ 精确行定位
+                   ▼
+  ┌─────────────────────────────────────────────┐
+  │  修改位置: __init__.py L1234-1240            │
+  │  + 添加异常处理逻辑                           │
+  └─────────────────────────────────────────────┘</div>
+
+<h3>2.3 Agentless 修复生成策略</h3>
+<p>在定位完成后，Agentless 用 LLM 生成 unified diff 格式的 Patch。关键技巧包括：(1) 提供足够的上下文（函数签名、相关 import、类定义）；(2) 使用 structured output 确保生成合法的 diff 格式；(3) 多次采样（k=5-10）生成候选 Patch，增加命中概率。</p>
+
+<pre><code># Agentless 修复生成的 Prompt 结构
+repair_prompt = f"""
+你是一个专业的代码修复专家。根据以下 Issue 描述和代码上下文，
+生成一个 unified diff 格式的 Patch 来修复这个 Bug。
+
+## Issue 描述
+{issue_description}
+
+## 相关文件
+### {file_path}
+{file_content}
+
+## 要求
+1. 只修改必要的代码
+2. 保持原有的代码风格
+3. 确保修复不引入新的 Bug
+4. 输出 unified diff 格式
+
+## 输出格式
+--- a/{file_path}
++++ b/{file_path}
+@@ -{line_start},{context} @@
+ {context_before}
+-{old_line}
++{new_line}
+ {context_after}
+"""</code></pre>
+
+<div class="tip"><strong>Agentless 的适用场景：</strong>Agentless 方法最适合"局部 Bug"——问题出在 1-2 个文件、修复逻辑清晰、不需要探索性调试。对于这类 Bug，Agentless 的效率和成本远优于 Agent 方法。但如果你面对的是"系统性 Bug"（涉及多个模块的交互、需要运行复杂测试、需要理解整体架构），Agent 方法可能更合适。</div>
+
+<h2>3. SWE-agent</h2>
+<p><a href="https://github.com/princeton-nlp/SWE-agent">SWE-agent</a> 是自主代码修复 Agent，它让 LLM 像开发者一样操作代码仓库。与 Agentless 的确定性流程不同，SWE-agent 给 LLM 提供了一组工具（search_file、view_file、edit_file、run_tests 等），让 LLM 自主决定下一步操作。这种方法的优势在于灵活性——Agent 可以根据中间结果调整策略。</p>
+
+<div class="svg-diagram"><svg viewBox="0 0 700 420" xmlns="http://www.w3.org/2000/svg">
+  <style>
+    .svg-diagram text { font-family: 'Cascadia Code','Fira Code',monospace; }
+    .svg-diagram .lbl { font-size:13px; fill:#fbbf24; font-weight:700 }
+    .svg-diagram .st { font-size:13px; fill:#22d3ee; font-weight:700 }
+    .svg-diagram .tx { font-size:12px; fill:#c9d1d9 }
+    .svg-diagram .bx { fill:#161b22; stroke:#22d3ee; stroke-width:2; rx:8 }
+    .svg-diagram .ar { stroke:#58a6ff; stroke-width:2; fill:none; marker-end:url(#ah2) }
+    .svg-diagram .sub1 { font-size:12px; fill:#34d399; font-weight:700 }
+    .svg-diagram .sub2 { font-size:12px; fill:#a78bfa; font-weight:700 }
+  </style>
+  <defs><marker id="ah2" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#58a6ff"/></marker></defs>
+  <text x="350" y="24" text-anchor="middle" class="lbl">Issue 描述</text>
+  <line x1="350" y1="36" x2="350" y2="56" class="ar"/>
+  <rect x="50" y="60" width="600" height="340" class="bx"/>
+  <text x="350" y="88" text-anchor="middle" class="st">SWE-agent</text>
+  <text x="78" y="120" class="sub1">可用动作:</text>
+  <text x="98" y="144" class="tx">- search_file(pattern)</text>
+  <text x="98" y="164" class="tx">- view_file(path)</text>
+  <text x="98" y="184" class="tx">- edit_file(path, old, new)</text>
+  <text x="98" y="204" class="tx">- run_tests(test_path)</text>
+  <text x="98" y="224" class="tx">- git_diff()</text>
+  <text x="78" y="260" class="sub2">执行循环:</text>
+  <text x="98" y="284" class="tx">Thought: 我需要找到相关文件</text>
+  <text x="98" y="304" class="tx">Action: search_file("DateTime")</text>
+  <text x="98" y="324" class="tx">Observation: [文件列表]</text>
+  <text x="98" y="344" class="tx">Thought: 让我查看这个文件</text>
+  <text x="98" y="364" class="tx">Action: view_file("...")</text>
+  <text x="98" y="384" class="tx">...</text>
+</svg></div>
+
+<h3>3.1 SWE-agent 的 ACI 设计</h3>
+<p>SWE-agent 的核心创新是 Agent-Computer Interface (ACI)——为 LLM 设计的代码操作接口。ACI 的设计原则包括：(1) 每个工具的输出必须对 LLM 友好（不能返回 1000 行原始文本）；(2) 工具之间有清晰的组合关系；(3) 错误信息要有建设性（告诉 LLM 下一步该怎么做）。</p>
+
+<pre><code># SWE-agent ACI 工具设计示例
+class SWEAgentACI:
+    """Agent-Computer Interface for code repair"""
+
+    def search_file(self, pattern: str, path: str = ".") -> str:
+        """搜索文件内容，返回匹配行及上下文"""
+        # 关键设计: 返回精简结果, 不是完整 grep 输出
+        results = grep(pattern, path, context=3)
+        if len(results) > 20:
+            return f"找到 {len(results)} 处匹配，显示前 20 处:\n" + results[:20]
+        return results
+
+    def view_file(self, path: str, start: int = 1, end: int = 50) -> str:
+        """查看文件内容，限制行数避免超出上下文"""
+        content = read_file(path, start, end)
+        total_lines = count_lines(path)
+        return f"[{path}] L{start}-{end}/{total_lines}\n{content}"
+
+    def edit_file(self, path: str, old: str, new: str) -> str:
+        """编辑文件，验证修改合法性"""
+        if old not in read_file(path):
+            return f"错误: 在 {path} 中未找到匹配文本，请检查缩进和空格"
+        apply_edit(path, old, new)
+        return f"成功修改 {path}"
+
+    def run_tests(self, test_path: str = None) -> str:
+        """运行测试，返回结构化结果"""
+        result = pytest(test_path, timeout=300)
+        # 只返回失败的测试和简要摘要
+        return format_test_results(result, max_failures=5)</code></pre>
+
+<h3>3.2 SWE-agent 的 Thought-Action-Observation 循环</h3>
+<p>SWE-agent 使用 ReAct 范式：每一步都包含 Thought（思考）、Action（行动）、Observation（观察）。Agent 根据 Issue 描述制定修复计划，逐步执行，根据观察结果调整策略。这个过程类似于人类开发者的调试流程。</p>
+
+<div class="deep"><strong>SWE-agent 的原理分析：</strong>SWE-agent 的核心原理是"工具增强推理"——LLM 本身不具备搜索代码、编辑文件、运行测试的能力，但通过 ACI 接口获得了这些能力。这与人类使用 IDE 的过程类似：你不需要记住整个代码库，但你可以用搜索功能找到相关代码、用编辑器修改、用测试框架验证。关键的数学直觉是：如果 LLM 每一步操作的正确率为 p，那么经过 n 步后整体正确的概率约为 p^n。对于 p=0.8, n=10，整体正确率只有 0.8^10 ≈ 10.7%。这就是为什么减少步骤（Agentless）或提高每步准确率（更好的 ACI）如此重要。</div>
+
+<h2>4. 方案对比</h2>
+<table>
+<tr><th>方案</th><th>类型</th><th>SWE-bench Lite</th><th>成本</th><th>特点</th></tr>
+<tr><td>Agentless</td><td>Pipeline</td><td>~32%</td><td>$0.70</td><td>简单、低成本、可复现</td></tr>
+<tr><td>SWE-agent</td><td>Agent</td><td>~30%</td><td>更高</td><td>灵活、可解释、可调试</td></tr>
+<tr><td>OpenHands</td><td>平台</td><td>可变</td><td>可变</td><td>多任务支持、沙箱执行</td></tr>
+<tr><td>AutoCodeRover</td><td>Agent</td><td>~35%</td><td>中</td><td>AST 分析增强定位</td></tr>
+<tr><td>Moatless</td><td>Pipeline</td><td>~38%</td><td>低</td><td>结构化定位+多轮修复</td></tr>
+</table>
+
+<h3>4.1 Agentless vs Agent：架构差异</h3>
+<p>Agentless 和 SWE-agent 代表了两种截然不同的设计理念。Agentless 认为"确定性流程足够"——把修复分解为定位、生成、验证三个独立步骤，每步用 LLM 但不需要 LLM 做决策。SWE-agent 认为"需要自主探索"——给 LLM 工具和目标，让它自己决定如何到达。两种理念各有优劣，选择取决于具体场景。</p>
+
+<div class="ascii">Agentless vs SWE-agent 架构对比:
+
+  Agentless (确定性 Pipeline):
+  ┌──────┐    ┌──────┐    ┌──────┐
+  │定位  │───▶│修复  │───▶│验证  │
+  └──────┘    └──────┘    └──────┘
+  特点: 固定流程, 每步独立, 可并行
+
+  SWE-agent (自主 Agent):
+  ┌──────────────────────────────────┐
+  │  Thought ──▶ Action ──▶ Observe  │
+  │     ▲                    │       │
+  │     └────────────────────┘       │
+  └──────────────────────────────────┘
+  特点: 循环探索, 自主决策, 可回溯
+
+  选择指南:
+  ┌────────────────┬──────────────────────┐
+  │ 场景           │ 推荐方案              │
+  ├────────────────┼──────────────────────┤
+  │ 局部Bug(1文件) │ Agentless (快速便宜)  │
+  │ 跨文件Bug      │ SWE-agent (灵活探索)  │
+  │ 需要测试调试    │ SWE-agent (可运行测试) │
+  │ 批量修复       │ Agentless (并行高效)  │
+  └────────────────┴──────────────────────┘</div>
+
+<h3>4.2 AutoCodeRover 的 AST 增强</h3>
+<p>AutoCodeRover 的独特之处在于使用 AST（抽象语法树）分析来增强代码定位。它首先解析代码库的 AST，构建类层次结构和方法调用图，然后用这些结构化信息辅助 LLM 定位。这种方法在理解面向对象代码（如 Java、Python 类）时特别有效，因为 AST 能直接揭示继承关系和方法覆写。</p>
+
+<pre><code># AutoCodeRover 的 AST 定位策略
+import ast
+
+def analyze_class_hierarchy(repo_path):
+    """分析代码库的类层次结构"""
+    hierarchy = {}
+    for py_file in find_python_files(repo_path):
+        tree = ast.parse(read_file(py_file))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                bases = [b.id if isinstance(b, ast.Name)
+                         else ast.dump(b) for b in node.bases]
+                hierarchy[node.name] = {
+                    'bases': bases,
+                    'methods': [n.name for n in node.body
+                               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))],
+                    'file': py_file
+                }
+    return hierarchy
+
+def locate_by_ast(issue_description, hierarchy):
+    """根据 Issue 描述和 AST 信息定位问题"""
+    # 1. 从 Issue 中提取类名、方法名
+    class_names = extract_class_names(issue_description)
+    method_names = extract_method_names(issue_description)
+
+    # 2. 在层次结构中查找
+    candidates = []
+    for cls_name, info in hierarchy.items():
+        if cls_name in class_names:
+            candidates.append((cls_name, info['file'], info['methods']))
+
+    return candidates</code></pre>
+
+<div class="warn"><strong>代码修复 Agent 的工程陷阱：</strong>1) 不要忽略 Docker 沙箱——SWE-agent 必须在隔离环境中执行，直接在宿主机运行测试可能破坏环境；2) 上下文窗口管理至关重要——发送整个代码库会浪费 token 且降低准确率，只发送相关代码片段效果更好；3) Patch 格式必须严格——unified diff 的空格和缩进敏感，一个字符错误就会导致 patch 应用失败。</div>
+
+<h2>5. 文件定位策略</h2>
+<p>文件定位是代码修复中最关键的步骤，也是区分不同方法的核心差异。定位策略的演进从简单的关键词搜索到复杂的语义理解，每种方法都有其适用场景。</p>
+
+<h3>5.1 Embedding 检索定位</h3>
+<p>Embedding 检索是最常用的文件定位方法：将 Issue 描述和文件摘要分别编码为向量，计算余弦相似度。这种方法的优势是速度快（可以在毫秒级完成），但缺点是可能遗漏"语义相关但词汇不重叠"的文件。</p>
+
+<pre><code># 文件级定位: Embedding 检索
+from sentence_transformers import SentenceTransformer
+import numpy as np
+
+model = SentenceTransformer("all-MiniLM-L6-v2")
+
+def locate_files_embedding(issue: str, repo_files: list, top_k: int = 5):
+    """用 Embedding 检索相关文件"""
+    # 编码 Issue 描述
+    issue_embedding = model.encode(issue)
+
+    # 编码所有文件的摘要
+    file_summaries = []
+    for file_path in repo_files:
+        # 生成文件摘要: 路径 + 前50行 + 函数签名
+        content = read_file(file_path)
+        functions = extract_function_signatures(content)
+        summary = f"{file_path}: {', '.join(functions[:10])}"
+        file_summaries.append((file_path, summary))
+
+    # 批量编码
+    summaries = [s[1] for s in file_summaries]
+    file_embeddings = model.encode(summaries, batch_size=64)
+
+    # 计算余弦相似度
+    similarities = np.dot(file_embeddings, issue_embedding) / (
+        np.linalg.norm(file_embeddings, axis=1) * np.linalg.norm(issue_embedding)
+    )
+
+    # 返回 Top-K
+    top_indices = np.argsort(similarities)[::-1][:top_k]
+    return [(file_summaries[i][0], similarities[i]) for i in top_indices]</code></pre>
+
+<h3>5.2 LLM 直接定位</h3>
+<p>另一种方法是直接让 LLM 分析 Issue 描述，输出可能相关的文件列表。这种方法不依赖 Embedding 模型，但成本更高（需要调用 LLM API），且受限于 LLM 的"幻觉"——可能列出不存在的文件。实际应用中，通常将 Embedding 检索和 LLM 定位结合使用：先用 Embedding 候选筛选，再用 LLM 精排。</p>
+
+<h3>5.3 结构化定位（AST + 依赖图）</h3>
+<p>结构化定位利用代码的语法和语义结构：通过 AST 分析找到 Issue 中提到的类和方法的定义位置，通过依赖图（import 关系）找到可能受影响的文件。这种方法不需要 Embedding 模型，但需要代码解析器支持。对于强类型语言（Java、TypeScript），结构化定位特别有效。</p>
+
+<table>
+<tr><th>定位方法</th><th>速度</th><th>准确率</th><th>成本</th><th>适用场景</th></tr>
+<tr><td>关键词搜索</td><td>极快</td><td>低</td><td>零</td><td>快速初筛</td></tr>
+<tr><td>Embedding 检索</td><td>快</td><td>中-高</td><td>低</td><td>通用定位</td></tr>
+<tr><td>LLM 直接定位</td><td>慢</td><td>中</td><td>高</td><td>复杂语义理解</td></tr>
+<tr><td>AST 结构化</td><td>中</td><td>高</td><td>低</td><td>OOP代码/强类型</td></tr>
+<tr><td>混合方法</td><td>中</td><td>最高</td><td>中</td><td>生产环境</td></tr>
+</table>
+
+<h2>6. Patch 生成与验证</h2>
+<p>定位完成后，下一步是生成修复 Patch。这个看似简单的步骤实际上有很多细节需要处理：(1) Patch 格式必须严格遵循 unified diff 规范；(2) 上下文行必须与原始代码完全匹配；(3) 缩进和空格必须正确；(4) 多文件修改需要协调。</p>
+
+<h3>6.1 Patch 生成策略</h3>
+<p>最简单的策略是让 LLM 直接输出 unified diff。但这种方法的问题是 LLM 容易产生格式错误（如错误的行号、缺失的上下文行）。更好的方法是让 LLM 输出"修改指令"（如"在第 1234 行后添加以下代码"），然后用程序转换为 diff 格式。</p>
+
+<pre><code># Patch 生成策略对比
+
+# 策略1: 直接生成 unified diff (简单但易出错)
+prompt_v1 = """
+生成 unified diff:
+--- a/file.py
++++ b/file.py
+@@ -10,3 +10,4 @@
+ context
++new_line
+"""
+
+# 策略2: 生成结构化修改指令 (更可靠)
+prompt_v2 = """
+输出 JSON 格式的修改指令:
+{
+  "file": "path/to/file.py",
+  "changes": [
+    {
+      "type": "replace",  # replace / insert / delete
+      "line_start": 1234,
+      "line_end": 1236,
+      "new_code": "..."
+    }
+  ]
+}
+"""
+
+# 策略3: 生成完整文件 (最可靠但成本高)
+prompt_v3 = """
+输出修改后的完整文件内容:
+[整个文件内容]
+"""</code></pre>
+
+<h3>6.2 测试验证的重要性</h3>
+<p>验证阶段是防止"假修复"的关键。一个 Patch 可能让测试通过但没有真正解决问题（测试覆盖不足），也可能引入新的回归。最佳实践是：(1) 运行与 Issue 直接相关的测试；(2) 运行修改文件的单元测试；(3) 如果可能，运行完整的回归测试套件。</p>
+
+<div class="tip"><strong>Patch 验证的实际技巧：</strong>在生产环境中，建议使用"最小测试集优先"策略——先运行与 Issue 直接相关的测试（通常只需要几秒），通过后再运行更广泛的测试（可能需要几分钟）。这样可以快速排除明显错误的 Patch，节省计算资源。另外，记录每个 Patch 的测试结果有助于后续的 Patch 排序和选择。</div>
+
+<h2>7. Claude Code 在 SWE-bench 上的表现</h2>
+<p>Claude Code（Anthropic 的代码 Agent）在 SWE-bench Verified 上达到了 72.5% 的通过率，这是当前最好的公开结果。Claude Code 的成功归因于几个关键因素：(1) 强大的基础模型（Claude 3.5 Sonnet/Claude 3 Opus）；(2) 精心设计的 ACI；(3) 强大的代码理解能力（包括理解复杂的设计模式和框架约定）。</p>
+
+<h3>7.1 Claude Code 的技术特点</h3>
+<p>Claude Code 的技术特点包括：(1) 长上下文窗口（200K tokens），可以处理大型文件；(2) 强大的代码推理能力，能理解复杂的继承关系和设计模式；(3) 细粒度的文件编辑能力，支持精确的行级修改；(4) 内置的测试运行和错误分析能力。</p>
+
+<table>
+<tr><th>系统</th><th>SWE-bench Verified</th><th>方法</th><th>关键优势</th></tr>
+<tr><td>Claude Code</td><td>72.5%</td><td>Agent + 强模型</td><td>模型能力 + ACI</td></tr>
+<tr><td>OpenHands</td><td>53%</td><td>Agent 平台</td><td>灵活框架</td></tr>
+<tr><td>AutoCodeRover</td><td>45%</td><td>AST + Agent</td><td>结构化分析</td></tr>
+<tr><td>SWE-agent</td><td>30%</td><td>Agent</td><td>自主探索</td></tr>
+<tr><td>Agentless</td><td>32%</td><td>Pipeline</td><td>简单高效</td></tr>
+</table>
+
+<h2>8. 前沿进展与学习路径</h2>
+<p>代码修复领域的最新进展集中在几个方向：(1) 多 Agent 协作——一个 Agent 负责定位，另一个负责修复，第三个负责验证；(2) 学习 from 反馈——根据历史修复的成功/失败改进策略；(3) 仓库级上下文压缩——在有限的上下文窗口中塞入最有用的信息；(4) 测试生成——不仅修复 Bug，还生成防止回归的测试用例。</p>
+
+<h3>8.1 多 Agent 修复架构</h3>
+<p>多 Agent 架构将修复任务分解给专门的 Agent：Explorer Agent 负责搜索和理解代码库，Analyzer Agent 负责分析 Bug 的根因，Coder Agent 负责生成修复代码，Reviewer Agent 负责审查 Patch 质量。每个 Agent 专注于自己的任务，通过消息传递协作。</p>
+
+<div class="deep"><strong>代码修复的理论基础：</strong>从理论角度看，代码修复可以形式化为一个搜索问题——在"所有可能的代码修改"空间中，找到一个使测试通过的修改。这个搜索空间的大小是指数级的（每个 token 可能被替换为任意其他 token），因此直接搜索不可行。定位（Localization）的作用是大幅缩小搜索空间：如果能将修改范围从 10000 行缩小到 10 行，搜索空间就从 O(V^10000) 缩小到 O(V^10)，其中 V 是词表大小。这就是为什么定位准确率是代码修复成功的关键预测因素。</div>
+
+<h3>8.2 推荐学习路径</h3>
+<p>如果你对代码修复感兴趣，建议按以下顺序学习：首先了解 SWE-bench 评测标准（模块 04），然后学习 Agentless 方法理解基础 Pipeline，接着学习 SWE-agent 理解 Agent 范式，最后研究 Claude Code 的实现细节。动手实践方面，建议从 SWE-bench Lite 开始，用 Agentless 方法跑一遍评测，感受代码修复的完整流程。继续学习可以关注模块 06「代码LLM前沿方向」中的最新研究。</p>
+
+<div class="tip"><strong>向前串联：</strong>
+SWE-bench 的挑战的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+SWE-bench 的挑战与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+<div class="deep"><strong>🔧 05 · 代码修复 Agent的技术原理与深度分析：</strong>
+<strong>核心概念</strong>：🔧 05 · 代码修复 Agent是代码生成专项领域的关键技术方向，其理论基础涉及信息论、优化理论和系统工程的交叉。
+<strong>推导</strong>：从信息论角度，任何信息处理系统的吞吐量受限于信道容量——Shannon定理指出C=B×log₂(1+S/N)，
+其中B为带宽、S/N为信噪比。在🔧 05 · 代码修复 Agent的语境下，"信道"可以理解为模型的上下文窗口或推理管线，
+"信噪比"对应有用信息与噪声（无关上下文、冗余计算）的比例。
+<strong>为什么</strong>这很重要？因为理解🔧 05 · 代码修复 Agent的理论限制，才能在工程实践中做出正确的权衡——
+盲目追求指标上限往往导致过度设计，而理解根本约束才能找到最高效的优化路径。
+从<strong>工程实践</strong>看，🔧 05 · 代码修复 Agent的优化通常遵循"先测量、再分析、后优化"的循环：
+首先建立完善的评测基准（覆盖质量、延迟、成本三个维度），然后通过profiling定位瓶颈环节，
+最后针对性地优化——是计算受限就优化算法，是内存受限就优化数据布局，是通信受限就优化网络拓扑。
+这一系统化方法论适用于代码生成专项领域的所有技术问题。</div>
+<div class="tip"><strong>相关章节：</strong>
+SWE-bench 的挑战与以下内容密切相关：<a href="01-代码LLM总览.html">01-代码LLM总览</a> | <a href="02-代码LLM训练方法.html">02-代码LLM训练方法</a> | <a href="03-代码理解与Repo-level.html">03-代码理解与Repo-level</a>。建议结合学习。
+</div>
+<div class="exercise">
+<p><strong>🧪 练习 1</strong>：用 Agentless 方法在 SWE-bench Lite 上评测：定位→修复→验证。尝试复现论文中的结果，记录每步的成功率。</p>
+<p><strong>🧪 练习 2</strong>：实现一个简单的代码修复 Pipeline：从 Issue 描述到 Patch 生成。用 OpenAI API 或本地模型，测试在简单 Python Bug 上的效果。</p>
+<p><strong>🧪 练习 3</strong>：比较不同定位策略（Embedding vs LLM vs AST）在同一组 Bug 上的准确率，分析各自的优劣。</p>
+</div>
+
+<div class="tip"><strong>通俗类比：</strong>代码修复Agent就像"修车师傅"——你告诉他车坏了（Issue描述），他先检查发动机（定位代码）、找到问题零件（分析bug）、换新零件（编辑代码）、试车验证（运行测试）。Agentless方法就像"按修车手册修"——不靠经验判断，严格按手册步骤来，简单问题能修好但复杂问题搞不定。而Claude Code就像"4S店专家"——工具齐全、经验丰富，什么问题都能修，但费用也最高。</div>
+
+<div class="warn"><strong>代码修复的实践误区：</strong>1) 过度依赖 LLM 生成的 Patch——LLM 可能生成"看起来正确但实际有微妙 Bug"的代码，必须用测试验证；2) 忽略代码风格一致性——修复代码应该与项目现有风格一致（缩进、命名、注释风格），否则不容易被维护者接受；3) 不考虑修复的副作用——一个"正确的"修复可能影响性能、引入安全漏洞或破坏向后兼容性。</div>
+
+<div class="next-prev"><a href="04-代码评测体系.html">&larr; 上一模块</a><a href="06-代码LLM前沿方向.html">下一模块 &rarr;</a></div>
+</div>
+<div class="footer"><p><a href="index.html">返回总览</a></p></div>
+</body>
+</html>

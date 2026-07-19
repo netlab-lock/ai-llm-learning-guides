@@ -1,0 +1,900 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KV Cache 系统专题 | 推理优化</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0a0a1a; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.nav { background: #101028; border-bottom: 1px solid #1e1e3a; padding: 12px 24px; display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #6ea8fe; text-decoration: none; }
+.nav span { color: #666; }
+.container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+
+/* Hero */
+.hero { text-align: center; padding: 48px 0 32px; }
+.hero h1 { font-size: 2.6em; background: linear-gradient(135deg, #00d4ff, #a78bfa, #f97316); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; margin-bottom: 12px; }
+.hero p { color: #888; font-size: 1.15em; max-width: 700px; margin: 0 auto; }
+.hero .stats { display: flex; justify-content: center; gap: 32px; margin-top: 24px; flex-wrap: wrap; }
+.hero .stat { background: #12122a; border: 1px solid #1e1e3a; border-radius: 12px; padding: 12px 24px; }
+.hero .stat .num { font-size: 1.8em; font-weight: 700; }
+.hero .stat .label { color: #888; font-size: 0.85em; }
+
+/* Category legend */
+.legend { display: flex; justify-content: center; gap: 24px; margin: 24px 0 32px; flex-wrap: wrap; }
+.legend-item { display: flex; align-items: center; gap: 8px; font-size: 0.9em; }
+.legend-dot { width: 14px; height: 14px; border-radius: 50%; }
+.dot-cyan { background: #00d4ff; box-shadow: 0 0 8px #00d4ff55; }
+.dot-green { background: #34d399; box-shadow: 0 0 8px #34d39955; }
+.dot-orange { background: #f97316; box-shadow: 0 0 8px #f9731655; }
+.dot-purple { background: #a78bfa; box-shadow: 0 0 8px #a78bfa55; }
+
+/* Section headers */
+h2 { color: #f0f0f0; border-left: 4px solid #6ea8fe; padding-left: 12px; margin: 40px 0 20px; font-size: 1.6em; }
+h3 { color: #c0c0ff; margin: 24px 0 12px; font-size: 1.2em; }
+
+/* SVG diagram */
+.svg-diagram { background: #0e0e24; border: 1px solid #1e1e3a; border-radius: 12px; padding: 24px; margin: 24px 0; overflow-x: auto; text-align: center; }
+.svg-diagram svg { max-width: 100%; height: auto; }
+
+/* Module cards grid */
+.cards-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 20px; margin: 24px 0; }
+.card { background: #10102a; border: 1px solid #1e1e3a; border-radius: 12px; padding: 20px; transition: transform 0.2s, border-color 0.2s; cursor: pointer; text-decoration: none; color: inherit; display: block; }
+.card:hover { transform: translateY(-4px); }
+.card .card-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.card .card-num { font-size: 0.75em; font-weight: 700; padding: 4px 10px; border-radius: 8px; min-width: 36px; text-align: center; }
+.card .card-title { font-size: 1.1em; font-weight: 600; color: #f0f0f0; }
+.card .card-topics { list-style: none; padding: 0; margin: 12px 0 16px; }
+.card .card-topics li { padding: 3px 0; font-size: 0.88em; color: #aaa; }
+.card .card-topics li::before { content: "▸ "; }
+.card .card-meta { display: flex; justify-content: space-between; align-items: center; font-size: 0.8em; color: #666; border-top: 1px solid #1a1a34; padding-top: 10px; }
+
+/* Category borders */
+.card-cyan { border-left: 3px solid #00d4ff; }
+.card-cyan:hover { border-color: #00d4ff; }
+.card-cyan .card-num { background: #00d4ff22; color: #00d4ff; }
+.card-cyan .card-topics li::before { color: #00d4ff; }
+
+.card-green { border-left: 3px solid #34d399; }
+.card-green:hover { border-color: #34d399; }
+.card-green .card-num { background: #34d39922; color: #34d399; }
+.card-green .card-topics li::before { color: #34d399; }
+
+.card-orange { border-left: 3px solid #f97316; }
+.card-orange:hover { border-color: #f97316; }
+.card-orange .card-num { background: #f9731622; color: #f97316; }
+.card-orange .card-topics li::before { color: #f97316; }
+
+.card-purple { border-left: 3px solid #a78bfa; }
+.card-purple:hover { border-color: #a78bfa; }
+.card-purple .card-num { background: #a78bfa22; color: #a78bfa; }
+.card-purple .card-topics li::before { color: #a78bfa; }
+
+/* Prerequisites */
+.prereq-box { background: #10102a; border: 1px solid #1e1e3a; border-radius: 12px; padding: 24px; margin: 24px 0; }
+.prereq-box h3 { margin-top: 0; }
+.prereq-box ul { list-style: none; padding: 0; }
+.prereq-box li { padding: 6px 0; border-bottom: 1px solid #1a1a30; }
+.prereq-box li:last-child { border-bottom: none; }
+.prereq-box li strong { color: #6ea8fe; }
+
+/* Reading order */
+.reading-order { background: #10102a; border: 1px solid #1e1e3a; border-radius: 12px; padding: 24px; margin: 24px 0; }
+.reading-order .phase { margin: 16px 0; }
+.reading-order .phase-title { font-weight: 600; margin-bottom: 8px; }
+.reading-order .phase-modules { display: flex; flex-wrap: wrap; gap: 8px; }
+.reading-order .phase-tag { padding: 4px 12px; border-radius: 8px; font-size: 0.85em; }
+.tag-cyan { background: #00d4ff18; color: #00d4ff; border: 1px solid #00d4ff33; }
+.tag-green { background: #34d39918; color: #34d399; border: 1px solid #34d39933; }
+.tag-orange { background: #f9731618; color: #f97316; border: 1px solid #f9731633; }
+.tag-purple { background: #a78bfa18; color: #a78bfa; border: 1px solid #a78bfa33; }
+
+/* Quick reference table */
+table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 0.9em; }
+th { background: #14142c; color: #f0f0f0; padding: 10px 14px; text-align: left; border: 1px solid #1e1e3a; font-weight: 600; }
+td { padding: 8px 14px; border: 1px solid #1e1e3a; }
+tr:nth-child(even) { background: #0e0e22; }
+tr:hover { background: #14142c; }
+
+/* Footer */
+.footer { text-align: center; color: #444; margin-top: 48px; padding: 24px 0; border-top: 1px solid #1e1e3a; font-size: 0.9em; }
+.footer a { color: #6ea8fe; }
+
+.tip { background: #0d1d30; border-left: 4px solid #00d4ff; padding: 12px 16px; margin: 16px 0; border-radius: 0 8px 8px 0; }
+.warn { background: #2d1b00; border-left: 4px solid #f97316; padding: 12px 16px; margin: 16px 0; border-radius: 0 8px 8px 0; }
+code { background: #1a1a34; color: #79c0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+a { color: #6ea8fe; text-decoration: none; }
+a:hover { text-decoration: underline; }
+@media (max-width: 600px) {
+  .cards-grid { grid-template-columns: 1fr; }
+  .hero h1 { font-size: 1.8em; }
+  .hero .stats { gap: 12px; }
+}
+
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="nav">
+  <a href="../推理服务架构/03-KV-Cache调度与路由.html">&larr; KV Cache调度与路由</a>
+  <span>KV Cache 系统专题</span>
+  <a href="01-KV-Cache基础原理与数学本质.html">01-KV Cache基础原理 &rarr;</a>
+</div>
+
+<div class="container">
+
+<!-- ========== HERO ========== -->
+<div class="hero">
+  <h1>🧠 KV Cache 系统专题</h1>
+  <p>从数学原理到工程实践，系统掌握 LLM 推理中最关键的缓存机制。14 个模块覆盖基础理论、优化策略、分布式架构与前沿研究。</p>
+  <div class="stats">
+    <div class="stat"><div class="num" style="color:#00d4ff">14</div><div class="label">核心模块</div></div>
+    <div class="stat"><div class="num" style="color:#34d399">4</div><div class="label">知识维度</div></div>
+    <div class="stat"><div class="num" style="color:#f97316">~20h</div><div class="label">预计学习时长</div></div>
+    <div class="stat"><div class="num" style="color:#a78bfa">60+</div><div class="label">关键知识点</div></div>
+  </div>
+</div>
+
+<!-- ========== LEGEND ========== -->
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot dot-cyan"></div> 基础原理 (01-03)</div>
+  <div class="legend-item"><div class="legend-dot dot-green"></div> 优化策略 (04-06)</div>
+  <div class="legend-item"><div class="legend-dot dot-orange"></div> 分布式架构 (07-10)</div>
+  <div class="legend-item"><div class="legend-dot dot-purple"></div> 应用与实践 (11-14)</div>
+</div>
+
+<!-- ========== LEARNING PATH SVG ========== -->
+<h2>📍 学习路径与依赖关系</h2>
+<h3>📍 学习路径与依赖关系</h3>><strong>通俗类比：</strong>学习KV-Cache就像规划旅行：先研究地图（基础知识），再选路线（路径），确保每个站点（依赖关系）安排妥当，避免半路抛锚。</div>
+<div class="warn"><strong>常见误区：</strong>
+很多人在学习📍 学习路径与依赖关系时容易陷入"只看不练"的误区，以为理解了概念就能在实际项目中应用。实际上，理论知识必须配合动手实验才能真正掌握。建议每学完一个知识点就写一段验证代码，在实践中发现和解决问题。</div>
+<div class="deep"><strong>深入探讨：</strong>KV-Cache在LLM推理中缓存Key和Value张量，减少重复计算。内存占用公式：2 * num_layers * num_heads * head_dim * seq_len字节。例如，GPT-3中seq_len=2048时，缓存大小可达数GB。</div>
+<div class="ascii"><pre>基础知识
+    ↓
+依赖关系
+    ↓
+高级应用</pre></div>
+<table><tr><th>阶段</th><th>内容</th><th>预计时间</th></tr><tr><td>基础</td><td>数学与编程</td><td>1-2周</td></tr><tr><td>核心</td><td>Transformer与Attention</td><td>2-3周</td></tr><tr><td>应用</td><td>KV-Cache实现</td><td>1周</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 900 520" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <defs>
+    <marker id="arrow-cyan" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#00d4ff" opacity="0.6"/></marker>
+    <marker id="arrow-green" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#34d399" opacity="0.6"/></marker>
+    <marker id="arrow-orange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#f97316" opacity="0.6"/></marker>
+    <marker id="arrow-purple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#a78bfa" opacity="0.6"/></marker>
+  </defs>
+
+  <!-- Phase labels -->
+  <text x="130" y="30" text-anchor="middle" fill="#00d4ff" font-size="12" font-weight="bold">基础原理</text>
+  <text x="370" y="30" text-anchor="middle" fill="#34d399" font-size="12" font-weight="bold">优化策略</text>
+  <text x="620" y="30" text-anchor="middle" fill="#f97316" font-size="12" font-weight="bold">分布式架构</text>
+  <text x="810" y="30" text-anchor="middle" fill="#a78bfa" font-size="12" font-weight="bold">应用实践</text>
+
+  <!-- Row 1: Foundation -->
+  <rect x="50" y="50" width="160" height="55" rx="10" fill="#00d4ff12" stroke="#00d4ff" stroke-width="1.5"/>
+  <text x="130" y="72" text-anchor="middle" fill="#00d4ff" font-size="10" font-weight="bold">01</text>
+  <text x="130" y="90" text-anchor="middle" fill="#e0e0e0" font-size="9">KV Cache基础原理</text>
+
+  <rect x="50" y="130" width="160" height="55" rx="10" fill="#00d4ff12" stroke="#00d4ff" stroke-width="1.5"/>
+  <text x="130" y="152" text-anchor="middle" fill="#00d4ff" font-size="10" font-weight="bold">02</text>
+  <text x="130" y="170" text-anchor="middle" fill="#e0e0e0" font-size="9">内存模型与开销</text>
+
+  <rect x="50" y="210" width="160" height="55" rx="10" fill="#00d4ff12" stroke="#00d4ff" stroke-width="1.5"/>
+  <text x="130" y="232" text-anchor="middle" fill="#00d4ff" font-size="10" font-weight="bold">03</text>
+  <text x="130" y="250" text-anchor="middle" fill="#e0e0e0" font-size="9">PagedAttention</text>
+
+  <!-- Row 2: Optimization -->
+  <rect x="290" y="70" width="160" height="55" rx="10" fill="#34d39912" stroke="#34d399" stroke-width="1.5"/>
+  <text x="370" y="92" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">04</text>
+  <text x="370" y="110" text-anchor="middle" fill="#e0e0e0" font-size="9">GQA/MQA压缩</text>
+
+  <rect x="290" y="150" width="160" height="55" rx="10" fill="#34d39912" stroke="#34d399" stroke-width="1.5"/>
+  <text x="370" y="172" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">05</text>
+  <text x="370" y="190" text-anchor="middle" fill="#e0e0e0" font-size="9">量化技术</text>
+
+  <rect x="290" y="230" width="160" height="55" rx="10" fill="#34d39912" stroke="#34d399" stroke-width="1.5"/>
+  <text x="370" y="252" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">06</text>
+  <text x="370" y="270" text-anchor="middle" fill="#e0e0e0" font-size="9">驱逐与稀疏化</text>
+
+  <!-- Row 3: Distributed -->
+  <rect x="530" y="50" width="170" height="55" rx="10" fill="#f9731612" stroke="#f97316" stroke-width="1.5"/>
+  <text x="615" y="72" text-anchor="middle" fill="#f97316" font-size="10" font-weight="bold">07</text>
+  <text x="615" y="90" text-anchor="middle" fill="#e0e0e0" font-size="9">分布式推理KV Cache</text>
+
+  <rect x="530" y="130" width="170" height="55" rx="10" fill="#f9731612" stroke="#f97316" stroke-width="1.5"/>
+  <text x="615" y="152" text-anchor="middle" fill="#f97316" font-size="10" font-weight="bold">08</text>
+  <text x="615" y="170" text-anchor="middle" fill="#e0e0e0" font-size="9">Prefill/Decode分离</text>
+
+  <rect x="530" y="210" width="170" height="55" rx="10" fill="#f9731612" stroke="#f97316" stroke-width="1.5"/>
+  <text x="615" y="232" text-anchor="middle" fill="#f97316" font-size="10" font-weight="bold">09</text>
+  <text x="615" y="250" text-anchor="middle" fill="#e0e0e0" font-size="9">集群调度</text>
+
+  <rect x="530" y="290" width="170" height="55" rx="10" fill="#f9731612" stroke="#f97316" stroke-width="1.5"/>
+  <text x="615" y="312" text-anchor="middle" fill="#f97316" font-size="10" font-weight="bold">10</text>
+  <text x="615" y="330" text-anchor="middle" fill="#e0e0e0" font-size="9">集合通信</text>
+
+  <!-- Row 4: Application -->
+  <rect x="730" y="100" width="150" height="55" rx="10" fill="#a78bfa12" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="805" y="122" text-anchor="middle" fill="#a78bfa" font-size="10" font-weight="bold">11</text>
+  <text x="805" y="140" text-anchor="middle" fill="#e0e0e0" font-size="9">Agent系统优化</text>
+
+  <rect x="730" y="180" width="150" height="55" rx="10" fill="#a78bfa12" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="805" y="202" text-anchor="middle" fill="#a78bfa" font-size="10" font-weight="bold">12</text>
+  <text x="805" y="220" text-anchor="middle" fill="#e0e0e0" font-size="9">框架实现对比</text>
+
+  <rect x="730" y="260" width="150" height="55" rx="10" fill="#a78bfa12" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="805" y="282" text-anchor="middle" fill="#a78bfa" font-size="10" font-weight="bold">13</text>
+  <text x="805" y="300" text-anchor="middle" fill="#e0e0e0" font-size="9">工程调优实战</text>
+
+  <rect x="730" y="340" width="150" height="55" rx="10" fill="#a78bfa12" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="805" y="362" text-anchor="middle" fill="#a78bfa" font-size="10" font-weight="bold">14</text>
+  <text x="805" y="380" text-anchor="middle" fill="#e0e0e0" font-size="9">前沿研究与未来</text>
+
+  <!-- Arrows: Foundation internal -->
+  <line x1="210" y1="77" x2="210" y2="130" stroke="#00d4ff" stroke-width="1" marker-end="url(#arrow-cyan)" opacity="0.5"/>
+  <line x1="210" y1="157" x2="210" y2="210" stroke="#00d4ff" stroke-width="1" marker-end="url(#arrow-cyan)" opacity="0.5"/>
+
+  <!-- Arrows: Foundation -> Optimization -->
+  <line x1="210" y1="100" x2="290" y2="95" stroke="#00d4ff" stroke-width="1" marker-end="url(#arrow-green)" opacity="0.4"/>
+  <line x1="210" y1="180" x2="290" y2="175" stroke="#00d4ff" stroke-width="1" marker-end="url(#arrow-green)" opacity="0.4"/>
+  <line x1="210" y1="240" x2="290" y2="255" stroke="#00d4ff" stroke-width="1" marker-end="url(#arrow-green)" opacity="0.4"/>
+
+  <!-- Arrows: Foundation -> Distributed -->
+  <line x1="210" y1="100" x2="530" y2="75" stroke="#00d4ff" stroke-width="1" marker-end="url(#arrow-orange)" opacity="0.3"/>
+  <line x1="210" y1="240" x2="530" y2="155" stroke="#00d4ff" stroke-width="1" marker-end="url(#arrow-orange)" opacity="0.3"/>
+
+  <!-- Arrows: Optimization internal -->
+  <line x1="370" y1="125" x2="370" y2="150" stroke="#34d399" stroke-width="1" marker-end="url(#arrow-green)" opacity="0.5"/>
+  <line x1="370" y1="205" x2="370" y2="230" stroke="#34d399" stroke-width="1" marker-end="url(#arrow-green)" opacity="0.5"/>
+
+  <!-- Arrows: Optimization -> Distributed -->
+  <line x1="450" y1="97" x2="530" y2="75" stroke="#34d399" stroke-width="1" marker-end="url(#arrow-orange)" opacity="0.3"/>
+  <line x1="450" y1="257" x2="530" y2="315" stroke="#34d399" stroke-width="1" marker-end="url(#arrow-orange)" opacity="0.3"/>
+
+  <!-- Arrows: Distributed internal -->
+  <line x1="615" y1="105" x2="615" y2="130" stroke="#f97316" stroke-width="1" marker-end="url(#arrow-orange)" opacity="0.5"/>
+  <line x1="615" y1="185" x2="615" y2="210" stroke="#f97316" stroke-width="1" marker-end="url(#arrow-orange)" opacity="0.5"/>
+  <line x1="615" y1="265" x2="615" y2="290" stroke="#f97316" stroke-width="1" marker-end="url(#arrow-orange)" opacity="0.5"/>
+
+  <!-- Arrows: Distributed -> Application -->
+  <line x1="700" y1="77" x2="730" y2="125" stroke="#f97316" stroke-width="1" marker-end="url(#arrow-purple)" opacity="0.3"/>
+  <line x1="700" y1="157" x2="730" y2="205" stroke="#f97316" stroke-width="1" marker-end="url(#arrow-purple)" opacity="0.3"/>
+  <line x1="700" y1="317" x2="730" y2="285" stroke="#f97316" stroke-width="1" marker-end="url(#arrow-purple)" opacity="0.3"/>
+
+  <!-- Arrows: Application internal -->
+  <line x1="805" y1="155" x2="805" y2="180" stroke="#a78bfa" stroke-width="1" marker-end="url(#arrow-purple)" opacity="0.5"/>
+  <line x1="805" y1="235" x2="805" y2="260" stroke="#a78bfa" stroke-width="1" marker-end="url(#arrow-purple)" opacity="0.5"/>
+  <line x1="805" y1="315" x2="805" y2="340" stroke="#a78bfa" stroke-width="1" marker-end="url(#arrow-purple)" opacity="0.5"/>
+
+  <!-- Bottom annotation -->
+  <text x="450" y="440" text-anchor="middle" fill="#555" font-size="10">↑ 虚线箭头表示跨维度依赖关系 | 实线箭头表示同维度内的递进关系 ↑</text>
+  <text x="450" y="465" text-anchor="middle" fill="#444" font-size="9">建议按 行 从左到右学习，跨列依赖需先掌握前置模块</text>
+</svg>
+</div>
+
+<!-- ========== PREREQUISITES ========== -->
+<h2>📋 前置知识要求</h2>
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>前置知识就像做菜前的食材准备：缺少关键食材（如线性代数），菜（KV-Cache学习）就做不成，得先备齐。</div>
+<div class="warn"><strong>常见误区：</strong>
+很多人在学习📍 学习路径与依赖关系时容易陷入"只看不练"的误区，以为理解了概念就能在实际项目中应用。实际上，理论知识必须配合动手实验才能真正掌握。建议每学完一个知识点就写一段验证代码，在实践中发现和解决问题。</div>
+<div class="deep"><strong>深入探讨：</strong>需要掌握矩阵乘法、注意力机制公式：Attention(Q,K,V) = softmax(QK^T/√d_k)V。Python和PyTorch基础必备，用于实现缓存逻辑。</div>
+<div class="ascii"><pre>数学基础
+    ↗
+编程技能 → KV-Cache学习
+    ↘
+机器学习概念</pre></div>
+<table><tr><th>知识领域</th><th>具体内容</th><th>重要性</th></tr><tr><td>数学</td><td>线性代数、概率论</td><td>高</td></tr><tr><td>编程</td><td>Python、PyTorch框架</td><td>高</td></tr><tr><td>ML基础</td><td>神经网络、反向传播</td><td>中</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="prereq-box">
+  <h3>必备基础</h3>
+  <ul>
+    <li><strong>Transformer 架构：</strong>理解 Self-Attention 计算流程 (Q/K/V 矩阵、Scaled Dot-Product)</li>
+    <li><strong>LLM 推理流程：</strong>了解 Prefill (预填充) 和 Decode (自回归解码) 两阶段</li>
+    <li><strong>GPU 内存层次：</strong>基本了解 HBM / SRAM / 共享内存的层次关系</li>
+    <li><strong>矩阵运算基础：</strong>GEMM / GEMV 概念，了解计算强度与内存带宽瓶颈</li>
+  </ul>
+  <h3 style="margin-top:20px;">推荐前置阅读</h3>
+  <ul>
+    <li><strong>注意力机制</strong> → <a href="../../01-基础理论/经典模型演进/12-注意力机制.html">经典模型演进/12-注意力机制</a></li>
+    <li><strong>Transformer</strong> → <a href="../../01-基础理论/经典模型演进/14-Transformer.html">经典模型演进/14-Transformer</a></li>
+    <li><strong>Decoder-Only 架构</strong> → <a href="../../01-基础理论/LLM系统指南/02-Transformer架构/05-Decoder-Only架构.html">Decoder-Only架构</a></li>
+    <li><strong>量化基础</strong> → <a href="../模型量化前沿/01-量化基础与动机.html">模型量化前沿/01-量化基础与动机</a></li>
+  </ul>
+</div>
+
+<!-- ========== MODULE CARDS ========== -->
+<h2>🗂️ 模块总览</h2>
+
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>模块总览就像超市分区图：帮你快速找到所需商品（模块），避免在货架（细节）间迷失，提高购物效率。</div>
+<div class="warn"><strong>常见误区：</strong>
+很多人在学习📍 学习路径与依赖关系时容易陷入"只看不练"的误区，以为理解了概念就能在实际项目中应用。实际上，理论知识必须配合动手实验才能真正掌握。建议每学完一个知识点就写一段验证代码，在实践中发现和解决问题。</div>
+<div class="deep"><strong>深入探讨：</strong>模块包括Tokenizer、Embedding、Attention、FFN、Cache Manager。缓存模块优化减少重复计算，例如在自回归生成中，缓存命中率可达90%以上。</div>
+<div class="ascii"><pre>Tokenizer
+    ↓
+Embedding
+    ↓
+Attention (带Cache)
+    ↓
+FFN</pre></div>
+<table><tr><th>模块名</th><th>功能</th><th>与KV-Cache关系</th></tr><tr><td>Attention</td><td>计算注意力分数</td><td>核心使用缓存Key/Value</td></tr><tr><td>Cache Manager</td><td>管理缓存存储与更新</td><td>直接实现缓存逻辑</td></tr><tr><td>FFN</td><td>前馈网络计算</td><td>间接影响缓存大小</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<!-- Foundation: 01-03 -->
+<h3 style="color:#00d4ff; margin-top:32px;">🔷 基础原理 (01-03)</h3>
+<div class="cards-grid">
+
+  <a class="card card-cyan" href="01-KV-Cache基础原理与数学本质.html">
+    <div class="card-head">
+      <span class="card-num">01</span>
+      <span class="card-title">KV Cache 基础原理与数学本质</span>
+    </div>
+    <ul class="card-topics">
+      <li>Attention 计算中的重复计算问题</li>
+      <li>KV Cache 的数学推导与正确性证明</li>
+      <li>Causal Mask 与 Prefix Cache 的关系</li>
+      <li>Cache Hit/Miss 对推理延迟的影响</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 60 分钟</span>
+      <span style="color:#00d4ff">★ 入门必读</span>
+    </div>
+  </a>
+
+  <a class="card card-cyan" href="02-KV-Cache内存模型与开销分析.html">
+    <div class="card-head">
+      <span class="card-num">02</span>
+      <span class="card-title">KV Cache 内存模型与开销分析</span>
+    </div>
+    <ul class="card-topics">
+      <li>KV Cache 内存计算公式 (batch, seq, layers, heads)</li>
+      <li>不同模型规模下的显存占用估算</li>
+      <li>与模型参数内存的对比分析</li>
+      <li>内存碎片与分配策略</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 50 分钟</span>
+      <span style="color:#00d4ff">★ 基础必读</span>
+    </div>
+  </a>
+
+  <a class="card card-cyan" href="03-PagedAttention与块管理.html">
+    <div class="card-head">
+      <span class="card-num">03</span>
+      <span class="card-title">PagedAttention 与块管理</span>
+    </div>
+    <ul class="card-topics">
+      <li>操作系统虚拟内存启发的块管理思想</li>
+      <li>PagedAttention 核心算法与块表设计</li>
+      <li>vLLM BlockSpaceAllocator 实现</li>
+      <li>Copy-on-Write 与前缀共享</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 70 分钟</span>
+      <span style="color:#00d4ff">★ 核心原理</span>
+    </div>
+  </a>
+</div>
+
+<!-- Optimization: 04-06 -->
+<h3 style="color:#34d399; margin-top:32px;">🟢 优化策略 (04-06)</h3>
+<div class="cards-grid">
+
+  <a class="card card-green" href="04-GQA-MQA架构与KV-Cache压缩.html">
+    <div class="card-head">
+      <span class="card-num">04</span>
+      <span class="card-title">GQA/MQA 架构与 KV Cache 压缩</span>
+    </div>
+    <ul class="card-topics">
+      <li>MHA → MQA → GQA 的演进路径</li>
+      <li>多查询注意力的 KV Cache 缩减比</li>
+      <li>MLA (Multi-head Latent Attention) 与 DeepSeek</li>
+      <li>架构选择对推理效率的影响</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 60 分钟</span>
+      <span style="color:#34d399">架构级优化</span>
+    </div>
+  </a>
+
+  <a class="card card-green" href="05-KV-Cache量化技术.html">
+    <div class="card-head">
+      <span class="card-num">05</span>
+      <span class="card-title">KV Cache 量化技术</span>
+    </div>
+    <ul class="card-topics">
+      <li>KV Cache 量化的特殊性 (离群值分布)</li>
+      <li>Per-channel / Per-token / Group 量化方案</li>
+      <li>KIVI、KVQuant 等前沿方法</li>
+      <li>量化对模型精度的影响与评估</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 70 分钟</span>
+      <span style="color:#34d399">精度-内存权衡</span>
+    </div>
+  </a>
+
+  <a class="card card-green" href="06-KV-Cache驱逐与稀疏化策略.html">
+    <div class="card-head">
+      <span class="card-num">06</span>
+      <span class="card-title">KV Cache 驱逐与稀疏化策略</span>
+    </div>
+    <ul class="card-topics">
+      <li>注意力稀疏性与 Cache 重要性评估</li>
+      <li>Scissorhands、H2O 等驱逐算法</li>
+      <li>StreamingLLM 与注意力汇聚现象</li>
+      <li>动态稀疏 vs 静态稀疏的权衡</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 65 分钟</span>
+      <span style="color:#34d399">长序列必备</span>
+    </div>
+  </a>
+</div>
+
+<!-- Distributed: 07-10 -->
+<h3 style="color:#f97316; margin-top:32px;">🟠 分布式架构 (07-10)</h3>
+<div class="cards-grid">
+
+  <a class="card card-orange" href="07-分布式推理中的KV-Cache.html">
+    <div class="card-head">
+      <span class="card-num">07</span>
+      <span class="card-title">分布式推理中的 KV Cache</span>
+    </div>
+    <ul class="card-topics">
+      <li>Tensor Parallelism 下的 KV Cache 分片</li>
+      <li>序列并行与 KV Cache 分布策略</li>
+      <li>跨 GPU 的 Cache 一致性维护</li>
+      <li>RingAttention 与长序列分布式处理</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 70 分钟</span>
+      <span style="color:#f97316">多卡推理基础</span>
+    </div>
+  </a>
+
+  <a class="card card-orange" href="08-Prefill-Decode分离与PD架构.html">
+    <div class="card-head">
+      <span class="card-num">08</span>
+      <span class="card-title">Prefill/Decode 分离与 PD 架构</span>
+    </div>
+    <ul class="card-topics">
+      <li>Prefill 与 Decode 的算力特征差异</li>
+      <li>PD 分离架构的设计原理</li>
+      <li>KV Cache 跨节点传输 (NCCL / RDMA)</li>
+      <li>DistServe、Splitwise 等系统设计</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 75 分钟</span>
+      <span style="color:#f97316">生产架构核心</span>
+    </div>
+  </a>
+
+  <a class="card card-orange" href="09-KV-Cache与集群调度.html">
+    <div class="card-head">
+      <span class="card-num">09</span>
+      <span class="card-title">KV Cache 与集群调度</span>
+    </div>
+    <ul class="card-topics">
+      <li>KV Cache 感知的请求路由策略</li>
+      <li>Cache 亲和性调度与负载均衡</li>
+      <li>Prefix Cache 调度与多租户隔离</li>
+      <li>全局 Cache 状态管理与一致性</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 60 分钟</span>
+      <span style="color:#f97316">集群级优化</span>
+    </div>
+  </a>
+
+  <a class="card card-orange" href="10-KV-Cache与集合通信.html">
+    <div class="card-head">
+      <span class="card-num">10</span>
+      <span class="card-title">KV Cache 与集合通信</span>
+    </div>
+    <ul class="card-topics">
+      <li>AllGather / ReduceScatter 在 KV 传输中的应用</li>
+      <li>通信-计算重叠 (Overlap) 策略</li>
+      <li>NVLink / NVSwitch / InfiniBand 带宽分析</li>
+      <li>KV Cache 传输的通信拓扑优化</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 65 分钟</span>
+      <span style="color:#f97316">通信深度优化</span>
+    </div>
+  </a>
+</div>
+
+<!-- Application: 11-14 -->
+<h3 style="color:#a78bfa; margin-top:32px;">🟣 应用与实践 (11-14)</h3>
+<div class="cards-grid">
+
+  <a class="card card-purple" href="11-Agent系统中的KV-Cache优化.html">
+    <div class="card-head">
+      <span class="card-num">11</span>
+      <span class="card-title">Agent 系统中的 KV Cache 优化</span>
+    </div>
+    <ul class="card-topics">
+      <li>多轮对话的 Prefix Cache 利用</li>
+      <li>Tool Call 场景的 Cache 管理</li>
+      <li>Agent Context Window 的 Cache 策略</li>
+      <li>Multi-Agent 共享 Cache 优化</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 55 分钟</span>
+      <span style="color:#a78bfa">应用前沿</span>
+    </div>
+  </a>
+
+  <a class="card card-purple" href="12-推理框架KV-Cache实现对比.html">
+    <div class="card-head">
+      <span class="card-num">12</span>
+      <span class="card-title">推理框架 KV Cache 实现对比</span>
+    </div>
+    <ul class="card-topics">
+      <li>vLLM PagedAttention 实现细节</li>
+      <li>TensorRT-LLM KV Cache 管理器</li>
+      <li>SGLang RadixAttention 与前缀树</li>
+      <li>各框架优劣势对比与选型建议</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 80 分钟</span>
+      <span style="color:#a78bfa">框架选型</span>
+    </div>
+  </a>
+
+  <a class="card card-purple" href="13-KV-Cache工程调优实战.html">
+    <div class="card-head">
+      <span class="card-num">13</span>
+      <span class="card-title">KV Cache 工程调优实战</span>
+    </div>
+    <ul class="card-topics">
+      <li>KV Cache 内存预算计算与配置</li>
+      <li>block_size / gpu_memory_utilization 调优</li>
+      <li>Prefix Cache 命中率监控与优化</li>
+      <li>生产环境常见问题排查手册</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 90 分钟</span>
+      <span style="color:#a78bfa">★ 实战必读</span>
+    </div>
+  </a>
+
+  <a class="card card-purple" href="14-前沿研究与未来方向.html">
+    <div class="card-head">
+      <span class="card-num">14</span>
+      <span class="card-title">前沿研究与未来方向</span>
+    </div>
+    <ul class="card-topics">
+      <li>KV Cache 共享与跨请求复用</li>
+      <li>学习型 Cache 策略 (Learned Eviction)</li>
+      <li>KV Cache 与 Speculative Decoding</li>
+      <li>下一代架构中的 Cache 设计趋势</li>
+    </ul>
+    <div class="card-meta">
+      <span>⏱ 约 60 分钟</span>
+      <span style="color:#a78bfa">研究导向</span>
+    </div>
+  </a>
+</div>
+
+<!-- ========== SUGGESTED READING ORDER ========== -->
+<h2>📖 建议学习路线</h2>
+的技术选择和优化决策。</p>
+
+<h3>📖 建议学习路线</h3>
+
+<div class="warn"><strong>常见误区：</strong>
+很多人在学习📍 学习路径与依赖关系时容易陷入"只看不练"的误区，以为理解了概念就能在实际项目中应用。实际上，理论知识必须配合动手实验才能真正掌握。建议每学完一个知识点就写一段验证代码，在实践中发现和解决问题。</div>
+<div class="deep"><strong>深入探讨：</strong>推荐路线：先学Transformer基础（1周），再研究KV-Cache论文（2周），最后实践代码（1周）。时间分配：理论60%，实践40%，以确保理解深度。</div>
+<div class="ascii"><pre>基础理论 → 论文阅读 → 代码实现 → 优化应用</pre></div>
+<table><tr><th>步骤</th><th>内容</th><th>资源推荐</th></tr><tr><td>1</td><td>Transformer原理</td><td>Attention论文、在线课程</td></tr><tr><td>2</td><td>KV-Cache机制</td><td>相关博客、开源代码</td></tr><tr><td>3</td><td>实践与优化</td><td>PyTorch项目、社区论坛</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="reading-order">
+
+  <div class="phase">
+    <div class="phase-title" style="color:#00d4ff;">阶段一：打好基础（约 3 小时）</div>
+    <p style="color:#888; font-size:0.9em; margin-bottom:8px;">理解 KV Cache 的本质，建立内存直觉</p>
+    <div class="phase-modules">
+      <span class="phase-tag tag-cyan">01 基础原理</span>
+      <span class="phase-tag tag-cyan">02 内存模型</span>
+      <span class="phase-tag tag-cyan">03 PagedAttention</span>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-title" style="color:#34d399;">阶段二：掌握优化（约 3.5 小时）</div>
+    <p style="color:#888; font-size:0.9em; margin-bottom:8px;">学会从架构和算法层面减少 KV Cache 开销</p>
+    <div class="phase-modules">
+      <span class="phase-tag tag-cyan">01-03 前置</span>
+      <span style="color:#444">→</span>
+      <span class="phase-tag tag-green">04 GQA/MQA</span>
+      <span class="phase-tag tag-green">05 量化</span>
+      <span class="phase-tag tag-green">06 稀疏化</span>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-title" style="color:#f97316;">阶段三：分布式架构（约 4.5 小时）</div>
+    <p style="color:#888; font-size:0.9em; margin-bottom:8px;">深入多 GPU / 多节点场景下的 KV Cache 管理</p>
+    <div class="phase-modules">
+      <span class="phase-tag tag-cyan">01-03 前置</span>
+      <span style="color:#444">+</span>
+      <span class="phase-tag tag-green">04 优化基础</span>
+      <span style="color:#444">→</span>
+      <span class="phase-tag tag-orange">07 分布式</span>
+      <span class="phase-tag tag-orange">08 PD分离</span>
+      <span class="phase-tag tag-orange">09 调度</span>
+      <span class="phase-tag tag-orange">10 通信</span>
+    </div>
+  </div>
+
+  <div class="phase">
+    <div class="phase-title" style="color:#a78bfa;">阶段四：应用实战（约 4.5 小时）</div>
+    <p style="color:#888; font-size:0.9em; margin-bottom:8px;">将理论转化为生产力，掌握框架选型与调优</p>
+    <div class="phase-modules">
+      <span class="phase-tag tag-cyan">01-06 前置</span>
+      <span style="color:#444">→</span>
+      <span class="phase-tag tag-purple">11 Agent优化</span>
+      <span class="phase-tag tag-purple">12 框架对比</span>
+      <span class="phase-tag tag-purple">13 调优实战</span>
+      <span class="phase-tag tag-purple">14 前沿研究</span>
+    </div>
+  </div>
+</div>
+
+
+
+
+
+<!-- ========== QUICK REFERENCE TABLE ========== -->
+<h2>📊 快速参考表</h2>
+
+
+
+
+
+
+
+<div class="tip"><strong>实用技巧：</strong>
+在实际工程中应用📍 学习路径与依赖关系时，（延迟、吞吐、资源占用），然后逐步扩大规模。遇到性能瓶颈时，用profiling工具定位瓶颈根因，避免盲目优化。每次只改一个变量，这样才能准确归因。</div>
+<div class="warn"><strong>常见误区：</strong>
+很多人在学习📍 学习路径与依赖关系时容易陷入"只看不练"的误区，以为理解了概念就能在实际项目中应用。实际上，理论知识必须配合动手实验才能真正掌握。建议每学完一个知识点就写一段验证代码，在实践中发现和解决问题。</div>
+<div class="deep"><strong>深入探讨：</strong>表格关键参数：缓存大小公式 Cache Size = 2 * num_layers * num_heads * head_dim * seq_len字节。例如，L=12, H=12, D=64, S=512时，大小约3MB。</div>
+<div class="ascii"><pre>参数 | 公式 | 说明
+----|------|----
+缓存大小 | 2LHDS | 内存占用
+速度提升 | 缓存命中率 | 倍数</pre></div>
+<table><tr><th>参数</th><th>公式</th><th>示例值</th></tr><tr><td>缓存大小</td><td>2 * num_layers * num_heads * head_dim * seq_len</td><td>3MB (L=12,H=12,D=64,S=512)</td></tr><tr><td>计算节省</td><td>取决于序列长度</td><td>最高50%以上</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>KV Cache 内存估算公式</h3>
+<table>
+  <tr>
+    <th>参数</th>
+    <th>公式</th>
+    <th>说明</th>
+  </tr>
+  <tr>
+    <td>单 token KV 内存</td>
+    <td><code>2 × n_layers × n_heads × head_dim × dtype_bytes</code></td>
+    <td>2 表示 K 和 V 各一份</td>
+  </tr>
+  <tr>
+    <td>总 KV Cache 内存</td>
+    <td><code>单token内存 × batch_size × seq_len</code></td>
+    <td>线性增长，与 batch × seq 成正比</td>
+  </tr>
+  <tr>
+    <td>GQA 缩减比</td>
+    <td><code>n_kv_heads / n_heads</code></td>
+    <td>如 LLaMA-70B: 8/64 = 0.125x</td>
+  </tr>
+  <tr>
+    <td>量化缩减比</td>
+    <td><code>原始位宽 / 量化位宽</code></td>
+    <td>FP16→INT4: 4x 压缩</td>
+  </tr>
+</table>
+
+<h3 style="margin-top:28px;">典型模型 KV Cache 内存占用 (FP16, seq=4096, bs=1)</h3>
+<table>
+  <tr>
+    <th>模型</th>
+    <th>参数量</th>
+    <th>Layers</th>
+    <th>Heads</th>
+    <th>KV Heads</th>
+    <th>Head Dim</th>
+    <th>KV Cache</th>
+  </tr>
+  <tr>
+    <td>LLaMA-3-8B</td>
+    <td>8B</td>
+    <td>32</td>
+    <td>32</td>
+    <td>8 (GQA)</td>
+    <td>128</td>
+    <td>~1 GB</td>
+  </tr>
+  <tr>
+    <td>LLaMA-3-70B</td>
+    <td>70B</td>
+    <td>80</td>
+    <td>64</td>
+    <td>8 (GQA)</td>
+    <td>128</td>
+    <td>~2.5 GB</td>
+  </tr>
+  <tr>
+    <td>LLaMA-3-405B</td>
+    <td>405B</td>
+    <td>126</td>
+    <td>128</td>
+    <td>8 (GQA)</td>
+    <td>128</td>
+    <td>~4 GB</td>
+  </tr>
+  <tr>
+    <td>Qwen2.5-72B</td>
+    <td>72B</td>
+    <td>80</td>
+    <td>64</td>
+    <td>8 (GQA)</td>
+    <td>128</td>
+    <td>~2.5 GB</td>
+  </tr>
+  <tr>
+    <td>DeepSeek-V3</td>
+    <td>671B (MoE)</td>
+    <td>61</td>
+    <td>128</td>
+    <td>MLA (压缩)</td>
+    <td>512→压缩</td>
+    <td>~1.5 GB*</td>
+  </tr>
+</table>
+<p style="color:#666; font-size:0.85em;">* MLA 通过低秩压缩大幅减少 KV Cache，实际占用取决于压缩维度配置</p>
+
+<h3 style="margin-top:28px;">关键公式速查</h3>
+<table>
+  <tr>
+    <th>概念</th>
+    <th>公式 / 关键点</th>
+  </tr>
+  <tr>
+    <td>Attention 计算</td>
+    <td><code>Attention(Q,K,V) = softmax(QK^T / √d_k) · V</code></td>
+  </tr>
+  <tr>
+    <td>Cache 节省计算量</td>
+    <td>Decode 阶段每步只需计算 1 个 query 与所有 cached keys 的内积</td>
+  </tr>
+  <tr>
+    <td>PagedAttention 块大小</td>
+    <td>通常 16 tokens/block (vLLM 默认)，影响碎片率与利用率</td>
+  </tr>
+  <tr>
+    <td>GQA KV 缩减</td>
+    <td>KV Cache 内存 ∝ n_kv_heads (而非 n_heads)</td>
+  </tr>
+  <tr>
+    <td>量化影响</td>
+    <td>INT8: 2x 压缩, ~0.1% 精度损失; INT4: 4x 压缩, ~1% 精度损失</td>
+  </tr>
+  <tr>
+    <td>稀疏化保留比</td>
+    <td>通常保留 top-k 10-20% 的 KV 对即可维持 95%+ 精度</td>
+  </tr>
+  <tr>
+    <td>PD 分离开销</td>
+    <td>KV 传输带宽 = 单token KV大小 × token数 × 吞吐/延迟</td>
+  </tr>
+</table>
+
+<h3 style="margin-top:28px;">推荐工具与框架</h3>
+<table>
+  <tr>
+    <th>工具</th>
+    <th>KV Cache 特性</th>
+    <th>适用场景</th>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/vllm-project/vllm">vLLM</a></td>
+    <td>PagedAttention, Prefix Caching, Chunked Prefill</td>
+    <td>通用生产部署</td>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/sgl-project/sglang">SGLang</a></td>
+    <td>RadixAttention, 自动前缀共享</td>
+    <td>Agent / 多轮对话</td>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/NVIDIA/TensorRT-LLM">TensorRT-LLM</a></td>
+    <td>KV Cache 量化, In-flight Batching</td>
+    <td>NVIDIA GPU 高性能推理</td>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/InternLM/lmdeploy">LMDeploy</a></td>
+    <td>TurboMind 引擎, KV Cache 量化</td>
+    <td>国产模型部署</td>
+  </tr>
+  <tr>
+    <td><a href="https://github.com/DeepSpeed-MII/DeepSpeed-MII">DeepSpeed-FastGen</a></td>
+    <td>SplitFuse, 动态分裂 Prefill/Decode</td>
+    <td>大规模分布式推理</td>
+  </tr>
+</table>
+
+<!-- ========== FOOTER ========== -->
+<div class="footer">
+  <p>KV Cache 系统专题 · 推理优化系列</p>
+  <p style="margin-top:8px;">共 14 个模块 · 预计总学习时长约 20 小时</p>
+  <p style="margin-top:12px;"><a href="../推理服务架构/03-KV-Cache调度与路由.html">← 返回推理服务架构</a> &nbsp;|&nbsp; <a href="../../index.html">← 总目录</a></p>
+</div>
+
+</div>
+
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+  <li>请用自己的话解释<strong>📍 学习路径与依赖关系</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>📋 前置知识要求</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>🗂️ 模块总览</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>📖 建议学习路线</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>📊 快速参考表</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+📍 学习路径与依赖关系的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+</body>
+</html>

@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02-RLHF经典方法 | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.deep{background:rgba(188,140,255,0.08);border-left:4px solid var(--purple)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+</head>
+<body>
+<div class="nav"><a href="01-SFT监督微调.html">&larr; 01-SFT监督微调</a><span>04-后训练 / RLHF经典方法</span><a href="03-DPO偏好优化.html">03-DPO偏好优化 &rarr;</a></div>
+<div class="container">
+
+<h1>🏆 2. RLHF 经典方法</h1>
+
+<h2>2.1 RLHF 三步流程</h2>
+<p>RLHF（Reinforcement Learning from Human Feedback，基于人类反馈的强化学习）是 2022 年 ChatGPT 成功的核心技术之一。它通过引入人类偏好信号来指导模型优化，使模型的回答更符合人类的价值观和期望。RLHF 的完整流程包含三个阶段：监督微调（SFT）、奖励模型训练（RM）、以及近端策略优化（PPO）。每个阶段都有其独特的技术挑战和设计选择。</p>
+
+<div class="ascii">RLHF 完整流程:
+
+┌─────────────────────────────────────────────────────────┐
+│  Step 1: SFT (已在 01 讲解)                              │
+│  用指令-回答对微调 → 得到 SFT 模型 π_SFT                  │
+│  ✅ 已完成                                                │
+└────────────────────────┬────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 2: 训练奖励模型 (Reward Model)                      │
+│                                                          │
+│  收集偏好数据:         训练 RM:                           │
+│  问题: "什么是量子计算？"   Loss = -log σ(r(A) - r(B))   │
+│  回答A: 详细解释    ← 好   让好回答分数 > 坏回答分数      │
+│  回答B: 含糊其辞    ← 差   RM 从 SFT 模型初始化          │
+│  人类标注: A > B                                         │
+└────────────────────────┬────────────────────────────────┘
+                         │
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│  Step 3: PPO 优化                                        │
+│                                                          │
+│  Reward = RM(response) - β·KL(π||π_ref)                 │
+│  用 PPO 算法优化模型:                                     │
+│  最大化奖励，同时不偏离 SFT 模型太远                       │
+└─────────────────────────────────────────────────────────┘</div>
+
+<div class="box tip"><div class="label">💡 通俗类比：RLHF 像请家教</div>
+SFT 是"上课学知识"，RLHF 是"请家教做一对一辅导"。人类标注者就像家教 — 看了学生的两种回答后说"A更好"。奖励模型从这些评价中学会"什么是好答案"，然后用强化学习让学生（模型）朝着好答案的方向改进。这个过程的关键洞察是：我们不需要告诉模型"好答案的每个细节"，只需要告诉它"A比B好"，模型就能从中提炼出改进方向。</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区：RLHF 不是直接用人类反馈训练</div>
+RLHF 不是每一步都请人类打分。而是先训练一个奖励模型（RM），然后用 RM 的打分作为代理信号来训练。人类只参与偏好数据收集阶段。这是因为人类反馈太慢太贵，无法直接用于强化学习的在线采样。一个标注员每小时大约能标注 10-20 对偏好数据，但 PPO 训练每步需要评估成千上万个回答——这个差距只能用 RM 来弥合。</div>
+
+<h2>2.2 奖励模型 (RM)</h2>
+<h3>2.2.1 RM 的训练原理</h3>
+<p>奖励模型是 RLHF 流程中的核心组件，它将人类的偏好判断转化为一个可微分的标量评分函数。RM 的训练基于 Bradley-Terry 模型——一个经典的成对比较统计模型，其核心假设是：人类选择好回答的概率与两个回答的奖励值之差通过 sigmoid 函数相关。</p>
+
+<pre><code><span class="comment"># RM 的训练: Bradley-Terry 模型</span>
+<span class="comment"># 给定一对 (好回答 y_w, 坏回答 y_l)</span>
+
+Loss_RM = -log σ(r(y_w) - r(y_l))
+
+<span class="comment"># r(y) 是 RM 对回答 y 的评分</span>
+<span class="comment"># 目标: 好回答的分数应该高于坏回答</span>
+
+<span class="comment"># RM 通常从 SFT 模型初始化</span>
+<span class="comment"># 去掉最后的 token 预测层，换成一个标量输出头</span></code></pre>
+
+<div class="box tip"><div class="label">💡 通俗类比：奖励模型像"裁判"</div>
+奖励模型就像比赛裁判 — 看到选手的两种表现后给出评分。训练数据是人类标注的"A比B好"，RM 学会的是给好回答打高分、差回答打低分。但裁判也有偏见 — RM 可能被"欺骗"（奖励黑客），所以需要 KL 惩罚作为"反作弊规则"。RM 的另一个重要特性是它输出的是"相对分数"而非"绝对分数"——它更擅长判断"A比B好多少"，而非"A有多好"。</div>
+
+<h3>2.2.2 RM 架构选择</h3>
+<table>
+<tr><th>RM 架构选择</th><th>说明</th><th>优缺点</th></tr>
+<tr><td>从 SFT 模型初始化</td><td>去掉 LM head，加标量头</td><td>✅ 保留语言理解能力，最常用</td></tr>
+<tr><td>独立训练</td><td>从头训练 RM</td><td>❌ 需要更多数据，不推荐</td></tr>
+<tr><td>LLM-as-Judge</td><td>用 GPT-4/Claude 直接打分</td><td>✅ 无需训练，但成本高</td></tr>
+<tr><td>多头 RM</td><td>输出多个维度评分</td><td>✅ 更细粒度，但更复杂</td></tr>
+<tr><td>过程奖励模型 (PRM)</td><td>对推理每步打分</td><td>✅ 适合数学推理，标注成本极高</td></tr>
+</table>
+
+<div class="box warn"><div class="label">⚠️ 常见误区：RM 的泛化能力有限</div>
+RM 只在训练分布内表现好。如果推理时模型生成了训练中没见过的回答风格，RM 的评分可能不可靠。这也是"奖励黑客"的根源 — 模型找到 RM 的盲区，生成 RM 喜欢但人类不喜欢的回答。解决方法包括：(1) 扩大偏好数据的多样性；(2) 使用多个 RM 的集成；(3) 使用 KL 惩罚限制模型探索范围。</div>
+
+<h3>2.2.3 偏好数据标注指南</h3>
+<p>高质量的偏好数据是 RLHF 成功的基础。标注质量直接影响 RM 的准确性，进而影响最终模型的效果。以下是偏好数据标注的关键原则：</p>
+
+<table>
+<tr><th>标注维度</th><th>评估标准</th><th>权重建议</th></tr>
+<tr><td>准确性</td><td>事实正确、无幻觉</td><td>最重要</td></tr>
+<tr><td>有帮助性</td><td>回答了用户的问题</td><td>高</td></tr>
+<tr><td>安全性</td><td>无有害/不当内容</td><td>高（一票否决）</td></tr>
+<tr><td>流畅性</td><td>语言自然、逻辑清晰</td><td>中</td></tr>
+<tr><td>格式</td><td>结构合理、易于阅读</td><td>低</td></tr>
+</table>
+
+<div class="box deep"><div class="label">🔬 深入原理：Bradley-Terry 模型的数学推导</div>
+Bradley-Terry 模型假设每个回答 y 有一个潜在的"实力"参数 r(y)，人类选择 y_w 优于 y_l 的概率为：
+
+P(y_w > y_l) = σ(r(y_w) - r(y_l))
+
+其中 σ 是 sigmoid 函数。这个模型的优美之处在于：它将"绝对评分"问题转化为了"相对比较"问题。人类很难对一个回答给出 1-10 的绝对分数（主观性强），但很容易判断两个回答哪个更好（一致性高）。
+
+从最大似然估计的角度，给定 N 对偏好数据 {(y_w^i, y_l^i)}，RM 的训练目标就是最大化：
+
+L = Σ log σ(r(y_w^i) - r(y_l^i))
+
+这等价于最小化负对数似然，即我们之前看到的 Loss_RM。
+
+一个重要的理论性质是：当偏好数据满足 Bradley-Terry 假设时，RM 学到的评分 r(y) 是人类偏好的充分统计量。这意味着 RM 的评分包含了偏好数据中的所有信息。</div>
+
+<h2>2.3 PPO 算法详解</h2>
+<pre><code><span class="comment"># PPO 目标函数</span>
+J(θ) = E[ min(
+    r_t(θ) · A_t,                              <span class="comment"># 策略比率 × 优势</span>
+    clip(r_t(θ), 1-ε, 1+ε) · A_t              <span class="comment"># 裁剪后的版本</span>
+)]
+
+r_t(θ) = π_θ(a|s) / π_old(a|s)              <span class="comment"># 新旧策略比率</span>
+A_t = R(s,a) - V(s)                           <span class="comment"># 优势 = 奖励 - 基线</span>
+
+<span class="comment"># KL 散度惩罚: 防止偏离参考模型太远</span>
+Reward = RM_score - β · KL(π_θ || π_ref)</code></pre>
+
+<div class="ascii">PPO 训练中的 4 个模型:
+
+┌─────────────────────────────────────────────────┐
+│                 PPO 训练循环                      │
+│                                                  │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+│  │ Policy π │  │Reference │  │  Reward  │       │
+│  │  (Actor) │  │   π_ref  │  │  Model   │       │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘       │
+│       │              │              │             │
+│       ▼              ▼              ▼             │
+│  生成回答     计算 KL 惩罚     计算奖励分数      │
+│       │              │              │             │
+│       ▼              ▼              ▼             │
+│  ┌──────────────────────────────────────┐        │
+│  │         Value Model (Critic)         │        │
+│  │         估计状态价值 V(s)            │        │
+│  └──────────────────────────────────────┘        │
+│                     │                            │
+│                     ▼                            │
+│           更新 Policy 和 Value Model             │
+└─────────────────────────────────────────────────┘
+
+这就是 PPO 的代价 — 需要 4 个模型同时在 GPU 上！</div>
+
+<h3>2.3.1 PPO 的核心机制</h3>
+<p>PPO（Proximal Policy Optimization，近端策略优化）是 OpenAI 在 2017 年提出的策略梯度算法。它的核心创新是通过裁剪（clipping）机制限制策略更新幅度，从而在保证训练稳定性的同时实现有效的策略改进。</p>
+
+<div class="box deep"><div class="label">🔬 深入原理：PPO 裁剪机制的数学直觉</div>
+PPO 的裁剪机制可以这样理解：当优势 A_t > 0（这个动作好）时，我们想增加这个动作的概率，但不能增加太多；当 A_t < 0（这个动作差）时，我们想减少这个动作的概率，但也不能减少太多。
+
+具体来说，裁剪比率 r_t(θ) 到 [1-ε, 1+ε] 范围（通常 ε=0.2）意味着：新策略相对于旧策略的变化不超过 20%。这就像给优化过程装了一个"限速器"——防止模型因为某一步的好运气而大幅改变策略。
+
+在 RLHF 中，PPO 的特殊之处在于奖励信号来自 RM 而非环境。这带来了一个独特的问题：RM 是一个不完美的代理（proxy），它的评分与真实的人类偏好之间存在 gap。KL 惩罚就是用来缩小这个 gap 的——它强制模型保持在 RM 的"可信区域"内。</div>
+
+<h3>2.3.2 PPO 的实现细节</h3>
+<table>
+<tr><th>实现细节</th><th>说明</th><th>推荐值</th></tr>
+<tr><td>PPO Clip ε</td><td>裁剪范围</td><td>0.2</td></tr>
+<tr><td>KL 系数 β</td><td>偏离惩罚强度</td><td>0.01~0.1</td></tr>
+<tr><td>GAE λ</td><td>优势估计的偏差-方差权衡</td><td>0.95</td></tr>
+<tr><td>Mini-batch 数</td><td>每步的 mini-batch 数量</td><td>4~8</td></tr>
+<tr><td>PPO Epochs</td><td>每批数据的优化轮数</td><td>2~4</td></tr>
+<tr><td>Value Loss 系数</td><td>Value Model 损失的权重</td><td>0.5~1.0</td></tr>
+</table>
+
+<div class="box info"><div class="label">🔍 KL 散度惩罚的作用</div>
+KL(π||π_ref) 衡量当前策略与参考策略的偏离程度。没有 KL 惩罚时，模型会"过度优化"RM — 生成 RM 给高分但人类觉得奇怪的回答（奖励黑客）。KL 惩罚像一根"弹簧"，把模型拉回 SFT 模型附近。β 越大，弹簧越紧，模型越保守。实践中，β 的选择是一个微妙的平衡：太大会导致模型改进缓慢，太小会导致奖励黑客。一种自适应策略是设置目标 KL 值（如 6），当实际 KL 超过目标时增大 β，反之减小 β。</div>
+
+<h2>2.4 RLHF 的问题与挑战</h2>
+<div class="box warn"><div class="label">⚠️ RLHF 的痛点 (2025-2026 已验证)</div>
+<ul>
+<li><strong>成本高</strong>: 需要 4 个模型 (Policy + Reference + RM + Value Model)，显存需求巨大</li>
+<li><strong>训练不稳定</strong>: PPO 超参敏感，需要仔细调参，经常出现 reward hacking</li>
+<li><strong>人类偏好数据贵</strong>: 高质量标注数据成本高，标注者之间的一致性也有限</li>
+<li><strong>奖励黑客</strong>: 模型可能学会"欺骗" RM 而不是真正变好</li>
+<li><strong>RM 过时</strong>: 随着策略改进，RM 可能不再准确反映人类偏好</li>
+<li>→ 正在被 DPO / GRPO 取代</li>
+</ul></div>
+
+<h3>2.4.1 奖励黑客（Reward Hacking）详解</h3>
+<p>奖励黑客是 RLHF 中最棘手的问题之一。它指的是模型找到了"欺骗" RM 的捷径——生成 RM 给高分但人类实际不喜欢的回答。</p>
+
+<div class="ascii">奖励黑客的典型模式:
+
+模式1: 长度偏好
+  RM 倾向: 回答越长分数越高
+  模型学到: 生成冗长但无实质内容的回答
+  
+模式2: 格式偏好
+  RM 倾向: 使用列表/编号的回答分数高
+  模型学到: 所有回答都变成列表格式
+
+模式3: 奉承模式
+  RM 倾向: 礼貌、赞美的回答分数高
+  模型学到: "这是一个非常好的问题！" 开头
+
+模式4: 关键词堆砌
+  RM 倾向: 包含特定关键词的回答分数高
+  模型学到: 在回答中堆砌关键词，内容空洞
+
+这些都是 RM 作为"不完美代理"导致的问题</div>
+
+<div class="box tip"><div class="label">💡 通俗类比：RLHF 的"四马分尸"</div>
+RLHF 需要 4 个模型协同训练，就像四匹马拉一辆车 — 任何一匹出问题（RM 偏差、Value Model 不准、KL 惩罚过大/过小）都会影响整体效果。DPO 的核心创新就是"砍掉两匹马"（RM 和 Value Model），让训练更简单稳定。而 GRPO 则通过"组内相对排名"进一步简化，连 Value Model 都不需要了。</div>
+
+<div class="box deep"><div class="label">🔬 深入原理：RLHF 的理论基础 — 带 KL 约束的 RL 目标</div>
+RLHF 的数学目标可以写成一个带 KL 约束的优化问题：
+
+max_π E_{x~D, y~π(y|x)} [r(x,y)] - β · KL(π(y|x) || π_ref(y|x))
+
+这个目标的直觉是：最大化奖励的同时，不要偏离参考模型太远。β 控制两者的权衡。
+
+这个优化问题有闭式解（这是 DPO 的理论基础）：
+
+π*(y|x) = π_ref(y|x) · exp(r(x,y)/β) / Z(x)
+
+其中 Z(x) 是配分函数。这个公式告诉我们：最优策略是在参考模型的基础上，按照奖励值进行指数加权。奖励越高的回答，最优策略赋予的概率越大。
+
+这个闭式解的存在意味着：理论上，我们不需要 PPO 这样的迭代算法来求解。DPO 正是利用了这一点——它直接从偏好数据中恢复出最优策略，而无需显式训练 RM。</div>
+
+<h2>2.5 RLHF vs 其他方法</h2>
+<table>
+<tr><th>方法</th><th>需要 RM</th><th>需要在线采样</th><th>训练复杂度</th><th>数据要求</th></tr>
+<tr><td>RLHF (PPO)</td><td>✅ 单独训练</td><td>✅ 需要</td><td>高 (4个模型)</td><td>成对偏好</td></tr>
+<tr><td>DPO</td><td>❌ 隐式包含</td><td>❌ 离线</td><td>低 (2个模型)</td><td>成对偏好</td></tr>
+<tr><td>GRPO</td><td>❌ 用规则代替</td><td>✅ 需要</td><td>中 (2个模型)</td><td>可验证答案</td></tr>
+<tr><td>KTO</td><td>❌ 隐式包含</td><td>❌ 离线</td><td>低 (2个模型)</td><td>好/坏标签</td></tr>
+<tr><td>RLVR</td><td>❌ 用验证器</td><td>✅ 需要</td><td>中</td><td>可验证答案</td></tr>
+</table>
+
+<div class="box exercise"><div class="label">🎯 动手练习</div>
+使用 trl 库的 RewardTrainer，在 Anthropic HH-RLHF 数据集上训练一个奖励模型。要求：(1) 从预训练模型初始化；(2) 实现 Bradley-Terry 损失；(3) 在测试集上评估准确率；(4) 分析模型对不同类别问题的偏好倾向。</div>
+
+<h2>2.6 学习路径建议</h2>
+<h3>2.6.1 RLHF 的历史里程碑</h3>
+<p>理解 RLHF 的发展历程有助于把握其技术演进脉络：</p>
+<table>
+<tr><th>时间</th><th>里程碑</th><th>关键贡献</th></tr>
+<tr><td>2017</td><td>OpenAI PPO 论文</td><td>提出 PPO 算法，成为 RLHF 的核心优化器</td></tr>
+<tr><td>2019</td><td>GPT-2 + RLHF</td><td>首次将 RLHF 应用于语言模型，改善文本生成质量</td></tr>
+<tr><td>2020</td><td>Learning to Summarize</td><td>证明 RLHF 在摘要任务上优于纯 SFT</td></tr>
+<tr><td>2022.3</td><td>InstructGPT</td><td>系统化 RLHF 三步流程，奠定 ChatGPT 基础</td></tr>
+<tr><td>2022.11</td><td>ChatGPT 发布</td><td>RLHF 大规模应用，引爆 AI 热潮</td></tr>
+<tr><td>2023</td><td>DPO 提出</td><td>证明 RLHF 有闭式解，简化训练流程</td></tr>
+<tr><td>2025</td><td>GRPO + RLVR</td><td>DeepSeek-R1 证明可验证奖励足以训练推理能力</td></tr>
+</table>
+
+<h3>2.6.2 RLHF 实现框架对比</h3>
+<p>目前主流的 RLHF 实现框架各有特点，选择合适的框架可以显著提高开发效率：</p>
+<table>
+<tr><th>框架</th><th>特点</th><th>适用场景</th><th>学习曲线</th></tr>
+<tr><td>trl (Hugging Face)</td><td>集成度高，API 简洁</td><td>快速原型开发、中小规模训练</td><td>低</td></tr>
+<tr><td>DeepSpeed-Chat</td><td>分布式优化，支持 ZeRO</td><td>大规模 RLHF 训练</td><td>中等</td></tr>
+<tr><td>OpenRLHF</td><td>Ray 分布式，支持多种算法</td><td>大规模、多算法对比实验</td><td>中等</td></tr>
+<tr><td>Unsloth</td><td>内存优化，速度快</td><td>消费级 GPU 上的 RLHF</td><td>低</td></tr>
+<tr><td>veRL</td><td>字节跳动开源，高效</td><td>大规模 RL 训练</td><td>中高</td></tr>
+</table>
+
+<div class="box tip"><div class="label">💡 实践建议：选择框架的原则</div>
+对于初学者，推荐从 trl 开始——它的 API 最简洁，文档最完善，社区支持最好。当你需要训练 7B+ 的模型时，考虑 DeepSpeed-Chat 或 OpenRLHF。如果只有消费级 GPU（如 RTX 4090），Unsloth 是最佳选择——它可以将显存需求降低 60-70%。对于工业级大规模训练，veRL 和 DeepSpeed-Chat 提供了最好的分布式支持。</div>
+
+<h3>2.6.3 RLHF 的显存优化策略</h3>
+<p>RLHF 需要同时加载 4 个模型，显存需求极高。以下是经过实践验证的显存优化策略：</p>
+<ul>
+<li><strong>模型共享</strong>：Policy 和 Reference 模型可以共享底层参数，只在需要计算 KL 时临时切换。这可以减少约 40% 的显存占用。</li>
+<li><strong>梯度检查点</strong>：在 PPO 训练中使用梯度检查点（Gradient Checkpointing），用计算时间换取显存空间。对 Transformer 的每一层进行检查点，可以将显存需求降低约 60%。</li>
+<li><strong>混合精度训练</strong>：使用 bf16 或 fp16 混合精度训练，将模型参数的显存需求减半。注意：RM 和 Value Model 的精度对训练稳定性有影响，建议使用 bf16。</li>
+<li><strong>ZeRO 优化</strong>：使用 DeepSpeed ZeRO Stage 2 或 3 进行分布式训练，将优化器状态和梯度分片到多个 GPU 上。</li>
+<li><strong>离线 RM 推理</strong>：将 RM 的推理与 Policy 训练分离，先用 RM 对大量样本打分并缓存结果，再用缓存的分数训练 Policy。这可以避免同时加载 RM。</li>
+</ul>
+
+<p>以 7B 参数模型为例，标准 RLHF 训练需要约 4×16=64GB 显存（4 个模型各 16GB）。使用上述优化策略后，可以将需求降低到约 2×16=32GB（2 张 A100-40GB），甚至在消费级 GPU 上也能运行。</p>
+
+<p>RLHF 是理解后训练对齐的基础，建议按以下顺序深入学习：</p>
+<ol>
+<li>理解强化学习的基本概念（策略、奖励、优势函数）</li>
+<li>学习 PPO 算法的原理和实现</li>
+<li>理解奖励模型的训练方法和 Bradley-Terry 模型</li>
+<li>掌握 KL 散度惩罚的作用和调参技巧</li>
+<li>了解奖励黑客现象及应对策略</li>
+<li>进阶：比较 RLHF 与 DPO/GRPO 的优劣</li>
+</ol>
+
+<div class="next-prev"><a href="01-SFT监督微调.html">← 01-SFT</a><a href="03-DPO偏好优化.html">03-DPO →</a></div>
+</div>
+<div class="footer"><p>LLM 系统学习 · 02-RLHF经典方法</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="tip"><strong>相关章节：</strong>
+RLHF 三步流程与以下内容密切相关：<a href="01-SFT监督微调.html">01-SFT监督微调</a> | <a href="03-DPO偏好优化.html">03-DPO偏好优化</a> | <a href="04-GRPO与RLVR.html">04-GRPO与RLVR</a>。建议结合学习。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+建议先在小型偏好数据集（1000条）上训练一个BERT-based奖励模型，验证其在测试集上的准确率和校准度。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+从RLHF的<strong>核心原理</strong>出发，PPO算法通过奖励模型对齐人类偏好。<strong>为什么</strong>不能直接优化奖励模型？<strong>推导</strong>：直接最大化奖励会导致奖励黑客（reward hacking），即模型找到高奖励但低质量的捷径。PPO通过KL散度约束D_KL(π_θ||π_ref)≤ε确保策略不偏离参考模型太远。<strong>数学本质</strong>上，RLHF是带约束的策略优化：max E[r(x,y)] - β·D_KL(π_θ||π_ref)，用信任域方法稳定训练过程，防止策略崩溃。
+</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释RLHF 三步流程的核心原理，并举一个实际应用场景。</li>
+<li>RLHF 三步流程在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比RLHF 三步流程与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+RLHF 三步流程的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<pre><code class="language-python"># RLHF 三步流程 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="deep"><strong>深入探讨：</strong>
+从RLHF的<strong>核心原理</strong>出发，PPO算法通过奖励模型对齐人类偏好。<strong>为什么</strong>不能直接优化奖励模型？<strong>推导</strong>：直接最大化奖励会导致奖励黑客（reward hacking），即模型找到高奖励但低质量的捷径。PPO通过KL散度约束D_KL(π_θ||π_ref)≤ε确保策略不偏离参考模型太远。<strong>数学本质</strong>上，RLHF是带约束的策略优化：max E[r(x,y)] - β·D_KL(π_θ||π_ref)，用信任域方法稳定训练过程，防止策略崩溃。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习RLHF时，很多人只看流程图不实际训练奖励模型。建议从头实现一个简单的奖励模型训练流程，用人类偏好数据训练后观察奖励分数与实际质量的相关性。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为RLHF就是简单地用人类反馈训练一个打分模型。偏好数据质量、奖励模型过拟合、PPO训练的KL约束等都是关键挑战。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+RLHF 三步流程与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

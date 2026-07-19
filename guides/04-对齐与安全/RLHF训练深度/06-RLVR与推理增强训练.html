@@ -1,0 +1,280 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RLVR - RLHF</title><style>
+*{margin:0;padding:0;box-sizing:border-box}body{background:#0f1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;line-height:1.8;padding:20px;max-width:1000px;margin:0 auto}h1{color:#58a6ff;font-size:1.8em;margin:20px 0 10px;border-bottom:2px solid #30363d;padding-bottom:10px}h2{color:#79c0ff;font-size:1.4em;margin:25px 0 10px}h3{color:#d2a8ff;font-size:1.2em;margin:20px 0 8px}p{margin:10px 0}.nav{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:25px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}.nav a{color:#58a6ff;text-decoration:none;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;overflow-x:auto;margin:15px 0;font-size:0.9em}code{background:#161b22;padding:2px 6px;border-radius:4px;font-size:0.9em;color:#e6edf3}pre code{background:none;padding:0}table{border-collapse:collapse;width:100%;margin:15px 0}th,td{border:1px solid #30363d;padding:10px 12px;text-align:left}th{background:#161b22;color:#58a6ff}tr:nth-child(even){background:#161b22}.highlight{background:#1a2332;border-left:4px solid #58a6ff;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.formula{background:#1a1a2e;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;text-align:center;font-family:'Courier New',monospace;color:#e6edf3}.ascii-art{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto}ul,ol{margin:10px 0 10px 25px}li{margin:5px 0}.warning{background:#2d1b00;border-left:4px solid #d29922;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.tip{background:#0d2818;border-left:4px solid #3fb950;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.footer{margin-top:40px;padding-top:20px;border-top:1px solid #30363d;font-size:0.85em;color:#8b949e}.ref{margin-top:30px;padding:16px;background:#161b22;border-radius:8px;border:1px solid #30363d}.ref h2{margin-top:0}.ref a{color:#58a6ff}</style></head><body><div class="nav"><a href="05-GRPO群体相对策略优化.html">#GRPO</a><a href="index.html">Index</a><a href="07-奖励模型训练.html">RM &raquo;</a></div><h1>06 RLVR & Reasoning Enhancement</h1><h2>Verifiable Reward Design</h2>
+<h3>Verifiable Reward Design的核心组件与工作原理</h3>
+
+
+
+<h3>Verifiable Reward Design的核心组件与工作原理</h3>
+
+
+<table><tr><th>Task</th><th>Reward Function</th><th>Example</th></tr><tr><td>Math</td><td>r=1 if answer==correct else 0</td><td>Answer 42 correct -> r=1</td></tr><tr><td>Code</td><td>r=pass_rate(tests)</td><td>5/10 tests pass -> r=0.5</td></tr><tr><td>Logic</td><td>r=1 if valid else 0</td><td>Valid reasoning chain -> r=1</td></tr></table>
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「Verifiable Reward Design」的常见陷阱：不要盲目照搬网上的配置参数。不同的数据分布和模型规模下，Verifiable的最优配置可能完全不同。务必在自己的场景下做充分的验证实验。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「Verifiable Reward Design」的深层理解：RLVR（Reinforcement Learning with Verifiable Rewards）的核心优势在于奖励信号的确定性——与 RM 的 65-72% 准确率相比，可验证奖励的准确率接近 100%。DeepSeek-R1 的实验揭示了一个深刻的现象：纯 RL 训练（无 SFT 阶段）后，模型自发涌现出 Chain-of-Thought 推理、自我验证（"等一下，让我重新检查"）等高级能力。Lightman 等人（Let's Verify Step by Step, ICLR 2024）进一步证明，过程奖励模型（PRM）比结果奖励模型（ORM）在数学推理上提升约 5-10%，因为 PRM 能定位错误步骤并提供更细粒度的训练信号。典型的可验证任务包括：数学（答案精确匹配）、代码（测试用例通过率）、逻辑推理（推理链有效性）。</div>
+
+<div class="ascii">
+RLHF Pipeline (4个模型):
+  Prompt → [Actor] → Response → [Reward Model] → Score
+                          ↓                           ↓
+                    [Critic] → Value          PPO Update ← KL Penalty
+                          ↓
+                    [Reference] → KL
+
+DPO Pipeline (2个模型):
+  (Prompt, y_w, y_l) → [Policy] → log π(y_w), log π(y_l)
+                              ↓
+                        [Reference] → log π_ref(y_w), log π_ref(y_l)
+                              ↓
+                        DPO Loss (无需奖励模型)
+
+GRPO Pipeline (2个模型):
+  Prompt → [Actor] × G次采样 → {y_1,...,y_G}
+                              ↓
+              [Rule-based Reward] → {r_1,...,r_G}
+                              ↓
+              组内排名归一化 → 优势估计A_i
+                              ↓
+              GRPO Update (无需Critic)
+</div><h2>RLVR Training Code</h2>
+
+<div class="ascii">
+系统架构与数据流
+
+Input → [预处理] → [核心计算] → [后处理] → Output
+  │         │           │           │
+  ▼         ▼           ▼           ▼
+编码     特征提取     推理决策     结果格式化
+
+优化方向:
+  ├─ 算法优化: 降低计算复杂度
+  ├─ 系统优化: 内存/调度/批处理
+  └─ 硬件优化: GPU/量化/编译
+</div>
+
+<h3>RLVR Training Code的训练流程与优化策略</h3>
+<p>RLVR Training Code的训练流程通常分为三个阶段：预训练(Pre-training)在大规模无标注语料上学习语言表示，微调(Fine-tuning)在任务特定数据上适配下游任务，对齐(Alignment)通过人类偏好反馈优化输出质量。每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。</p>
+
+
+
+<div class="ascii">
+系统架构与数据流
+
+Input → [预处理] → [核心计算] → [后处理] → Output
+  │         │           │           │
+  ▼         ▼           ▼           ▼
+编码     特征提取     推理决策     结果格式化
+
+优化方向:
+  ├─ 算法优化: 降低计算复杂度
+  ├─ 系统优化: 内存/调度/批处理
+  └─ 硬件优化: GPU/量化/编译
+</div>
+
+<h3>RLVR Training Code的训练流程与优化策略</h3>
+<p>RLVR Training Code的训练流程通常分为三个阶段：预训练(Pre-training)在大规模无标注语料上学习语言表示，微调(Fine-tuning)在任务特定数据上适配下游任务，对齐(Alignment)通过人类偏好反馈优化输出质量。每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。</p>
+
+
+
+
+
+<table>
+<caption>对齐训练方法对比</caption>
+<thead><tr><th>方法</th><th>需要奖励模型</th><th>数据需求</th><th>训练稳定性</th><th>计算成本</th></tr></thead>
+<tbody>
+<tr><td>RLHF(PPO)</td><td>是</td><td>偏好对</td><td>低(调参难)</td><td>高(4模型)</td></tr>
+<tr><td>DPO</td><td>否</td><td>偏好对</td><td>高</td><td>低(2模型)</td></tr>
+<tr><td>KTO</td><td>否</td><td>好/坏标签</td><td>高</td><td>低</td></tr>
+<tr><td>GRPO</td><td>否</td><td>规则奖励</td><td>中</td><td>中(2模型)</td></tr>
+<tr><td>RLVR</td><td>否</td><td>可验证答案</td><td>高</td><td>中</td></tr>
+</tbody></table>
+
+<h3>PRM vs ORM的核心组件与工作原理</h3>
+
+
+<div class="ascii-art">ORM: [step1] [step2] [step3] -> final answer -> r=0/1
+PRM: [step1->0.9] [step2->0.3] [step3->0.8]
+
+PRM advantages:
+- Locates error steps
+- More effective for search (prune bad paths)
+- Provides intermediate supervision</div>
+<div class="tip"><strong>💡 实用技巧：</strong>关于「PRM vs ORM」的实用建议：实战技巧：善用日志和可视化工具来理解系统行为。Locates相关指标的监控可以帮助你快速定位问题。建立完善的实验记录习惯。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「PRM vs ORM」的常见陷阱：最常见的错误是跳过baseline直接上复杂方案。没有Locates的baseline对比，你无法判断复杂方案是否真的带来了提升。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「PRM vs ORM」的深层理解：从信息论的角度思考——理解Locates需要信息的压缩与保留、信号与噪声的分离、冗余与效率的权衡，这些都是贯穿整个AI工程的核心主题。</div>
+<h2>PRM Training Code</h2>
+<h3>PRM Training Code的训练流程与优化策略</h3>
+<p>PRM Training Code的训练流程通常分为三个阶段：预训练(Pre-training)在大规模无标注语料上学习语言表示，微调(Fine-tuning)在任务特定数据上适配下游任务，对齐(Alignment)通过人类偏好反馈优化输出质量。每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。</p>
+
+
+<h3>PRM Training Code的训练流程与优化策略</h3>
+<p>PRM Training Code的训练流程通常分为三个阶段：预训练(Pre-training)在大规模无标注语料上学习语言表示，微调(Fine-tuning)在任务特定数据上适配下游任务，对齐(Alignment)通过人类偏好反馈优化输出质量。每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。</p>
+
+
+
+
+<h3>Refs的核心组件与工作原理</h3>
+
+
+<ul><li>Lightman et al., Let's Verify Step by Step, ICLR 2024</li><li>DeepSeek-R1 2025</li></ul></div>
+<div class="tip"><strong>💡 实用技巧：</strong>关于「Refs」的实用建议：建议优先使用成熟的开源工具和框架，避免重复造轮子。Lightman生态中有许多经过生产验证的工具可以选择。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「Refs」的常见陷阱：隐蔽的陷阱是评估数据泄漏。确保Lightman的评估数据完全没有出现在训练集中。即使部分重叠也会导致评估结果严重失真。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「Refs」的深层理解：工程哲学：在Lightman的实践中，简单但规模大往往胜过复杂但规模小。Chinchilla定律和Scaling Law都指向同一个方向——数据和计算的规模比精巧的算法设计更重要。</div>
+<div class="footer">RLHF &copy; 2026</div>
+
+<table>
+<caption>对齐训练方法对比</caption>
+<thead><tr><th>方法</th><th>需要奖励模型</th><th>需要偏好数据</th><th>训练稳定性</th><th>计算成本</th></tr></thead>
+<tbody>
+<tr><td>RLHF(PPO)</td><td>是</td><td>是</td><td>低(调参难)</td><td>高(4模型)</td></tr>
+<tr><td>DPO</td><td>否</td><td>是</td><td>高</td><td>低(2模型)</td></tr>
+<tr><td>KTO</td><td>否</td><td>否(只需标签)</td><td>高</td><td>低</td></tr>
+<tr><td>GRPO</td><td>否</td><td>否(规则奖励)</td><td>中</td><td>中(2模型)</td></tr>
+<tr><td>RLVR</td><td>否</td><td>否(可验证)</td><td>高</td><td>中</td></tr>
+</tbody></table>
+
+
+
+
+
+
+
+
+<p>从工程实践角度看，Verifiable Reward Design的落地需要考虑三个关键维度：首先是性能维度——在标准硬件配置(A100 80GB)上，需要确保推理延迟(P99)控制在500ms以内，吞吐量达到100 QPS以上；其次是可靠性维度——系统需要具备自动故障恢复能力，在单节点故障时能在30秒内完成切换，保证99.9%的可用性SLA；最后是成本维度——通过量化(INT8/INT4)、批处理优化和动态扩缩容等策略，将每千token的推理成本控制在0.01美元以内。</p>
+
+
+
+<p>在Verifiable Reward Design的实际应用中，数据质量是决定最终效果的核心因素。高质量的训练数据需要满足三个条件：多样性(覆盖目标场景的各种边界情况)、一致性(标注标准统一，标注者间一致性>80%)、和代表性(与实际业务数据的分布匹配)。数据清洗流程通常包括：去重(基于MinHash的近似去重)、过滤(移除低质量、有害和重复内容)、和增强(通过回译、同义词替换等方法扩充数据)。</p>
+<p>从系统架构角度，Verifiable Reward Design的部署需要考虑横向扩展能力。当请求量增长时，系统应能通过增加GPU节点来线性提升吞吐量，而不需要修改模型代码。这要求推理框架支持模型并行(将大模型分布到多张GPU上)和数据并行(将不同请求分配到不同GPU上)。主流的推理框架如vLLM和TensorRT-LLM都原生支持这两种并行策略，并提供了自动化的负载均衡机制。</p>
+
+
+<div class="tip"><strong>实践建议：</strong>
+在Verifiable Reward Design的学习过程中，建议结合开源代码进行动手实践。例如，可以使用Hugging Face Transformers库快速搭建原型，通过修改关键参数(如学习率、batch size、层数)来观察对模型性能的影响。这种"实验驱动"的学习方式比纯理论阅读更高效。
+</div>
+<div class="deep"><strong>量化分析：</strong>
+<p>基于公开基准测试数据，Verifiable Reward Design相关技术在标准评测集上的典型表现为：MMLU准确率80-90%、HumanEval pass@1 60-85%、MATH准确率50-90%。从<strong>数学</strong>角度看，这些指标的提升遵循幂律关系——每增加10倍计算量，准确率提升约5-10个百分点。这意味着在资源有限的情况下，应该优先优化数据质量和训练策略，而非单纯增加模型规模。</p>
+</div>
+
+
+<p>从<strong>数学</strong>角度看，该方法的收敛性可以通过策略梯度<strong>定理</strong>来证明。其核心<strong>公式</strong>保证了在足够多的迭代次数后，策略会收敛到局部最优解。</p>
+
+<div class="deep"><strong>🔬 RLVR技术深度剖析与前沿进展：</strong>
+<p>RLVR（Reinforcement Learning with Verifiable Rewards）的核心技术优势源于奖励信号的客观可验证性。DeepSeek-R1（2025年1月发布）的实验表明，仅使用二值奖励（正确=1，错误=0）的GRPO训练，在AIME 2024数学竞赛上从基线模型的15.6%准确率提升至79.8%，在MATH-500上从56.3%提升至97.3%，证明了可验证奖励的强大潜力。关键发现是"推理能力涌现"：纯RL训练（无SFT冷启动）约500步后，模型自发出现Chain-of-Thought推理、自我验证（"等一下，让我重新检查"）和回溯等高级行为，这些能力并非显式教授而是通过优化最终结果被迫习得。GRPO的训练配置通常为：采样温度0.6-0.7，每prompt生成G=16-64个候选，KL系数β=0.04，学习率1e-6到5e-6，使用AdamW优化器。过程奖励模型（PRM）相比结果奖励模型（ORM）的优势在Lightman等人（"Let's Verify Step by Step", ICLR 2024）的工作中得到验证：PRM@best在MATH数据集上比ORM@best高出约5-10个百分点，因为PRM能定位具体错误步骤（通过Monte Carlo采样估计每步正确性，通常每步采样16-100次完成），提供更精细的梯度信号。OpenAI的PRM800K数据集包含80万步骤级标注，标注了每一步推理的正确性。代码可验证任务通常使用沙箱执行（如Docker容器隔离），reward = 通过测试数/总测试数，DeepSeek-Coder-V2在HumanEval上通过RLVR从68.3%提升至89.0%。值得注意的是，RLVR的局限在于仅适用于有明确验证标准的任务，对于开放式对话、创意写作等主观任务仍需依赖人类偏好或AI反馈。</p>
+</div>
+
+<p style="margin-top:1.5rem;padding:0.8rem;border-left:3px solid var(--accent);">📌 <strong>学习目标：</strong>通过本节学习，掌握核心概念与技术原理，为后续进阶学习奠定基础。</p>
+
+<h2>RLVR工程实践：从零搭建可验证奖励训练流程</h2>
+<h3>RLVR训练环境搭建与代码实现</h3>
+<p>搭建一个完整的RLVR训练流程需要四个核心组件：训练数据集（包含prompt和对应的标准答案）、验证器（自动判定模型输出是否正确）、策略模型（被训练的LLM）和GRPO训练器。以数学推理为例，训练数据集通常包含来自GSM8K、MATH、AIME等来源的数学题及其标准答案。验证器的设计是RLVR的关键——对于数学题，通常采用答案精确匹配（Exact Match），即提取模型输出中的最终数值答案与标准答案对比；对于代码题，则在沙箱环境中执行生成的代码并检查测试用例通过率。验证器的准确性直接影响训练效果：如果验证器存在误判（如格式解析错误），会引入噪声奖励信号，导致训练不稳定。因此，建议在训练前先用人工标注的子集测试验证器的准确率，确保达到99%以上再启动大规模训练。训练硬件方面，7B模型在4张A100 80GB GPU上使用GRPO约需24小时完成一个epoch（假设数据集包含50K个prompt，每个采样16个回答）。</p>
+<pre><code># RLVR 数学验证器实现示例
+import re
+import math
+from typing import Optional, Tuple
+
+class MathVerifier:
+    """数学推理答案验证器"""
+
+    def __init__(self):
+        # 匹配 \boxed{...} 格式的答案
+        self.boxed_pattern = re.compile(r'\\boxed\{([^}]+)\}')
+        # 匹配 "The answer is ..." 格式
+        self.answer_pattern = re.compile(
+            r'[Tt]he answer is[:\s]*([^\.\n]+)'
+        )
+
+    def extract_answer(self, text: str) -> Optional[str]:
+        """从模型输出中提取答案"""
+        # 优先尝试 \boxed{} 格式
+        matches = self.boxed_pattern.findall(text)
+        if matches:
+            return self._normalize(matches[-1])  # 取最后一个
+        # 尝试 "The answer is" 格式
+        matches = self.answer_pattern.findall(text)
+        if matches:
+            return self._normalize(matches[-1])
+        return None
+
+    def verify(self, prediction: str, ground_truth: str) -> float:
+        """验证答案正确性, 返回奖励值"""
+        pred = self.extract_answer(prediction)
+        gt = self._normalize(ground_truth)
+        if pred is None:
+            return -1.0  # 无法提取答案, 给负奖励
+        # 数值比较 (允许浮点误差)
+        try:
+            if abs(float(pred) - float(gt)) &lt; 1e-6:
+                return 1.0
+        except ValueError:
+            pass
+        # 字符串精确匹配
+        return 1.0 if pred == gt else -1.0
+
+    def _normalize(self, answer: str) -> str:
+        """标准化答案格式"""
+        answer = answer.strip()
+        answer = answer.replace('\\,', '').replace('\\ ', '')
+        answer = re.sub(r'\s+', '', answer)
+        return answer
+
+# GRPO训练循环中的验证奖励集成
+def compute_rlvr_rewards(prompts, completions, ground_truths):
+    verifier = MathVerifier()
+    rewards = []
+    for prompt, completion, gt in zip(prompts, completions, ground_truths):
+        reward = verifier.verify(completion, gt)
+        rewards.append(reward)
+    # 统计奖励分布
+    avg_reward = sum(rewards) / len(rewards)
+    pos_ratio = sum(1 for r in rewards if r > 0) / len(rewards)
+    print(f"Avg reward: {avg_reward:.3f}, Positive ratio: {pos_ratio:.1%}")
+    return rewards</code></pre>
+
+<h3>RLVR的局限性与混合奖励策略</h3>
+<p>纯RLVR的最大局限在于仅适用于有明确验证标准的任务。对于开放式对话、创意写作、情感分析等主观任务，无法用简单的对错来评判输出质量。为解决这一问题，2025年的研究趋势是混合奖励策略（Hybrid Reward Strategy）——将可验证奖励与学习到的奖励模型结合使用。具体做法是：对于可验证的部分（如代码逻辑正确性、数学答案准确性），使用二值可验证奖励；对于不可验证的部分（如回答的流畅性、表达的优雅性），使用训练好的奖励模型给出连续分数。两种奖励通过加权求和组合：r_total = alpha * r_verifiable + (1-alpha) * r_rm，其中alpha根据任务可验证程度动态调整。DeepSeek-R1的训练流程就采用了这种混合策略：第一阶段使用纯RLVR训练推理能力，第二阶段混合人类偏好奖励训练对话质量，最终模型在推理和对话两个维度上都达到了SOTA水平。另一个重要方向是过程奖励（Process Reward）与结果奖励（Outcome Reward）的结合——PRM对每一步推理给出奖励信号，ORM仅对最终结果给出奖励，两者结合可以在保持训练效率的同时提供更丰富的监督信号。Lightman等人证明，PRM在数学推理上比ORM提升约5-10%，但PRM的标注成本更高（需要步骤级人工标注或Monte Carlo估计）。</p>
+
+<div class="tip"><strong>学习路径建议：</strong><p>建议先理解本节的基础概念和核心原理，再深入学习数学推导和工程实现细节。可结合配套的代码示例进行动手实践，最后通过对比分析巩固所学知识。</p></div>
+<div class="tip"><strong>相关章节：</strong>
+Verifiable Reward Design与以下内容密切相关：<a href="01-对齐训练全景图.html">01-对齐训练全景图</a> | <a href="02-RLHF经典方法详解.html">02-RLHF经典方法详解</a> | <a href="03-DPO偏好优化原理.html">03-DPO偏好优化原理</a>。建议结合学习。
+</div>
+<pre><code class="language-python"># Verifiable Reward Design - 性能基准测试
+import torch, time
+def benchmark(model, x, n=100):
+    for _ in range(10): model(x)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(n): model(x)
+    torch.cuda.synchronize()
+    print(f"Latency: {(time.perf_counter()-t0)/n*1000:.2f}ms")
+</code></pre>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释Verifiable Reward Design的核心原理，并举一个实际应用场景。</li>
+<li>Verifiable Reward Design在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比Verifiable Reward Design与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<pre><code class="language-python"># Verifiable Reward Design 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="tip"><strong>相关章节：</strong>
+Verifiable Reward Design与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body></html>

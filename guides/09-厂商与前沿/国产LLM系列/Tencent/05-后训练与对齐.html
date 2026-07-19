@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>05-后训练与对齐 | 腾讯混元学习指南</title>
+<style>
+:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#c9d1d9;--accent:#58a6ff;--green:#3fb950}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.7;padding:20px;max-width:1000px;margin:0 auto}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.header{border-bottom:1px solid var(--border);padding-bottom:20px;margin-bottom:30px}
+.header h1{font-size:2em;color:#fff}
+.header .breadcrumb{margin-top:8px;font-size:0.9em}
+.badge{display:inline-block;padding:2px 10px;border-radius:12px;font-size:0.75em;font-weight:600;margin-left:6px;vertical-align:middle}
+.badge-open{background:var(--green);color:#000}
+.badge-api{background:var(--accent);color:#000}
+.badge-new{background:#f0883e;color:#000}
+.section{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:24px;margin-bottom:20px}
+.section h2{color:#fff;font-size:1.4em;margin-bottom:12px;border-bottom:1px solid var(--border);padding-bottom:8px}
+.section h3{color:var(--accent);font-size:1.15em;margin:16px 0 8px}
+.section p{margin-bottom:10px}
+.section ul{margin:8px 0 8px 20px}
+.section li{margin-bottom:4px}
+.section code{background:var(--bg);padding:2px 6px;border-radius:4px;color:var(--accent);font-size:0.9em}
+table{width:100%;border-collapse:collapse;margin:12px 0}
+th,td{border:1px solid var(--border);padding:10px 14px;text-align:left}
+th{background:var(--bg);color:var(--accent);font-weight:600}
+tr:hover{background:rgba(88,166,255,0.05)}
+.highlight{background:rgba(63,185,80,0.1);border-left:3px solid var(--green);padding:12px 16px;margin:12px 0;border-radius:0 6px 6px 0}
+.timeline{position:relative;padding-left:30px;margin:16px 0}
+.timeline::before{content:'';position:absolute;left:8px;top:0;bottom:0;width:2px;background:var(--border)}
+.timeline-item{position:relative;margin-bottom:18px}
+.timeline-item::before{content:'';position:absolute;left:-26px;top:6px;width:12px;height:12px;border-radius:50%;background:var(--accent);border:2px solid var(--bg)}
+.timeline-item .date{color:var(--accent);font-size:0.85em;font-weight:600}
+.footer{text-align:center;margin-top:40px;padding-top:20px;border-top:1px solid var(--border);color:var(--text);opacity:0.5;font-size:0.85em}
+.svg-diagram{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;margin:12px 0;overflow-x:auto}
+.svg-diagram svg{display:block;margin:0 auto}
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="nav"><a href="04-预训练策略与数据工程.html">&larr; 04-预训练策略与数据工程</a><span>05 后训练与对齐</span><a href="06-推理能力与长上下文.html">06-推理能力与长上下文 &rarr;</a></div>
+<div class="container">
+
+<h1>Tencent</h1>
+<h2>1. 后训练总览</h2>
+<p>1. 后训练总览的工程实践涉及数据管线、分布式训练和checkpoint管理三大子系统。Tencent的数据管线支持PB级数据的实时处理和质量监控；分布式训练系统采用数据并行+张量并行+流水线并行的三维并行策略；checkpoint管理支持增量保存和快速恢复。这些基础设施的完善程度直接决定了模型训练的效率和稳定性。</p>
+
+<h3>后训练总览的关键设计决策</h3>
+<p>1. 后训练总览的训练流程通常分为三个阶段：预训练(Pre-training)在大规模无标注语料上学习语言表示，微调(Fine-tuning)在任务特定数据上适配下游任务，对齐(Alignment)通过人类偏好反馈优化输出质量。每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。</p>
+
+
+
+<div class="tip"><strong>通俗类比：</strong>Tencent在技术实现方面的技术积累是多年工程实践的结果。从最初的架构探索到大规模部署的工程优化，每一步都建立在对前一步经验的总结之上。这种渐进式的技术演进路线确保了每次改进都是可验证和可复现的。</div>
+<div class="warn"><strong>常见误区：</strong>学习Tencent的1. 后训练总览时不要以为注意力权重大的token一定重要。注意力反映的是Q-K相关性而非语义重要性。Tencent的多头注意力通过多个视角综合判断。</div>
+<div class="deep"><strong>深入探讨：</strong>从KV Cache的显存公式看，Tencent在1. 后训练总览方面的优化有明确的数学依据。2×n_layers×n_heads×d_head×seq_len×batch×bytes决定了显存占用。Tencent通过分页管理和量化压缩将KV Cache显存降低50%以上。</div>
+<div class="ascii"><pre>后训练总览 - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<p>腾讯混元的后训练经历了从 RLHF 到 DPO 再到 GRPO 的演进：</p>
+<div class="svg-diagram"><svg viewBox="0 0 700 380" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah05a" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#58a6ff"/></marker></defs>
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style>
+<text x="350" y="22" text-anchor="middle" fill="#fff" font-size="15" font-weight="bold">后训练演进路线</text>
+<!-- Stage 1: Hunyuan-Large -->
+<rect x="100" y="45" width="500" height="85" rx="8" fill="rgba(88,166,255,0.06)" stroke="#58a6ff" stroke-width="2"/>
+<text x="120" y="68" fill="#58a6ff" font-size="14" font-weight="bold">Hunyuan-Large (2024.11)</text>
+<text x="130" y="86" fill="#c9d1d9" font-size="11">SFT: 1M+ 指令, 3 epochs, LR 2e-5→2e-6</text>
+<text x="130" y="102" fill="#c9d1d9" font-size="11">Attn Dropout: 0.1, Hidden Dropout: 0.2</text>
+<text x="130" y="118" fill="#c9d1d9" font-size="11">RLHF: DPO (离线+在线集成)</text>
+<line x1="350" y1="130" x2="350" y2="155" stroke="#58a6ff" stroke-width="2" marker-end="url(#ah05a)"/>
+<!-- Stage 2: Hunyuan TurboS -->
+<rect x="100" y="155" width="500" height="85" rx="8" fill="rgba(34,211,153,0.06)" stroke="#34d399" stroke-width="2"/>
+<text x="120" y="178" fill="#34d399" font-size="14" font-weight="bold">Hunyuan TurboS (2025.05)</text>
+<text x="130" y="196" fill="#c9d1d9" font-size="11">SFT: 3M 指令 (自然+合成), 13 细粒度类别</text>
+<text x="130" y="212" fill="#c9d1d9" font-size="11">Adaptive CoT Fusion · Multi-round Deliberation</text>
+<text x="130" y="228" fill="#c9d1d9" font-size="11">Two-stage GRPO (两阶段强化学习)</text>
+<line x1="350" y1="240" x2="350" y2="265" stroke="#34d399" stroke-width="2" marker-end="url(#ah05a)"/>
+<!-- Stage 3: Hunyuan-T1 -->
+<rect x="100" y="265" width="500" height="60" rx="8" fill="rgba(167,139,250,0.06)" stroke="#a78bfa" stroke-width="2"/>
+<text x="120" y="290" fill="#a78bfa" font-size="14" font-weight="bold">Hunyuan-T1 (2025.03)</text>
+<text x="130" y="310" fill="#fbbf24" font-size="12" font-weight="bold">96.7% 算力投入强化学习 (RL)</text>
+</svg></div>
+
+<h2>2. SFT 配置对比</h2>
+<p>Tencent在2. SFT 配置对比方面的技术积累体现在数据质量控制和训练策略优化两个维度。在数据方面，Tencent建立了多层数据过滤管线：基于规则的过滤、基于分类器的质量评分和基于多样性的采样。在训练策略方面，Tencent采用了学习率warmup、梯度裁剪和z-loss正则化等技术保障训练稳定性。这些措施确保了模型在大规模训练中的一致性和可复现性。</p>
+
+<h3>从1M到3M指令的MoE特化正则策略</h3>
+<p>混元SFT从Hunyuan-Large的1M+指令扩展到TurboS的3M指令（自然+合成），并引入13个细粒度主题分类。针对MoE架构的稀疏激活特性，SFT阶段设置了Attn Dropout=0.1和Hidden Dropout=0.2的强正则化，防止模型过拟合特定专家路径——因为只有被路由选中的专家参与前向传播，这些专家在训练中被反复更新，容易形成"赢者通吃"的过拟合模式。</p>
+<div class="tip"><strong>通俗类比：</strong>SFT 配置对比就像货币换算——美元→人民币，精度损失但面值等价。腾讯在混元Turbo中的实现充分体现了这一设计理念。</div>
+<div class="warn"><strong>常见误区：</strong>关于Tencent的1. 后训练总览，不要以为看到很多优化技术就焦虑要全部学完。大部分技术互补非互斥。Tencent建议先掌握核心概念其他用到再学。</div>
+<div<div class="deep"><strong>深入探讨：</strong>Tencent在1. 后训练总览方面的技术深度体现在对核心算法的数学理解上。从信息论角度看，模型的每一层都在进行信息压缩和提取——将高维输入压缩为低维表示，同时保留任务相关的关键信息。Tencent通过注意力机制实现动态的信息路由，让模型根据输入内容自适应地决定关注什么和忽略什么。</div>v class="ascii"><pre>SFT 配置对比 - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>方法</th><th>可训练参数</th><th>显存需求</th><th>效果</th></tr>
+<tr><td>全量微调</td><td>100%</td><td>极高</td><td>★★★★★</td></tr>
+<tr><td>LoRA</td><td>0.1-1%</td><td>中</td><td>★★★★</td></tr>
+<tr><td>QLoRA</td><td>0.1-1%</td><td>低</td><td>★★★★</td></tr>
+<tr><td>DoRA</td><td>0.1-1%</td><td>中</td><td>★★★★★</td></tr></table>
+
+<table>
+<thead><tr><th>配置</th><th>Hunyuan-Large</th><th>Hunyuan TurboS</th></tr></thead>
+<tbody>
+<tr><td>指令数量</td><td class="hl">1M+</td><td class="hl">3M (自然+合成)</td></tr>
+<tr><td>训练轮数</td><td>3 epochs</td><td>—</td></tr>
+<tr><td>学习率</td><td>2e-5 → 2e-6</td><td>—</td></tr>
+<tr><td>Attn Dropout</td><td class="hl">0.1</td><td>—</td></tr>
+<tr><td>Hidden Dropout</td><td class="hl">0.2</td><td>—</td></tr>
+<tr><td>类别划分</td><td>—</td><td>13 细粒度主题</td></tr>
+</tbody>
+</table>
+<div class="box info">
+  <div class="label">💡 MoE 更受益于 Dropout</div>
+  <p>MoE 的稀疏激活特性使模型更容易过拟合特定专家路径。Attention Dropout (0.1) + Hidden Dropout (0.2) 有效缓解此问题。</p>
+</div>
+
+<h2>3. Adaptive CoT Fusion</h2>
+<p>3. Adaptive CoT Fusion是Tencent技术体系中的重要组成部分。从系统工程角度看，这一技术的实现需要平衡计算效率、内存占用和输出质量三个维度。Tencent通过精心的架构设计和工程优化，在这三个维度上都达到了令人满意的平衡点。这种平衡能力是Tencent技术成熟度的重要体现。</p>
+<h3>根据问题难度动态选择思维链推理的TurboS创新</h3>
+
+
+
+<div class="tip"><strong>通俗类比：</strong>如果把Adaptive CoT Fusion比作酿酒，粮食(数据)+酒曲(算法)+时间(算力)=好酒(模型)。</div>
+<div class="warn"><strong>常见误区：</strong>关于Tencent的1. 后训练总览，不要以为LoRA能完全替代全量微调。LoRA在95%任务接近全量微调，但改变行为模式时全量更好。Tencent根据任务复杂度选择。</div>
+<div cla<div class="deep"><strong>深入探讨：</strong>从模型评估的统计学角度看，Tencent在1. 后训练总览方面的评估需要考虑置信区间。MMLU的14K题目在95%置信度下只有±1%精度。Tencent通过多个基准综合评估缓解统计噪声问题。</div>ass="ascii"><pre>Adaptive CoT Fusion - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<p>TurboS 核心创新：根据问题难度动态选择是否使用思维链：</p>
+<div class="svg-diagram"><svg viewBox="0 0 700 340" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah05b" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+
+
+<div class="tip"><strong>通俗类比：</strong>Multi-round Deliberation 就像酿酒——粮食(数据)+酒曲(算法)+时间(算力)=好酒(模型)。<div class="warn"><strong>常见误区：</strong>Tencent在1. 后训练总览方面的误区是以为看到很多技术就都要学。实际上大部分技术互补非互斥。Tencent建议先搞懂核心概念，其他用到再学。</div>。</div>
+<div class="<div class="deep"><strong>深入探讨：</strong>从技术经济学角度分析，Tencent的投入产出比取决于三个因素：技术成熟度、业务价值和团队能力。Tencent在技术选型时采用"技术就绪度"(TRL)评估框架——只有TRL≥6的技术才会进入生产系统。</div>"ascii"><pre>Multi-round Deliberation Learning - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<table>
+<thead><tr><th>步骤</th><th>方法</th><th>目的</th></tr></thead>
+<tbody>
+<tr><td>1. 弱点发现</td><td>多 LLM 评委联合评估</td><td>识别"弱点画像"</td></tr>
+<tr><td>2. 定向训练</td><td>专家标注"损失数据"</td><td>针对性提升</td></tr>
+<tr><td>3. 课程学习</td><td>渐进式难度提升</td><td>稳定训练</td></tr>
+<tr><td>4. 迭代优化</td><td>重复 1-3</td><td>持续改进</td></tr>
+</tbody>
+</table>
+
+<h2>5. Two-stage GRPO</h2>
+<p>Tencent在5. Two-stage GRPO方面的技术实现体现了其对工程质量和创新的追求。从技术原理到工程落地，Tencent在每个环节都进行了深入的优化。这些优化不仅提升了模型的性能指标，更重要的是提升了模型在实际应用中的可靠性和用户体验。Tencent的技术团队在实践中积累的"隐性知识"是其核心竞争力之一。</p>
+
+<h3>Two-stage GRPO的工作流程与数据流</h3>
+<p>5. Two-stage GRPO的训练流程通常分为三个阶段：预训练(Pre-training)在大规模无标注语料上学习语言表示，微调(Fine-tuning)在任务特定数据上适配下游任务，对齐(Alignment)通过人类偏好反馈优化输出质量。每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。</p<div class="tip"><strong>通俗类比：</strong>Tencent在技术实现方面的核心创新体现了理论与工程的深度结合。从技术原理到生产部署，Tencent在每个环节都进行了系统性的优化。</div>/div>
+<div class="warn"><strong>常见误区：</strong>Tencent在1. 后训练总览方面的一个误区是以为训练数据越多越好。数据质量远比数量重要——低质量数据不仅浪费算力还可能污染模型能力。Tencent通过多层过滤管线确保数据质量。</div>
+<div class="deep<div class="deep"><strong>深入探讨：</strong>Tencent在1. 后训练总览方面的推理优化遵循三个方向：稀疏注意力降低计算量、线性注意力降低复杂度、IO优化降低内存访问。FlashAttention属于第三种——不减少计算但减少HBM访问，实测2-4倍加速。</div>ii"><pre>Two-stage GRPO - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<h3>5.1 奖励系统</h3>
+<table>
+<thead><tr><th>组件</th><th>描述</th><th>规模</th></tr></thead>
+<tbody>
+<tr><td>GRM-CoT</td><td>思维链奖励模型</td><td class="hl">~200K 人工标注对</td></tr>
+<tr><td>答案一致性</td><td>Answer Consistency Model</td><td>验证正确性</td></tr>
+<tr><td>代码沙箱</td><td>Multilingual Code Sandbox</td><td class="hl">36语言, ~800K样本</td></tr>
+</tbody>
+</table>
+
+<h3>5.2 两阶段训练</h3>
+<div class="svg-diagram"><svg viewBox="0 0 700 320" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah05c" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#58a6ff"/></marker></defs>
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style>
+<text x="350" y="22" text-anchor="middle" fill="#fff" font-size="15" font-weight="bold">Two-stage GRPO</text>
+<!-- Stage I -->
+<rect x="60" y="45" width="280" height="130" rx="8" fill="rgba(34,211,153,0.06)" stroke="#34d399" stroke-width="2"/>
+<text x="80" y="68" fill="#34d399" font-size="14" font-weight="bold">Stage I: 推理领域</text>
+<text x="80" y="88" fill="#c9d1d9" font-size="11">• 300K 推理样本</text>
+<text x="100" y="104" fill="#8b949e" font-size="10">(逻辑/代码/数学/科学)</text>
+<text x="80" y="124" fill="#c9d1d9" font-size="11">• 小 KL 约束</text>
+<text x="100" y="140" fill="#8b949e" font-size="10">→ 允许更大策略偏移</text>
+<text x="100" y="160" fill="#fbbf24" font-size="10" font-weight="bold">专注推理能力提升</text>
+<!-- Arrow -->
+<line x1="340" y1="110" x2="380" y2="110" stroke="#58a6ff" stroke-width="2.5" marker-end="url(#ah05c)"/>
+<!-- Stage II -->
+<rect x="380" y="45" width="260" height="130" rx="8" fill="rgba(167,139,250,0.06)" stroke="#a78bfa" stroke-width="2"/>
+<text x="400" y="68" fill="#a78bfa" font-size="14" font-weight="bold">Stage II: 通用领域</text>
+<text x="400" y="88" fill="#c9d1d9" font-size="11">• 12+ 类别</text>
+<text x="400" y="108" fill="#c9d1d9" font-size="11">• 保留 10% 推理数据</text>
+<text x="400" y="128" fill="#c9d1d9" font-size="11">• 增大 KL 约束</text>
+<text x="420" y="144" fill="#8b949e" font-size="10">→ 防止遗忘推理能力</text>
+<text x="420" y="160" fill="#fbbf24" font-size="10" font-weight="bold">泛化到通用任务</text>
+<!-- Loss details -->
+<rect x="60" y="200" width="580" height="50" rx="6" fill="rgba(34,211,211,0.04)" stroke="#30363d" stroke-width="1.5"/>
+<text x="80" y="222" fill="#22d3ee" font-size="12" font-weight="bold">Loss:</text>
+<text x="130" y="222" fill="#c9d1d9" font-size="11">Token-level GRPO + Clipping + BON loss</text>
+<text x="80" y="240" fill="#22d3ee" font-size="12" font-weight="bold">采样:</text>
+<text x="130" y="240" fill="#c9d1d9" font-size="11">Dynamic sampling, temperature=1.0</text>
+<!-- Reward system -->
+<rect x="60" y="265" width="580" height="45" rx="6" fill="rgba(251,191,36,0.04)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="80" y="285" fill="#fbbf24" font-size="12" font-weight="bold">奖励系统:</text>
+<text x="180" y="285" fill="#c9d1d9" font-size="11">GRM-CoT (~200K标注) + 答案一致性 + 代码沙箱 (36语言, ~800K样本)</text>
+</svg></div>
+
+<h2>6. Hunyuan-T1: 极致 RL</h2>
+<p>6. Hunyuan-T1: 极致 RL是Tencent技术体系中的重要组成部分。从系统工程角度看，这一技术的实现需要平衡计算效率、内存占用和输出质量三个维度。Tencent通过精心的架构设计和工程优化，在这三个维度上都达到了令人满意的平衡点。这种平衡能力是Tencent技术成熟度的重要体现。</p>
+
+<h3>96.7%算力投入强化学习的课程学习与策略重置</h3>
+<div class="tip"><strong>通俗类比：</strong>理解Hunyuan-T1: 极致 RL的关键在于规模。类比矿石冶炼：原矿选矿冶炼精炼，腾讯的混元架构正是基于这一思想。</div>
+<div class="warn"><strong>常见误区：</strong>Tencent在1. 后训练总览方面的一个误区是以为KV Cache可以随意删除。没有KV Cache每token都要重算所有K/V，速度下降百倍。Tencent将KV Cache视为推理必需品。</div>
+<div class="deep"><s<div class="deep"><strong>深入探讨：</strong>从Scaling Law的数学形式看，Tencent在1. 后训练总览方面的训练策略有理论支撑。L(N,D)=(N_c/N)^α_N+(D_c/D)^α_D表明固定计算预算下存在最优参数-数据配比。Tencent的训练资源配置正是基于这一公式。</div><pre>Hunyuan-T1: 极致 RL - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<p>96.7% 算力投入强化学习：</p>
+<table>
+<thead><tr><th>技术</th><th>详情</th></tr></thead>
+<tbody>
+<tr><td>课程学习</td><td>渐进式数据难度提升</td></tr>
+<tr><td>上下文扩展</td><td>逐步扩展上下文长度</td></tr>
+<tr><td>数据回放</td><td>经典 RL 数据回放</td></tr>
+<tr><td>策略重置</td><td>周期性重置防止坍塌</td></tr>
+<tr><td>统一奖励</td><td>统一奖励 + 自奖励机制</td></tr>
+</tbody>
+</table>
+<div class="box warn">
+  <div class="label">⚠️ T1 基准成绩</div>
+  <p>MMLU-PRO: <strong>87.2</strong> | GPQA-Diamond: <strong>69.3</strong> | LiveCodeBench: <strong>64.9</strong> | ArenaHard: <strong>91.9</strong> | 解码速度: <strong>2x</strong></p>
+</div>
+
+<h2>7. 小结</h2>
+<p>Tencent在7. 小结方面的技术实现体现了其对工程质量和创新的追求。从技术原理到工程落地，Tencent在每个环节都进行了深入的优化。这些优化不仅提升了模型的性能指标，更重要的是提升了模型在实际应用中的可靠性和用户体验。Tencent的技术团队在实践中积累的"隐性知识"是其核心竞争力之一。</p>
+
+<h3>7. 小结的工程实践与性能优化</h3>
+<p>在实际工程应用中，7. 小结的实现需要在准确率、推理速度和资源消耗之间找到最优平衡。关键优化策略包括：(1)算子融合(Operator Fusion)将多个小kernel合并为一个大kernel，减少GPU启动开销和中间结果的显存读写；(2)混合精度计算在保持数值稳定性的前提下使用FP16/BF16，将显存占用降低约50%；(3)动态批处理(Dynamic Batching)根据请求的序列长度自适应调整batch大小，最大化GPU利用率。</p>
+
+
+<h3>7. 小结的最新研究进展与未来方向</h3>
+
+
+<h3>7. 小结的工程实践与性能优化（Tencent视角1）</h3>
+<p>在实际工程应用中，7. 小结的实现需要在准确率、推理速度和资源消耗之间找到最优平衡。关键优化策略包括：(1)算子融合(Operator Fusion)将多个小kernel合并为一个大kernel，减少GPU启动开销和中间结果的显存读写；(2)混合精度计算在保持数值稳定性的前提下使用FP16/BF16，将显存占用降低约50%；(3)动态批处理(Dynamic Batching)根据请求的序列长度自适应调整batch大小，最大化GPU利用率。</p>
+
+
+<h3>7. 小结的最新研究进展与未来方向（Tencent视角1）</h3>
+
+
+
+<div class="tip"><strong>通俗类比：</strong>小结就像快递分拣中心——包裹(请求)进来按地址(类型)分拣快速出库。</div>
+<div class="warn"><strong>常见误区：</strong>Tencent在1. 后训练总览方面的一个重要误区是对齐训练只会让模型"变安全"。实际上对齐同时影响表达风格、详细程度和创造力。过度对齐会导致模型变得模板化。Tencent通过精心设计的对齐数据集避免了这个问题。</div>
+<div class="deep"><stron<div class="deep"><strong>深入探讨：</strong>从分布式系统的角度看，Tencent面临的核心挑战是"一致性与可用性的权衡"。在大规模训练中，所有节点严格同步会带来巨大的通信开销；而异步更新可能导致梯度过期问题。Tencent采用的折中方案是在保证数据一致性的同时最大化硬件利用率。</div>>小结 - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<div class="box tip">
+  <div class="label">✅ 要点</div>
+  <ol>
+    <li><strong>SFT</strong>: 1M→3M 指令, MoE 需更强 Dropout (Attn 0.1, Hidden 0.2)</li>
+    <li><strong>Adaptive CoT</strong>: 自适应思维链, token 消耗仅 DeepSeek-R1 的 53%</li>
+    <li><strong>多轮审议</strong>: 多评委→弱点发现→定向训练→迭代</li>
+    <li><strong>GRPO</strong>: Stage I 推理(300K,小KL) → Stage II 通用(12+类别,大KL)</li>
+    <li><strong>奖励</strong>: GRM-CoT(200K) + 答案一致性 + 代码沙箱(36语言)</li>
+    <li><strong>T1</strong>: 96.7% 算力 RL, 统一+自奖励</li>
+  </ol>
+</div>
+
+</div>
+<p>从Tencent的技术原理深入分析，预训练的数学本质是在大规模语料上最大化下一个token的条件概率：L = -Σ log P(x_t|x_{<t};θ)。这个损失函数的梯度反向传播需要计算每层权重的偏导数，计算量与模型参数量和序列长度的乘积成正比。</p>
+<div class="footer"><p><a href="index.html">返回腾讯混元总览</a> | <a href="../index.html">返回国产LLM总览</a> | 腾讯混元系列深度学习指南</p></div>
+
+<div class="deep"><strong>思考与练习：</strong>
+<ol>
+<li><strong>概念理解：</strong>请用自己的话解释"后训练总览"的核心原理，并说明它在Tencent技术体系中的定位。</li>
+<li><strong>对比分析：</strong>对比"后训练总览"与"SFT 配置对比"的异同点，分析各自的适用场景和优劣势。</li>
+<li><strong>实践思考：</strong>如果要将本章技术应用到实际项目中，你会如何设计方案？请列出关键步骤并说明可能遇到的挑战。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+本章内容为理解Tencent后续更高级的技术主题奠定了基础。建议在学习后续章节时，回顾本章的核心概念作为知识锚点。特别是本章介绍的关键技术原理，将在后续的性能优化和工程部署中反复出现。
+</div>
+
+<div class="deep"><strong>深入<div class="deep"><strong>深入探讨：</strong>从KV Cache的显存公式看，Tencent在1. 后训练总览方面的优化有明确的数学依据。2×n_layers×n_heads×d_head×seq_len×batch×bytes决定了显存占用。Tencent通过分页管理和量化压缩将KV Cache显存降低50%以上。</div>HF到更高效对齐范式的转变。早期Hunyuan-Large采用DPO进行离线对齐，其优势在于无需训练单独的奖励模型，直接从偏好对数据中学习策略。然而DPO的局限性在于其离线特性——训练数据一旦固定，模型无法探索新的策略空间。为此，TurboS引入了Two-stage GRPO方法，第一阶段在推理密集任务（逻辑、代码、数学、科学）上以较小的KL约束允许更大策略偏移，专注提升推理能力；第二阶段在12+通用类别上训练，同时保留10%推理数据并增大KL约束以防止灾难性遗忘。这种分阶段设计有效平衡了推理专长与通用能力之间的矛盾。</p>
+
+<p>在奖励模型设计方面，腾讯构建了多层次的奖励信号体系。GRM-CoT（Chain-of-Thought Reward Model）基于约200K人工标注的思维链偏好对训练，能够评估模型推理过程的质量而非仅看最终答案。答案一致性模型则验证生成结果的正确性，作为硬约束确保输出准确。最具创新性的是多语言代码沙箱——支持36种编程语言、约800K样本的自动化代码执行验证，这使得代码生成任务的奖励信号从"近似估计"提升为"确定性验证"。Hunyuan-T1更是将96.7%的算力投入强化学习，采用课程学习渐进提升数据难度、逐步扩展上下文长度、经典RL数据回放以及周期性策略重置防止坍塌等技术，在MMLU-PRO上达到87.2分，ArenaHard上达到91.9分，同时解码速度相比前代提升2倍，充分验证了"以RL为核心"的后训练范式的有效性。</p>
+
+<p>从工程实现角度审视腾讯混元的后训练流水线，其Angel-RL框架在分布式强化学习训练中发挥了关键作用。传统的RLHF训练面临三大挑战：(1)生成阶段的GPU利用率低（rollout过程中大量算力闲置）；(2)奖励计算与策略更新之间的流水线气泡；(3)大规模偏好数据的存储与访问瓶颈。Angel-RL通过连续Rollout引擎解决了第一个问题——在策略模型更新的同时不中断生成流水线，利用异步参数同步机制确保生成样本的策略版本偏差控制在可接受范围内。对于第二个问题，Angel-RL将奖励计算（包括GRM-CoT推理、代码沙箱执行和答案一致性验证）设计为异步流水线，与策略梯度计算重叠执行，使GPU利用率从传统方案的40-50%提升至75%以上。此外，腾讯在SFT阶段引入了MoE特化的正则化策略：Attention Dropout设为0.1、Hidden Dropout设为0.2，这是因为MoE架构的稀疏激活特性使得模型更容易过拟合特定专家路径——只有被路由选中的专家参与前向传播，这些专家在训练中被反复更新，容易形成"赢者通吃"的过拟合模式。</p>
+
+<p>在对齐安全性方面，腾讯混元采用了分层防御体系来应对"对齐税"问题。第一层是数据层过滤——在SFT数据构建阶段，通过多轮质量审核和有害内容检测确保训练数据的安全性基线；第二层是训练层约束——在GRPO训练中引入KL散度惩罚项，防止策略模型偏离参考模型过远导致安全能力退化，其中Stage I使用较小KL约束允许推理能力的充分探索，Stage II增大KL约束保护通用能力和安全边界；第三层是推理层防护——部署阶段通过安全分类器对模型输出进行实时检测和过滤。这种三层防御体系有效缓解了"过度对齐"（over-alignment）问题——即模型因过度追求安全性而拒绝合理请求的现象。腾讯的实验数据表明，通过精细化的KL约束调度和分阶段训练策略，可以在安全性评分保持在95%以上的同时，将"过度拒绝率"控制在3%以下，显著优于传统RLHF方案中常见的8-15%过度拒绝率。</p>
+
+<p style="margin-top:1.5rem;padding:0.8rem;background:var(--surface-2,#1e1e2e);border-radius:6px;border-left:3px solid var(--accent,#7c3aed);">📌 <strong>学习目标：</strong>通过本节学习，掌握核心概念与技术原理，为后续进阶学习奠定基础。</p>
+<div class="tip"><strong>学习路径建议：</strong><p>建议先理解本节的基础概念和核心原理，再深入学习数学推导和工程实现细节。可结合配套的代码示例进行动手实践，最后通过对比分析巩固所学知识。</p></div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释后训练总览的核心原理，并举一个实际应用场景。</li>
+<li>后训练总览在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比后训练总览与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="ascii">
+后训练总览 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+</div>
+<div class="tip"><strong>相关章节：</strong>
+后训练总览与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

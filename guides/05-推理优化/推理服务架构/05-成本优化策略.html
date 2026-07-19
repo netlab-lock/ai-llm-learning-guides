@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>05-成本优化策略 | 推理服务架构</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #58a6ff; text-decoration: none; }
+.nav span { color: #8b949e; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+h1 { color: #58a6ff; font-size: 2em; margin: 24px 0 16px; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 12px; margin: 32px 0 16px; font-size: 1.5em; }
+h3 { color: #d2a8ff; margin: 24px 0 12px; font-size: 1.2em; }
+h4 { color: #79c0ff; margin: 16px 0 8px; }
+p { margin: 8px 0; }
+code { background: #21262d; color: #79c0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; margin: 12px 0; font-size: 0.85em; line-height: 1.5; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th { background: #21262d; color: #f0f6fc; padding: 10px 14px; text-align: left; border: 1px solid #30363d; font-weight: 600; }
+td { padding: 8px 14px; border: 1px solid #30363d; }
+tr:nth-child(even) { background: #161b22; }
+.tip { background: #0d1d30; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.exercise { background: #0d2818; border-left: 4px solid #238636; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.svg-diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; text-align: center; }
+.svg-diagram svg { max-width: 100%; height: auto; }
+.ascii { background: #161b22; border: 1px solid #30363d; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82em; line-height: 1.5; padding: 16px; overflow-x: auto; margin: 16px 0; white-space: pre; border-radius: 6px; }
+ul, ol { margin: 8px 0 8px 24px; }
+li { margin: 4px 0; }
+a { color: #58a6ff; }
+.keyword { color: #ff7b72; } .string { color: #a5d6ff; } .comment { color: #8b949e; } .cmd { color: #79c0ff; }
+.footer { text-align: center; color: #484f58; margin-top: 48px; padding: 24px 0; border-top: 1px solid #21262d; font-size: 0.9em; }
+.footer a { color: #58a6ff; }
+.next-prev { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 16px; border-top: 1px solid #21262d; }
+.next-prev a { padding: 8px 16px; background: #21262d; border-radius: 6px; }
+.tag { display: inline-block; background: #388bfd22; color: #58a6ff; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+.badge-blue { background: #1f6feb33; color: #58a6ff; }
+.badge-green { background: #23863633; color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="04-多模型与Serverless推理.html">&larr; 04-多模型与Serverless推理</a><span>推理服务架构</span><a href="06-监控与可观测性.html">06-监控与可观测性 &rarr;</a></div>
+<div class="container">
+
+<h1>💰 成本优化策略</h1>
+
+<h2>1. LLM 推理成本构成</h2>
+<h3>LLM 推理成本构成</h3><div class="tip"><strong>💡 通俗类比：</strong>LLM推理成本就像开餐厅——硬件成本(GPU)是房租和厨房设备(占60-70%)，运营成本(电费、冷却)是水电煤气(占20-30%)，软件成本是菜单设计和收银系统(占5-10%)。推理成本优化的核心是提高"翻台率"(GPU利用率)——同样的厨房，一晚接待100桌和50桌，每桌成本差一倍。</div>
+<div class="warn"><strong>⚠️ 常见误区：</strong>不要只看GPU单价而忽略总拥有成本(TCO)。一张H100云上$3-8/小时看似便宜，但加上网络(InfiniBand)、存储(NVMe)、电费、冷却、运维人力，实际成本可能是GPU单价的1.5-2倍。自建集群vs云服务的选择取决于负载稳定性：稳定负载选自建(长期便宜30-50%)，波动负载选云+Spot实例。</div>
+trong>通俗类比：</strong>LLM 推理成本构成</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 620 520" xmlns="http://www.w3.org/2000/svg" style="font-family:'Cascadia Code','Fira Code',monospace">
+  <text x="310" y="24" fill="#c9d1d9" font-size="15" text-anchor="middle" font-weight="bold">LLM 推理成本构成 (以 Llama-3-70B 为例)</text>
+
+  <!-- Hardware box -->
+  <rect x="30" y="50" width="560" height="130" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="1.5"/>
+  <rect x="30" y="50" width="560" height="28" rx="6" fill="#22d3ee22"/>
+  <text x="50" y="70" fill="#22d3ee" font-size="13" font-weight="bold">硬件成本 (60-70%)</text>
+  <text x="50" y="100" fill="#c9d1d9" font-size="12">GPU: H100 × 8 = ~$240K (购买) 或 $3-8/GPU/hour (云)</text>
+  <text x="50" y="120" fill="#c9d1d9" font-size="12">网络: InfiniBand ~$10-30K</text>
+  <text x="50" y="140" fill="#c9d1d9" font-size="12">存储: NVMe SSD ~$5-10K</text>
+  <text x="540" y="70" fill="#22d3ee" font-size="11" text-anchor="end" opacity="0.7">GPU</text>
+
+  <!-- Operations box -->
+  <rect x="30" y="200" width="560" height="130" rx="6" fill="#161b22" stroke="#34d399" stroke-width="1.5"/>
+  <rect x="30" y="200" width="560" height="28" rx="6" fill="#34d39922"/>
+  <text x="50" y="220" fill="#34d399" font-size="13" font-weight="bold">运营成本 (20-30%)</text>
+  <text x="50" y="250" fill="#c9d1d9" font-size="12">电费: 8 × H100 × 700W = 5.6KW → ~$5-10/小时</text>
+  <text x="50" y="270" fill="#c9d1d9" font-size="12">冷却: ~20% 电费</text>
+  <text x="50" y="290" fill="#c9d1d9" font-size="12">运维: 人力成本</text>
+  <text x="540" y="220" fill="#34d399" font-size="11" text-anchor="end" opacity="0.7">CPU</text>
+
+  <!-- Software box -->
+  <rect x="30" y="350" width="560" height="130" rx="6" fill="#161b22" stroke="#a78bfa" stroke-width="1.5"/>
+  <rect x="30" y="350" width="560" height="28" rx="6" fill="#a78bfa22"/>
+  <text x="50" y="370" fill="#a78bfa" font-size="13" font-weight="bold">软件成本 (5-10%)</text>
+  <text x="50" y="400" fill="#c9d1d9" font-size="12">API 调用费 (如果用第三方模型)</text>
+  <text x="50" y="420" fill="#c9d1d9" font-size="12">监控/日志服务</text>
+  <text x="50" y="440" fill="#c9d1d9" font-size="12">安全/合规成本</text>
+  <text x="540" y="370" fill="#a78bfa" font-size="11" text-anchor="end" opacity="0.7">Memory</text>
+
+  <!-- Connecting arrows -->
+  <line x1="310" y1="180" x2="310" y2="200" stroke="#484f58" stroke-width="1" marker-end="url(#arr1)"/>
+  <line x1="310" y1="330" x2="310" y2="350" stroke="#484f58" stroke-width="1" marker-end="url(#arr1)"/>
+  <defs><marker id="arr1" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#484f58"/></marker></defs>
+</svg>
+</div>
+
+<h2>2. 成本优化策略全景</h2>
+<h3>成本优化策略全景</h3>
+
+
+
+
+<div class="tip"><strong>💡 通俗类比：</strong>成本优化策略就像省钱的各种方式——量化(FP8/INT4)相当于买小包装(省钱但可能不够用)，缓存优化相当于批量采购(重复利用减少浪费)，Batch API相当于错峰出行(延迟但便宜50%)，Spot实例相当于等打折(便宜60-70%但可能被抢)。最佳策略是组合使用。</div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="ascii">
+成本优化策略分类:
+
+├─ 精度优化
+│   ├─ FP16/BF16: 2x 内存节省
+│   ├─ FP8: 2x 内存 + 2x 速度
+│   ├─ INT4 (GPTQ/AWQ): 4x 内存
+│   └─ INT3: 5x 内存 (精度损失大)
+│
+├─ 缓存优化
+│   ├─ KV Cache 复用 (Prefix Caching)
+│   ├─ 结果缓存 (完全相同查询)
+│   ├─ 语义缓存 (相似查询)
+│   └─ Prompt Caching (API 级别)
+│
+├─ 批处理优化
+│   ├─ 连续批处理 (Continuous Batching)
+│   ├─ Batch API (异步批处理)
+│   └─ 序列打包 (Sequence Packing)
+│
+├─ 架构优化
+│   ├─ 分离架构 (Prefill/Decode 分离)
+│   ├─ 多模型共享 GPU
+│   └─ Serverless (按需扩缩)
+│
+└─ 采购优化
+    ├─ Spot/Preemptible 实例 (便宜 60-70%)
+    ├─ 预留实例 (便宜 30-50%)
+    └─ 自建 vs 云服务选择
+</div>
+
+<h2>3. 量化部署详解<技术选择和优化决策。</p>
+
+<h3>量化部署详解</h3>
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+<tr><th>精度</th><th>模型大小 (70B)</th><th>精度损失</th><th>速度提升</th><th>成本节省</th></tr>
+<tr><td>FP16</td><td>140 GB</td><td>无</td><td>基线</td><td>—</td></tr>
+<tr><td>FP8</td><td>70 GB</td><td>极小 (< 0.5%)</td><td>~1.5x</td><td>~2x</td></tr>
+<tr><td>INT4 (GPTQ)</td><td>35 GB</td><td>小 (< 1%)</td><td>~2x</td><td>~4x</td></tr>
+<tr><td>INT4 (AWQ)</td><td>35 GB</td><td>小 (< 1%)</td><td>~2x</td><td>~4x</td></tr>
+<tr><td>INT3</td><td>26 GB</td><td>中等 (1-3%)</td><td>~2.5x</td><td>~5x</td></tr>
+</table>
+
+<h2>4. Prompt Caching 成本分析</h2>
+<h3>Prompt Caching 成本分析</h3>
+
+
+
+
+<div class="warn"><strong>⚠️ 常见误区：</strong>Prompt Caching的收益取决于"前缀复用率"。如果你的system prompt只有100 token但用户查询平均1000 token，缓存只能节省约9%的Prefill计算。真正高收益的场景是：RAG应用(system prompt 2K+ token含检索文档)、Agent系统(长system prompt+短交互)、few-shot学习(大量示例)。</div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="ascii">
+Prompt Caching 成本节省示意:
+
+场景: RAG 应用，system prompt 2K tokens，用户查询 200 tokens
+
+无缓存:
+  每次请求: Prefill 2200 tokens
+  1000 次请求: 2,200,000 tokens
+  成本: 2.2M × $0.001/1K = $2.20
+
+有缓存 (system prompt 缓存):
+  首次: Prefill 2200 tokens
+  后续: Prefill 200 tokens (只处理新 token)
+  1000 次请求: 2200 + 999 x 200 = 202,000 tokens
+  成本: 202K x $0.001/1K = $0.20
+
+节省: 91% 的 Prefill 计算量!
+  成本: $2.20 → $0.20 (节省 $2.00)
+</div>
+
+<h2>5. Batch API</h2>
+<h3>Batch API</h3>
+<p></p去餐厅吃饭——训练阶段是厨师学艺（花几个月学几千道菜），推理阶段是给客人上菜（每道菜几秒钟出）。虽然学艺很贵，但餐厅每天营业的水电煤气费（推理成本）才是最大的开销。</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+<tr><th>维度</th><th>实时 API</th><th>Batch API</th></tr>
+<tr><td>延迟</td><td>~1-5s</td><td>1-24 小时</td></tr>
+<tr><td>成本</td><td>基线</td><td>便宜 50%</td></tr>
+<tr><td>适用</td><td>聊天、实时交互</td><td>数据标注、内容生成</td></tr>
+<tr><td>SLA</td><td>严格</td><td>宽松</td></tr>
+</table>
+
+<h2>6. 多级缓存策略</h2>
+<h3>Batch API</h3>><strong>通俗类比：</strong>LLM 推理成本构成</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 580 580" xmlns="http://www.w3.org/2000/svg" style="font-family:'Cascadia Code','Fira Code',monospace">
+  <text x="290" y="24" fill="#c9d1d9" font-size="14" text-anchor="middle" font-weight="bold">多级缓存架构</text>
+
+  <!-- Request entry -->
+  <text x="290" y="55" fill="#8b949e" font-size="12" text-anchor="middle">请求到达</text>
+  <line x1="290" y1="62" x2="290" y2="82" stroke="#484f58" stroke-width="1.5" marker-end="url(#arrC)"/>
+
+  <!-- L1 -->
+  <rect x="140" y="85" width="300" height="80" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="1.5"/>
+  <rect x="140" y="85" width="300" height="26" rx="6" fill="#22d3ee22"/>
+  <text x="290" y="103" fill="#22d3ee" font-size="13" text-anchor="middle" font-weight="bold">L1: 结果缓存 (Redis)</text>
+  <text x="290" y="125" fill="#c9d1d9" font-size="11" text-anchor="middle">完全相同的请求 → 直接返回</text>
+  <text x="290" y="143" fill="#8b949e" font-size="11" text-anchor="middle">命中率: 5-20%</text>
+  <text x="455" y="103" fill="#22d3ee" font-size="10" opacity="0.7">GPU</text>
+
+  <!-- Arrow L1→L2 -->
+  <text x="300" y="180" fill="#8b949e" font-size="10">未命中</text>
+  <line x1="290" y1="165" x2="290" y2="195" stroke="#484f58" stroke-width="1.5" marker-end="url(#arrC)"/>
+
+  <!-- L2 -->
+  <rect x="140" y="198" width="300" height="80" rx="6" fill="#161b22" stroke="#a78bfa" stroke-width="1.5"/>
+  <rect x="140" y="198" width="300" height="26" rx="6" fill="#a78bfa22"/>
+  <text x="290" y="216" fill="#a78bfa" font-size="13" text-anchor="middle" font-weight="bold">L2: KV Cache (GPU 显存)</text>
+  <text x="290" y="238" fill="#c9d1d9" font-size="11" text-anchor="middle">相同前缀 → 跳过 Prefill</text>
+  <text x="290" y="256" fill="#8b949e" font-size="11" text-anchor="middle">命中率: 30-60%</text>
+  <text x="455" y="216" fill="#a78bfa" font-size="10" opacity="0.7">Memory</text>
+
+  <!-- Arrow L2→L3 -->
+  <text x="300" y="293" fill="#8b949e" font-size="10">未命中</text>
+  <line x1="290" y1="278" x2="290" y2="308" stroke="#484f58" stroke-width="1.5" marker-end="url(#arrC)"/>
+
+  <!-- L3 -->
+  <rect x="140" y="311" width="300" height="80" rx="6" fill="#161b22" stroke="#fbbf24" stroke-width="1.5"/>
+  <rect x="140" y="311" width="300" height="26" rx="6" fill="#fbbf2422"/>
+  <text x="290" y="329" fill="#fbbf24" font-size="13" text-anchor="middle" font-weight="bold">L3: 语义缓存 (向量 DB)</text>
+  <text x="290" y="351" fill="#c9d1d9" font-size="11" text-anchor="middle">语义相似 → 返回缓存结果</text>
+  <text x="290" y="369" fill="#8b949e" font-size="11" text-anchor="middle">命中率: 10-30%</text>
+  <text x="455" y="329" fill="#fbbf24" font-size="10" opacity="0.7">Network</text>
+
+  <!-- Arrow L3→Normal -->
+  <text x="300" y="406" fill="#8b949e" font-size="10">未命中</text>
+  <line x1="290" y1="391" x2="290" y2="421" stroke="#484f58" stroke-width="1.5" marker-end="url(#arrC)"/>
+
+  <!-- Normal inference -->
+  <rect x="140" y="424" width="300" height="50" rx="6" fill="#161b22" stroke="#34d399" stroke-width="1.5"/>
+  <rect x="140" y="424" width="300" height="26" rx="6" fill="#34d39922"/>
+  <text x="290" y="442" fill="#34d399" font-size="13" text-anchor="middle" font-weight="bold">正常推理</text>
+  <text x="290" y="460" fill="#c9d1d9" font-size="11" text-anchor="middle">完整 Prefill + Decode</text>
+
+  <defs><marker id="arrC" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" fill="#484f58"/></marker></defs>
+</svg>
+</div>
+
+<h2>7. 成本建模公式</h2>
+<h3>多级缓存策略</h3>><strong>通俗类比：</strong>LLM 推理成本构成</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<pre><code><span class="comment"># LLM 推理成本估算</span>
+
+<span class="comment"># 单请求成本</span>
+cost_per_request = (
+    prefill_tokens * prefill_cost_per_token +
+    output_tokens * decode_cost_per_token
+)
+
+<span class="comment"># GPU 小时成本</span>
+gpu_hour_cost = (gpu_price / gpu_lifetime_hours) + power_cost + cooling_cost
+
+<span class="comment"># 吞吐量</span>
+tokens_per_second = batch_size * tokens_per_second_per_batch
+tokens_per_gpu_hour = tokens_per_second * 3600
+
+<span class="comment"># 每百万 token 成本</span>
+cost_per_1M_tokens = gpu_hour_cost / (tokens_per_gpu_hour / 1_000_000)
+
+<span class="comment"># 示例: Llama-3-70B on H100</span>
+gpu_hour_cost = $3/hour (云)
+tokens_per_second = 2000 (batch=32, FP8)
+tokens_per_gpu_hour = 7,200,000
+cost_per_1M_tokens = $3 / 7.2 = $0.42/1M tokens
+</code></pre>
+
+<h2>8. 成本优化决策树</h2>
+<h3>成本建模公式</h3><strong>通俗类比：</strong>LLM 推理成本构成</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="ascii">
+成本优化决策:
+
+├─ 延迟要求?
+│   ├─ 实时 (< 1s)
+│   │   ├─ 量化 (FP8/INT4) → 2-4x 成本节省
+│   │   ├─ Prefix Caching → 30-60% Prefill 节省
+│   │   ├─ CUDA Graphs → 20-30% 延迟降低
+│   │   └─ 连续批处理 → 提升 GPU 利用率
+│   │
+│   └─ 非实时 (> 1min)
+│       └─ Batch API → 50% 成本降低
+│
+├─ 请求模式?
+│   ├─ 高重复率
+│   │   ├─ 结果缓存 → 100% 计算节省
+│   │   ├─ KV Cache → Prefill 节省
+│   │   └─ 语义缓存 → 相似查询复用
+│   │
+│   └─ 低重复率
+│       ├─ 连续批处理 → 提升吞吐
+│       └─ 多模型共享 GPU → 降低成本
+│
+└─ 流量模式?
+    ├─ 稳定 → 预留实例 (便宜 30-50%)
+    └─ 波动 → Serverless + Spot 实例
+</div>
+
+<div class="deep"><strong>LLM 推理成本构成的技术原理与数学推导：</strong>
+从<strong>底层</strong>硬件角度分析，LLM 推理成本构成的性能瓶颈通常在于内存带宽而非计算能力。
+<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
+因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
+这一<strong>数学本质</strong>决定了LLM 推理成本构成的所有优化策略都应围绕减少内存访问展开。
+从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
+是提升算术强度的两大核心手段。
+</div>
+<div class="deep"><strong>LLM 推理成本构成的系统架构分析：</strong>
+从系统设计的<strong>原理</strong>出发，LLM 推理成本构成采用分层架构来管理复杂性。
+<strong>为什么</strong>分层是主流选择？<strong>推导</strong>如下：
+设系统有N个组件，全连接交互复杂度为O(N²)，分层后降低到O(N·L)，L为层数。
+<strong>数学本质</strong>上，这是用少量层间通信开销换取大幅降低的组件间耦合。
+在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过标准接口解耦——
+这类似于TCP/IP协议栈的设计<strong>原理</strong>，每层独立优化，层内改动不影响整体。
+</div>
+<pre><code class="language-python"># LLM 推理成本构成 - 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    """测量推理延迟和吞吐"""
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    print(f"Throughput: {1/elapsed:.0f} req/s")
+    return elapsed
+</code></pre>
+<div class="tip"><strong>相关章节：</strong>
+LLM 推理成本构成与以下内容密切相关：<a href="01-推理服务架构总览.html">01-推理服务架构总览</a> | <a href="02-Disaggregated-Prefill-Decode.html">02-Disaggregated-Prefill-Decode</a> | <a href="03-KV-Cache调度与路由.html">03-KV-Cache调度与路由</a>。
+建议结合这些章节一起学习，形成完整的知识体系。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+在学习LLM 推理成本构成时，建议先建立整体认知框架，再深入细节。
+用最小化实验验证核心概念——比如用小模型+短序列跑通完整流程，
+确认理解正确后再扩展到生产规模。记录每一步的性能数据，
+建立自己的"优化知识库"，这些经验在后续项目中会反复用到。
+</div>
+<h3>LLM 推理成本构成的关键技术要点</h3>
+<p>掌握LLM 推理成本构成需要理解其<strong>底层原理</strong>和<strong>工作机制</strong>。
+从<strong>数学本质</strong>看，该技术的核心是在性能、精度和资源三者之间寻找最优平衡。
+<strong>为什么</strong>这个三角约束如此重要？因为任何优化都不能同时最大化三者——
+提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），
+减少资源又会降低性能。理解这个<strong>原理</strong>，就能推导出大多数技术选择背后的逻辑。</p>
+<div class="exercise">
+<strong>练习 1</strong>：计算你的 LLM 应用的每百万 token 成本。对比 API 调用和自建服务的成本差异。<br><br>
+<strong>练习 2</strong>：分析你的请求模式，估算 Prefix Caching 和结果缓存能节省多少成本。
+</div>
+
+<h2>术语速查表</h2>
+<h3>成本优化决策树</h3>"><strong>通俗类比：</strong>LLM 推理成本构成</div>
+
+<div class="deep"><strong>深入探讨：</strong>从系统设计的<strong>底层原理</strong>看，LLM 推理成本构成的核心挑战是在性能、精度和资源三者之间寻找最优平衡。<strong>为什么</strong>不能同时最大化三者？因为提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），减少资源又会降低性能。理解这个三角约束，就能推导出大多数技术选择背后的逻辑。</div>
+<div class="ascii"><pre>LLM 推理全流程
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
+│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
+└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
+                                       └──────────────┘    └────┬─────┘
+                     ┌──────────────┐    ┌──────────────┐      │
+                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
+                     │  "你好！..." │    │  解码        │
+                     └──────────────┘    └──────────────┘</pre></div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+<tr><th>术语</th><th>含义</th></tr>
+<tr><td>Batch API</td><td>非实时批量处理 API，成本更低</td></tr>
+<tr><td>Semantic Cache</td><td>基于语义相似度的结果缓存</td></tr>
+<tr><td>Spot Instance</td><td>抢占式实例，便宜但可能被回收</td></tr>
+<tr><td>Reserved Instance</td><td>预留实例，长期承诺换取折扣</td></tr>
+<tr><td>Prefix Caching</td><td>缓存相同前缀的 KV Cache</td></tr>
+<tr><td>Continuous Batching</td><td>动态 batch，新请求可随时加入</td></tr>
+</table>
+
+</div>
+<div class="footer"><p><a href="index.html">返回总览</a> | <a href="../index.html">返回学习目录</a></p></div>
+
+<div class="tip"><strong>向前串联：</strong>
+LLM 推理成本构成的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习LLM 推理成本构成建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+
+<div class="tip"><strong>📚 前置知识：</strong>学习本章内容前，建议先掌握Transformer注意力机制原理、KV Cache的基本概念、GPU内存层次结构(HBM/L2/SRAM)。这些基础知识是理解后续优化策略的前提。</div>
+</body>
+</html>

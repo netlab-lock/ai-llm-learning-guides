@@ -1,0 +1,551 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Megatron-LM核心原理 - 分布式训练系统</title><style>
+*{margin:0;padding:0;box-sizing:border-box}body{background:#0f1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;line-height:1.8;padding:20px;max-width:1000px;margin:0 auto}h1{color:#58a6ff;font-size:1.8em;margin:20px 0 10px;border-bottom:2px solid #30363d;padding-bottom:10px}h2{color:#79c0ff;font-size:1.4em;margin:25px 0 10px}h3{color:#d2a8ff;font-size:1.2em;margin:20px 0 8px}p{margin:10px 0}.nav{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:25px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}.nav a{color:#58a6ff;text-decoration:none;font-size:0.9em}.nav a:hover{text-decoration:underline}pre{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;overflow-x:auto;margin:15px 0;font-size:0.9em;line-height:1.6}code{background:#161b22;padding:2px 6px;border-radius:4px;font-size:0.9em;color:#e6edf3}pre code{background:none;padding:0}table{border-collapse:collapse;width:100%;margin:15px 0}th,td{border:1px solid #30363d;padding:10px 12px;text-align:left}th{background:#161b22;color:#58a6ff}tr:nth-child(even){background:#161b22}.highlight{background:#1a2332;border-left:4px solid #58a6ff;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.formula{background:#1a1a2e;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;text-align:center;font-family:'Courier New',monospace;color:#e6edf3}.ascii-art{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto}ul,ol{margin:10px 0 10px 25px}li{margin:5px 0}.warning{background:#2d1b00;border-left:4px solid #d29922;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.tip{background:#0d2818;border-left:4px solid #3fb950;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.footer{margin-top:40px;padding-top:20px;border-top:1px solid #30363d;font-size:0.85em;color:#8b949e}.ref{margin-top:30px;padding:16px;background:#161b22;border-radius:8px;border:1px solid #30363d}.ref h2{margin-top:0}.ref a{color:#58a6ff}</style></head><body><div class="nav"><a href="03-DeepSpeed架构深度剖析.html">⬅ DeepSpeed架构深度剖析</a><a href="index.html">📖 目录</a><a href="05-3D并行与混合并行.html">3D并行与混合并行 ➡</a></div><h1>04 Megatron-LM 核心原理</h1>
+
+<h2>为什么 Megatron-LM 是大模型训练的王者？</h2>
+<p>Megatron-LM 是 NVIDIA 开发的大模型训练框架，专注于<strong>张量并行</strong>和<strong>流水线并行</strong>的极致优化。几乎所有 100B+ 模型的训练都使用了 Megatron 的技术。</p>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>Megatron-LM 的核心优势是极致的内核融合和通信优化。几乎每个 100B+ 模型（GPT-4、Llama 3 405B 等）都使用了 Megatron 的张量并行技术。入门建议：先用 Megatron-Core 的 <code>examples/</code> 在 8 卡上跑通 7B 模型，理解 TP=8 的实际通信模式。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>Megatron-LM 的配置参数需要与硬件拓扑严格匹配。TP 度必须等于节点内 GPU 数（利用 NVLink），PP 度等于节点数。配置错误会导致严重的性能退化。务必先用 <code>nvidia-smi topo -m</code> 确认 GPU 拓扑。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「为什么 Megatron-LM 是大模型训练的王者？」的深层理解：从系统设计的角度看，NVIDIA的设计体现了关注点分离的原则——每个组件只负责一个明确的功能，通过清晰的接口协作。这种设计哲学是构建可维护、可扩展系统的基础。</div>
+<h2>张量并行 — MLP 切分</h2>
+<p>Transformer 的 MLP 层由两个线性层组成：Y = GeLU(X·W₁)·W₂。Megatron 用<strong>列并行+行并行</strong>实现高效切分。</p>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 600 320" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="300" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">MLP 张量并行（Megatron-LM 核心）</text>
+  <!-- Input -->
+  <rect x="240" y="40" width="120" height="28" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="300" y="58" text-anchor="middle" fill="#fbbf24" font-size="9">输入 X</text>
+  <line x1="270" y1="68" x2="180" y2="90" stroke="#c9d1d9" stroke-width="1.5"/>
+  <line x1="330" y1="68" x2="420" y2="90" stroke="#c9d1d9" stroke-width="1.5"/>
+  <!-- Column parallel -->
+  <rect x="80" y="90" width="200" height="40" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="180" y="108" text-anchor="middle" fill="#22d3ee" font-size="9">W₁[:, :d/2]（列并行）</text>
+  <text x="180" y="123" text-anchor="middle" fill="#8b949e" font-size="7">GPU 0</text>
+  <rect x="320" y="90" width="200" height="40" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="420" y="108" text-anchor="middle" fill="#22d3ee" font-size="9">W₁[:, d/2:]（列并行）</text>
+  <text x="420" y="123" text-anchor="middle" fill="#8b949e" font-size="7">GPU 1</text>
+  <!-- GeLU -->
+  <line x1="180" y1="130" x2="180" y2="150" stroke="#c9d1d9" stroke-width="1.5"/>
+  <line x1="420" y1="130" x2="420" y2="150" stroke="#c9d1d9" stroke-width="1.5"/>
+  <rect x="130" y="150" width="100" height="25" rx="4" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1"/>
+  <text x="180" y="167" text-anchor="middle" fill="#a78bfa" font-size="8">GeLU</text>
+  <rect x="370" y="150" width="100" height="25" rx="4" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1"/>
+  <text x="420" y="167" text-anchor="middle" fill="#a78bfa" font-size="8">GeLU</text>
+  <!-- Row parallel -->
+  <line x1="180" y1="175" x2="180" y2="195" stroke="#c9d1d9" stroke-width="1.5"/>
+  <line x1="420" y1="175" x2="420" y2="195" stroke="#c9d1d9" stroke-width="1.5"/>
+  <rect x="80" y="195" width="200" height="40" rx="6" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="180" y="213" text-anchor="middle" fill="#34d399" font-size="9">W₂[:d/2, :]（行并行）</text>
+  <text x="180" y="228" text-anchor="middle" fill="#8b949e" font-size="7">GPU 0</text>
+  <rect x="320" y="195" width="200" height="40" rx="6" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="420" y="213" text-anchor="middle" fill="#34d399" font-size="9">W₂[d/2:, :]（行并行）</text>
+  <text x="420" y="228" text-anchor="middle" fill="#8b949e" font-size="7">GPU 1</text>
+  <!-- AllReduce -->
+  <line x1="180" y1="235" x2="280" y2="260" stroke="#34d399" stroke-width="1.5"/>
+  <line x1="420" y1="235" x2="320" y2="260" stroke="#34d399" stroke-width="1.5"/>
+  <rect x="230" y="258" width="140" height="28" rx="6" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="300" y="276" text-anchor="middle" fill="#fb7185" font-size="9" font-weight="bold">AllReduce</text>
+  <line x1="300" y1="286" x2="300" y2="305" stroke="#c9d1d9" stroke-width="1.5"/>
+  <rect x="250" y="305" width="100" height="20" rx="4" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1"/>
+  <text x="300" y="319" text-anchor="middle" fill="#34d399" font-size="9">输出 Y</text>
+  <text x="300" y="315" fill="#8b949e" font-size="7"></text>
+</svg>
+</div>
+通信分析：前向 1次 AllReduce，反向 1次 AllReduce
+每个 Transformer 层：前向 2次，反向 2次（MLP + Attention 各一次）
+</div>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>MLP 张量并行的关键洞察：W₁ 用列并行（各 GPU 持有不同列），W₂ 用行并行（各 GPU 持有不同行），这样 GeLU 可以在各 GPU 上独立计算而无需通信。整个 MLP 层只需一次 AllReduce（行并行的输出求和）。注意：TP 只在 NVLink 高速互联的 GPU 间使用（通常单机内 TP=8）。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>MLP 切分的一个边界条件是 GeLU 激活函数。GeLU 是非线性的，不能像 ReLU 那样先切分再激活。Megatron 的列并行方案巧妙地解决了这个问题：先按列切分 W₁，各 GPU 独立计算 GeLU(X·W₁[:, i])，再用行并行的 W₂ 聚合。这个设计模式值得深入理解。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>Megatron 的列并行+行并行方案让每个 Transformer 层的 MLP 只需 2 次 AllReduce（前向+反向各一次）。这是理论最优的——任何将 MLP 切分到 N 张 GPU 的方案都需要至少 1 次 AllReduce 来同步结果。Megatron 的贡献是找到了这个最优切分方式。</div>
+<h2>张量并行 — 注意力切分</h2>
+<p>Multi-Head Attention 天然适合并行：不同注意力头可以独立计算。</p>
+
+<div class="ascii-art">
+注意力头并行：
+输入 X ──────────┬──────────────┐
+                 │              │
+           ┌─────▼─────┐ ┌─────▼─────┐
+           │ Q₀,K₀,V₀  │ │ Q₁,K₁,V₁  │
+           │ Head 0,1   │ │ Head 2,3   │   ← 头并行
+           │   GPU 0    │ │   GPU 1    │
+           └─────┬─────┘ └─────┬─────┘
+                 │ Attn         │ Attn
+           ┌─────▼─────┐ ┌─────▼─────┐
+           │ W_O[:d/2,:]│ │ W_O[d/2:,:]│   ← 输出投影行并行
+           └─────┬─────┘ └─────┬─────┘
+                 └── AllReduce ─┘
+                        │
+                     输出
+</div>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>Multi-Head Attention 天然适合并行：不同注意力头之间完全独立，只需在输出投影 W_O 后做一次 AllReduce。实现时需确保注意力头数能被 TP 度整除（如 32 头 / TP=8 = 每卡 4 头）。GQA/MQA 架构下需要额外处理 KV 头的广播。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>注意力切分的常见错误是忽略 GQA（Grouped Query Attention）的特殊性。GQA 的 KV 头数少于 Q 头数，不能简单地按头数均匀切分。需要先将 KV 头广播到与 Q 头相同的数量，再做并行切分。Megatron-Core 已内置支持。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>注意力切分体现了张量并行的核心原则：找到张量的「独立维度」并沿该维度切分。Multi-Head Attention 的「头」维度天然独立，因此是张量并行的理想切分点。这个思路可以推广到任何具有并行结构的计算中。</div>
+<h2>序列并行（Sequence Parallelism）</h2>
+<p>张量并行中，LayerNorm 和 Dropout 在所有 GPU 上<strong>重复计算</strong>相同的序列。序列并行把这些操作也切分了。</p>
+
+<div class="ascii-art">
+序列并行（Megatron-SP）：
+
+传统张量并行：
+  LayerNorm → [完整序列] → TP 区域 → [完整序列] → LayerNorm
+                  ↑ 重复存储                ↑ 重复存储
+
+序列并行：
+  LayerNorm → [序列 1/N] → TP 区域 → [序列 1/N] → LayerNorm
+  (各卡只处理序列的一部分)
+
+切换点：
+  TP 区域前：AllGather（收集完整序列）
+  TP 区域后：ReduceScatter（分发回各卡）
+
+额外通信量：几乎为零（AllGather/ReduceScatter 替代了原有 AllReduce）
+额外显存节省：LayerNorm/Dropout 的激活值减少 N 倍
+</div>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>Megatron-SP 解决的是 TP 区域外 LayerNorm/Dropout 的序列冗余存储问题。核心改动：TP 区域入口前做 AllGather 收集完整序列，出口后做 ReduceScatter 重新分片。额外通信量几乎为零（替代了原有的 AllReduce）。只需在启动时加 <code>--sequence-parallel</code> 参数。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>序列并行的一个关键细节是 AllGather/ReduceScatter 替代 AllReduce 的等价性。AllReduce = ReduceScatter + AllGather，而 SP 把这个拆分到了不同的位置。需要确保数值精度一致，特别是在混合精度训练中。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>序列并行的演进展示了「消除冗余」的系统性方法：ZeRO 消除了跨 GPU 的状态冗余，SP 消除了 TP 区域外的激活值冗余。两者的组合可以在参数、梯度、优化器状态和激活值四个维度上全面消除冗余，实现接近线性的显存扩展。</div>
+<h2>上下文并行（Context Parallelism）</h2>
+<p>当序列长度极长（100K+ tokens）时，即使有序列并行，单卡的注意力计算 O(n²) 也放不下。上下文并行把序列切成多段，用 Ring Attention 分布式计算。</p>
+
+<div class="ascii-art">
+上下文并行（Ring Attention）：
+
+序列切成 4 段，每卡持有一段：
+GPU 0: [Q₀, K₀, V₀]
+GPU 1: [Q₁, K₁, V₁]
+GPU 2: [Q₂, K₂, V₂]
+GPU 3: [Q₃, K₃, V₃]
+
+Ring 通信（每步传递 K,V 块）：
+Step 0: GPU0 计算 Attn(Q₀,K₀,V₀)
+        GPU1 计算 Attn(Q₁,K₁,V₁)
+        ...
+Step 1: GPU0 收到 K₁,V₁ → 计算 Attn(Q₀,K₁,V₁)
+        GPU1 收到 K₂,V₂ → 计算 Attn(Q₁,K₂,V₂)
+        ...（Ring 传递）
+Step 2: 继续 Ring...
+Step 3: 完成，每卡得到自己序列段的输出
+
+通信与计算重叠：K,V 传递的同时进行注意力计算
+</div>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>Context Parallelism（Ring Attention）是训练 100K+ 超长序列的关键技术。每卡持有序列的一段，通过 Ring 传递 K,V 块，通信与计算重叠。关键实现细节：需要 Flash Attention 2 支持分块注意力计算，配合 <code>--context-parallel-size</code> 参数使用。通信量为 O(N/P) 而非 O(N²)。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>Ring Attention 的一个隐蔽陷阱是因果掩码（causal mask）的处理。在自回归模型中，每个 token 只能看到之前的 token，但 Ring 传递的 KV 块包含了「未来」token。需要在计算时正确应用因果掩码，丢弃未来 token 的注意力分数。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>Ring Attention 的核心创新是将 O(N²) 的注意力计算分布到 P 张 GPU 上，每卡只做 O(N²/P) 的计算，同时通过 Ring 通信传递 KV 块。这与 ZeRO 的「用通信换空间」类似，Ring Attention 是「用通信换计算」——用 O(N/P) 的通信量换取 O(N²/P) 的计算量。</div>
+<h2>流水线并行 — GPipe vs 1F1B</h2>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 640 280" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="320" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">流水线并行调度对比</text>
+  <!-- GPipe -->
+  <text x="160" y="50" text-anchor="middle" fill="#fb7185" font-size="10" font-weight="bold">GPipe（气泡大）</text>
+  <g transform="translate(20,60)">
+    <text x="0" y="15" fill="#8b949e" font-size="8">GPU 0:</text>
+    <rect x="50" y="0" width="35" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="67" y="13" text-anchor="middle" fill="#22d3ee" font-size="7">F0</text>
+    <rect x="85" y="0" width="35" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="102" y="13" text-anchor="middle" fill="#22d3ee" font-size="7">F1</text>
+    <rect x="120" y="0" width="35" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="137" y="13" text-anchor="middle" fill="#22d3ee" font-size="7">F2</text>
+    <rect x="155" y="0" width="35" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="172" y="13" text-anchor="middle" fill="#22d3ee" font-size="7">F3</text>
+    <rect x="190" y="0" width="35" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="207" y="13" text-anchor="middle" fill="#fb7185" font-size="7">B3</text>
+    <rect x="225" y="0" width="35" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="242" y="13" text-anchor="middle" fill="#fb7185" font-size="7">B2</text>
+    <rect x="260" y="0" width="35" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="277" y="13" text-anchor="middle" fill="#fb7185" font-size="7">B1</text>
+    <rect x="295" y="0" width="35" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="312" y="13" text-anchor="middle" fill="#fb7185" font-size="7">B0</text>
+    <text x="0" y="35" fill="#8b949e" font-size="8">GPU 1:</text>
+    <rect x="85" y="20" width="35" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="102" y="33" text-anchor="middle" fill="#22d3ee" font-size="7">F0</text>
+    <rect x="120" y="20" width="35" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="137" y="33" text-anchor="middle" fill="#22d3ee" font-size="7">F1</text>
+    <rect x="155" y="20" width="35" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="172" y="33" text-anchor="middle" fill="#22d3ee" font-size="7">F2</text>
+    <rect x="190" y="20" width="35" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="207" y="33" text-anchor="middle" fill="#22d3ee" font-size="7">F3</text>
+    <rect x="225" y="20" width="35" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="242" y="33" text-anchor="middle" fill="#fb7185" font-size="7">B3</text>
+    <rect x="260" y="20" width="35" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="277" y="33" text-anchor="middle" fill="#fb7185" font-size="7">B2</text>
+    <rect x="295" y="20" width="35" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="312" y="33" text-anchor="middle" fill="#fb7185" font-size="7">B1</text>
+    <rect x="50" y="20" width="35" height="18" rx="3" fill="rgba(30,41,59,0.3)" stroke="#30363d" stroke-width="1"/><text x="67" y="33" text-anchor="middle" fill="#484f58" font-size="7">空</text>
+    <text x="0" y="55" fill="#8b949e" font-size="8">GPU 2:</text>
+    <rect x="50" y="40" width="70" height="18" rx="3" fill="rgba(30,41,59,0.3)" stroke="#30363d" stroke-width="1"/><text x="85" y="53" text-anchor="middle" fill="#484f58" font-size="7">空闲（气泡）</text>
+    <rect x="120" y="40" width="35" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="137" y="53" text-anchor="middle" fill="#22d3ee" font-size="7">F0</text>
+    <text x="340" y="30" fill="#fb7185" font-size="8">气泡率 = (p-1)/(p+m)</text>
+  </g>
+  <!-- 1F1B -->
+  <text x="480" y="50" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">1F1B（气泡小）</text>
+  <g transform="translate(340,60)">
+    <text x="0" y="15" fill="#8b949e" font-size="8">GPU 0:</text>
+    <rect x="50" y="0" width="25" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="62" y="13" text-anchor="middle" fill="#22d3ee" font-size="6">F0</text>
+    <rect x="75" y="0" width="25" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="87" y="13" text-anchor="middle" fill="#22d3ee" font-size="6">F1</text>
+    <rect x="100" y="0" width="25" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="112" y="13" text-anchor="middle" fill="#fb7185" font-size="6">B0</text>
+    <rect x="125" y="0" width="25" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="137" y="13" text-anchor="middle" fill="#22d3ee" font-size="6">F2</text>
+    <rect x="150" y="0" width="25" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="162" y="13" text-anchor="middle" fill="#fb7185" font-size="6">B1</text>
+    <rect x="175" y="0" width="25" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="187" y="13" text-anchor="middle" fill="#fb7185" font-size="6">B2</text>
+    <rect x="200" y="0" width="25" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="212" y="13" text-anchor="middle" fill="#fb7185" font-size="6">B3</text>
+    <text x="0" y="35" fill="#8b949e" font-size="8">GPU 1:</text>
+    <rect x="50" y="20" width="25" height="18" rx="3" fill="rgba(30,41,59,0.3)" stroke="#30363d" stroke-width="1"/><text x="62" y="33" text-anchor="middle" fill="#484f58" font-size="6">空</text>
+    <rect x="75" y="20" width="25" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="87" y="33" text-anchor="middle" fill="#22d3ee" font-size="6">F0</text>
+    <rect x="100" y="20" width="25" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="112" y="33" text-anchor="middle" fill="#22d3ee" font-size="6">F1</text>
+    <rect x="125" y="20" width="25" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="137" y="33" text-anchor="middle" fill="#fb7185" font-size="6">B0</text>
+    <rect x="150" y="20" width="25" height="18" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="162" y="33" text-anchor="middle" fill="#22d3ee" font-size="6">F2</text>
+    <rect x="175" y="20" width="25" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="187" y="33" text-anchor="middle" fill="#fb7185" font-size="6">B1</text>
+    <rect x="200" y="20" width="25" height="18" rx="3" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/><text x="212" y="33" text-anchor="middle" fill="#fb7185" font-size="6">B2</text>
+    <text x="240" y="20" fill="#34d399" font-size="8">1F1B: 交替执行</text>
+    <text x="240" y="35" fill="#34d399" font-size="7">气泡率 = (p-1)/(p+m)</text>
+    <text x="240" y="48" fill="#8b949e" font-size="7">但 m 可以更大</text>
+  </g>
+  <!-- Legend -->
+  <rect x="30" y="140" width="580" height="45" rx="6" fill="rgba(30,41,59,0.3)" stroke="#30363d" stroke-width="1"/>
+  <text x="320" y="158" text-anchor="middle" fill="#f0f6fc" font-size="9" font-weight="bold">流水线并行核心思想</text>
+  <text x="320" y="175" text-anchor="middle" fill="#8b949e" font-size="8">F = 前向传播 · B = 反向传播 · 数字 = micro-batch 编号 · 空白 = 气泡（GPU空闲）</text>
+</svg>
+</div>
+
+1F1B 调度（交错执行，气泡更小）：
+GPU 0: [F0][F1][F2][F3][B0][F4][B1][F5][B2][B3]
+GPU 1: [  ][F0][F1][F2][F3][B0][F4][B1][F5][B2]
+GPU 2: [  ][  ][F0][F1][F2][F3][B0][F4][B1][F5]
+GPU 3: [  ][  ][  ][F0][F1][F2][F3][B0][F4][B1]
+气泡率 = (p-1)/(m+p-1)，当 m>>p 时趋近 0
+</div>
+
+<div class="formula">
+气泡率公式：<br>
+GPipe:  Bubble = (p-1) / (p+m)<br>
+1F1B:   Bubble = (p-1) / (m+p-1)<br>
+虚拟流水线: Bubble = (p-1) / (v·m + p - 1)  ← v=虚拟阶段数
+</div>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>1F1B 调度的核心改进：在 warmup 阶段后，交替执行 1 次前向和 1 次反向，让所有 GPU 持续工作。气泡率 = (p-1)/(m+p-1)，当 micro-batch 数 m 远大于流水线阶段数 p 时趋近零。实践建议：m ≥ 4p 可以让气泡率低于 20%。用 <code>--pipeline-model-parallel-size</code> 配置。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>流水线并行的一个关键变量是 micro-batch 数量 m。m 太小会导致气泡率高（GPU 空闲），m 太大会增加显存占用（需要存储更多激活值）。建议从 m=4p 开始，逐步增加直到显存不足。用 <code>--num-layers / pipeline-model-parallel-size</code> 计算每级的层数。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>GPipe 和 1F1B 的气泡率公式形式相同，但 1F1B 允许更大的 m（因为交替执行减少了峰值显存）。虚拟流水线（Virtual Pipeline）进一步将每个阶段的层再细分，用更小的气泡换取更多的通信。这些调度策略本质上都是在气泡率、显存和通信之间做权衡。</div>
+<h2>Megatron 配置示例</h2>
+<pre><code># Megatron-LM 训练 7B 模型的典型参数
+python pretrain_gpt.py \
+    --tensor-model-parallel-size 8 \
+    --pipeline-model-parallel-size 4 \
+    --num-layers 32 \
+    --hidden-size 4096 \
+    --num-attention-heads 32 \
+    --seq-length 8192 \
+    --micro-batch-size 1 \
+    --global-batch-size 1024 \
+    --train-iters 500000 \
+    --lr 3e-4 \
+    --lr-decay-style cosine \
+    --min-lr 3e-5 \
+    --fp16 \
+    --sequence-parallel \
+    --use-flash-attn \
+    --distributed-backend nccl
+</code></pre>
+
+<div class="tip"><strong>通俗类比：</strong>张量并行（TP）就像"切蛋糕"——把一个大蛋糕（矩阵运算）切成小块，分给不同的人（GPU）同时吃（计算），最后把结果汇总。关键是"怎么切"——Megatron-LM 的创新是把蛋糕按"行"和"列"交替切，这样每一步只需要和邻居交换少量数据，而不是把整个蛋糕传遍所有人。</div>
+
+<div class="warn"><strong>常见误区：</strong>① 认为张量并行越多越好——实际上，TP 的通信开销与 TP 度成正比，通常只在单机内（NVLink 高速互联）使用 TP=8，跨机用 PP 或 DP；② 忽略 Sequence Parallelism 的作用——在 TP 中，LayerNorm 和 Dropout 等操作仍然在所有 GPU 上重复计算，SP 可以进一步消除这种冗余。</div>
+
+<div class="deep"><strong>深入探讨：</strong>Megatron-LM 的列并行+行并行设计看似简单，但背后有深刻的数学洞察：矩阵乘法 AB=C 可以按列切分 A（列并行），也可以按行切分 B（行并行），关键是让切分后的通信量最小。Megatron-LM 的方案让每个 Transformer 层只需要两次 AllReduce（前向和反向各一次），这在理论上已经是最优的。后续的改进（如 Ring Attention）则专注于将这种切分思想扩展到序列维度，实现超长上下文的训练。</div>
+
+<div class="ref"><h2>📚 参考资料</h2><ul>
+<li>Shoeybi et al., "Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism", 2019</li>
+<li>Narayanan et al., "Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM", SC 2021</li>
+<li>Korthikanti et al., "Reducing Activation Recomputation in Large Transformer Models", MLSys 2023</li>
+<li>Liu et al., "Ring Attention with Blockwise Transformers for Near-Infinite Context", ICLR 2024</li>
+</ul></div>
+
+<div class="tip"><strong>💡 实用技巧：</strong>推荐阅读顺序：先读 2019 的原始 Megatron-LM 论文理解张量并行基础，再读 SC 2021 的论文了解 3D 并行，最后读 MLSys 2023 的论文学习激活值优化。NVIDIA 的 Megatron-Core GitHub 仓库是最新、最完整的参考实现。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>Megatron-LM 的论文实验基于 NVIDIA 的特定硬件（A100/H100 + NVLink + IB）。在不同硬件上（如消费级 GPU 或 AMD GPU），某些优化可能不适用。务必在你的目标硬件上验证论文中的性能数据。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「📚 参考资料」的深层理解：从优化理论的角度看，GPU本质上是一个在约束条件下寻找最优解的问题。理解约束条件的来源和性质，比盲目调参更有价值。</div>
+
+<h2>Megatron-LM 的核心模块详解</h2>
+
+
+<h3>操作融合（Operator Fusion）机制</h3>
+
+<ul>
+<li><strong>GEMM + GeLU 融合</strong>：将矩阵乘法和 GeLU 激活函数合并为一个 CUDA kernel，减少中间结果的显存写回</li>
+<li><strong>LayerNorm + Dropout 融合</strong>：将归一化和随机丢弃操作合并，减少一次显存读写周期</li>
+<li><strong>Softmax + Mask + Dropout 融合</strong>：注意力计算中的三个操作融合为一个 kernel</li>
+<li><strong>AllReduce + 下一层计算融合</strong>：通信与计算重叠（overlap），隐藏通信延迟</li>
+</ul>
+
+<h3>通信拓扑优化</h3>
+<p>在大规模分布式训练中，通信拓扑对训练效率有决定性影响。Megatron-LM 支持多种通信策略：</p>
+<table>
+<tr><th>通信策略</th><th>适用场景</th><th>带宽需求</th><th>实现方式</th></tr>
+<tr><td>机内 AllReduce</td><td>张量并行（TP）</td><td>NVLink 600+ GB/s</td><td>NCCL Ring</td></tr>
+<tr><td>机间 AllReduce</td><td>数据并行（DP）</td><td>IB 200-400 Gbps</td><td>NCCL Tree/Ring</td></tr>
+<tr><td>P2P 通信</td><td>流水线并行（PP）</td><td>IB/NVLink</td><td>NCCL Send/Recv</td></tr>
+<tr><td>Ring Attention</td><td>上下文并行（CP）</td><td>IB + 计算重叠</td><td>自定义 Ring</td></tr>
+</table>
+
+<table>
+<tr><th>优化技术</th><th>原理</th><th>加速比</th><th>显存影响</th></tr>
+<tr><td>梯度累积</td><td>多次前反向后统一更新</td><td>等效增大 batch</td><td>不增加显存</td></tr>
+<tr><td>选择性激活重计算</td><td>只重计算算子融合后的结果</td><td>1.0-1.2x</td><td>节省 30-50%</td></tr>
+<tr><td>分布式优化器</td><td>ZeRO-1 优化器状态分片</td><td>1.0-1.1x</td><td>节省 4x 参数量</td></tr>
+<tr><td>通信计算重叠</td><td>AllReduce 与反向计算并行</td><td>1.1-1.3x</td><td>不增加</td></tr>
+</table>
+
+<table>
+<tr><th>Megatron-LM 版本</th><th>发布时间</th><th>核心特性</th><th>支持最大模型</th></tr>
+<tr><td>v1.0</td><td>2019</td><td>基础张量并行</td><td>8.3B</td></tr>
+<tr><td>v2.0</td><td>2021</td><td>3D并行 + 操作融合</td><td>175B</td></tr>
+<tr><td>v3.0</td><td>2023</td><td>序列并行 + 上下文并行</td><td>530B+</td></tr>
+<tr><td>Core</td><td>2024</td><td>FP8 + 弹性训练</td><td>1T+</td></tr>
+</table>
+
+<div class="ascii-art">
+Megatron-LM 模块依赖关系图：
+
+┌──────────────────────────────────────────────────┐
+│                 Megatron-Core                      │
+├────────────┬────────────┬────────────┬────────────┤
+│  张量并行  │  流水线并行 │  序列并行  │  上下文并行 │
+│    (TP)    │    (PP)    │    (SP)    │    (CP)    │
+├────────────┴────────────┴────────────┴────────────┤
+│              分布式优化器 (DistributedOptimizer)    │
+├──────────────────────────────────────────────────┤
+│  操作融合层 (Fused Kernels)                        │
+│  ├─ FusedLayerNorm   ├─ FusedSoftmax              │
+│  ├─ FusedGeLU        ├─ FusedRMSNorm              │
+│  └─ FusedScaledMaskedTriu                         │
+├──────────────────────────────────────────────────┤
+│  通信层 (NCCL / TransformerEngine)                │
+│  ├─ AllReduce    ├─ AllGather                     │
+│  ├─ ReduceScatter  ├─ P2P Send/Recv              │
+└──────────────────────────────────────────────────┘
+</div>
+
+<div class="ascii-art">
+Transformer 层在 Megatron 中的数据流：
+
+Input → LayerNorm → [TP: 列并行 GEMM] → GeLU → [TP: 行并行 GEMM] → AllReduce
+              ↑                                    ↑
+         [SP: 序列切分]                      [SP: 序列恢复]
+         AllGather                             ReduceScatter
+                                                        ↓
+                    Output ← LayerNorm ← Residual Add ←┘
+                              ↑
+                        [SP: 序列切分]
+</div>
+
+<h3>练习与思考</h3>
+<div class="tip"><strong>向前串联：</strong>
+为什么 Megatron-LM 是大模型训练的王者？的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="ascii">
+为什么 Megatron-LM 是大模型训练的王者？ 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+</div>
+<div class="tip"><strong>相关章节：</strong>
+为什么 Megatron-LM 是大模型训练的王者？与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+<div class="exercise"><strong>📝 练习题：</strong>
+<ol>
+<li>请用自己的话解释Megatron-LM的核心原理，并画出数据流向图。</li>
+<li>在给定的2-GPU环境下，配置并运行一个Megatron-LM的最小可行示例，记录性能数据。</li>
+<li>对比分析Megatron-LM与其他替代方案的优劣势，撰写500字的技术报告。</li>
+</ol>
+</div>
+
+<h2>📚 学习路径与建议</h2>
+<p>建议按照以下顺序系统学习分布式训练技术：</p>
+<ol>
+<li><strong>基础理论</strong>：理解集合通信原语和并行计算的基本概念</li>
+<li><strong>核心技术</strong>：掌握 ZeRO 系列、张量并行、流水线并行等关键技术</li>
+<li><strong>框架实践</strong>：深入学习 DeepSpeed、Megatron-LM、FSDP2 等主流框架</li>
+<li><strong>高级主题</strong>：研究容错训练、弹性训练、混合精度优化等进阶内容</li>
+<li><strong>工程实战</strong>：完成完整的3D并行训练项目，积累生产级经验</li>
+</ol>
+<p>推荐阅读顺序：<a href="03-DeepSpeed架构深度剖析.html">上一章</a> → 本章 → <a href="05-3D并行与混合并行.html">下一章</a></p>
+
+<div class="highlight">
+<strong>🚀 继续学习：</strong>掌握本章内容后，建议继续深入学习<a href="05-3D并行与混合并行.html">下一章</a>，将理论知识转化为实践能力。
+在实际项目中，Megatron-LM通常需要与其他章节的技术结合使用，才能发挥最大训练效率。
+下一步请学习下一章的详细内容，了解更高级的优化策略和工程实践。
+</div>
+
+
+<h2>Megatron-LM 的核心模块详解</h2>
+<p>Megatron-LM 的代码架构由多个核心模块组成，每个模块都经过高度优化。以下从工程实现的角度详细剖析各模块的设计思路和关键实现。</p>
+
+<h3>操作融合（Operator Fusion）机制</h3>
+<p>Megatron-LM 的一大创新是将多个小算子融合为一个大 kernel，减少 GPU kernel 启动开销和显存访问次数。具体包括以下几种融合策略：</p>
+<ul>
+<li><strong>GEMM + GeLU 融合</strong>：将矩阵乘法和 GeLU 激活函数合并为一个 CUDA kernel，减少中间结果的显存写回</li>
+<li><strong>LayerNorm + Dropout 融合</strong>：将归一化和随机丢弃操作合并，减少一次显存读写周期</li>
+<li><strong>Softmax + Mask + Dropout 融合</strong>：注意力计算中的三个操作融合为一个 kernel</li>
+<li><strong>AllReduce + 下一层计算融合</strong>：通信与计算重叠（overlap），隐藏通信延迟</li>
+</ul>
+
+<h3>通信拓扑优化</h3>
+<p>在大规模分布式训练中，通信拓扑对训练效率有决定性影响。Megatron-LM 支持多种通信策略：</p>
+<table>
+<tr><th>通信策略</th><th>适用场景</th><th>带宽需求</th><th>实现方式</th></tr>
+<tr><td>机内 AllReduce</td><td>张量并行（TP）</td><td>NVLink 600+ GB/s</td><td>NCCL Ring</td></tr>
+<tr><td>机间 AllReduce</td><td>数据并行（DP）</td><td>IB 200-400 Gbps</td><td>NCCL Tree/Ring</td></tr>
+<tr><td>P2P 通信</td><td>流水线并行（PP）</td><td>IB/NVLink</td><td>NCCL Send/Recv</td></tr>
+<tr><td>Ring Attention</td><td>上下文并行（CP）</td><td>IB + 计算重叠</td><td>自定义 Ring</td></tr>
+</table>
+
+<table>
+<tr><th>优化技术</th><th>原理</th><th>加速比</th><th>显存影响</th></tr>
+<tr><td>梯度累积</td><td>多次前反向后统一更新</td><td>等效增大 batch</td><td>不增加显存</td></tr>
+<tr><td>选择性激活重计算</td><td>只重计算算子融合后的结果</td><td>1.0-1.2x</td><td>节省 30-50%</td></tr>
+<tr><td>分布式优化器</td><td>ZeRO-1 优化器状态分片</td><td>1.0-1.1x</td><td>节省 4x 参数量</td></tr>
+<tr><td>通信计算重叠</td><td>AllReduce 与反向计算并行</td><td>1.1-1.3x</td><td>不增加</td></tr>
+</table>
+
+<table>
+<tr><th>Megatron-LM 版本</th><th>发布时间</th><th>核心特性</th><th>支持最大模型</th></tr>
+<tr><td>v1.0</td><td>2019</td><td>基础张量并行</td><td>8.3B</td></tr>
+<tr><td>v2.0</td><td>2021</td><td>3D并行 + 操作融合</td><td>175B</td></tr>
+<tr><td>v3.0</td><td>2023</td><td>序列并行 + 上下文并行</td><td>530B+</td></tr>
+<tr><td>Core</td><td>2024</td><td>FP8 + 弹性训练</td><td>1T+</td></tr>
+</table>
+
+<div class="ascii-art">
+Megatron-LM 模块依赖关系图：
+
+┌──────────────────────────────────────────────────┐
+│                 Megatron-Core                      │
+├────────────┬────────────┬────────────┬────────────┤
+│  张量并行  │  流水线并行 │  序列并行  │  上下文并行 │
+│    (TP)    │    (PP)    │    (SP)    │    (CP)    │
+├────────────┴────────────┴────────────┴────────────┤
+│              分布式优化器 (DistributedOptimizer)    │
+├──────────────────────────────────────────────────┤
+│  操作融合层 (Fused Kernels)                        │
+│  ├─ FusedLayerNorm   ├─ FusedSoftmax              │
+│  ├─ FusedGeLU        ├─ FusedRMSNorm              │
+│  └─ FusedScaledMaskedTriu                         │
+├──────────────────────────────────────────────────┤
+│  通信层 (NCCL / TransformerEngine)                │
+│  ├─ AllReduce    ├─ AllGather                     │
+│  ├─ ReduceScatter  ├─ P2P Send/Recv              │
+└──────────────────────────────────────────────────┘
+</div>
+
+<div class="ascii-art">
+Transformer 层在 Megatron 中的数据流：
+
+Input → LayerNorm → [TP: 列并行 GEMM] → GeLU → [TP: 行并行 GEMM] → AllReduce
+              ↑                                    ↑
+         [SP: 序列切分]                      [SP: 序列恢复]
+         AllGather                             ReduceScatter
+                                                        ↓
+                    Output ← LayerNorm ← Residual Add ←┘
+                              ↑
+                        [SP: 序列切分]
+</div>
+
+<h3>练习与思考</h3>
+<div class="exercise"><strong>📝 练习题：</strong>
+<ol>
+<li>请用自己的话解释Megatron-LM的核心原理，并画出数据流向图。</li>
+<li>在给定的2-GPU环境下，配置并运行一个Megatron-LM的最小可行示例，记录性能数据。</li>
+<li>对比分析Megatron-LM与其他替代方案的优劣势，撰写500字的技术报告。</li>
+</ol>
+</div>
+
+<h2>📚 学习路径与建议</h2>
+<p>建议按照以下顺序系统学习分布式训练技术：</p>
+<ol>
+<li><strong>基础理论</strong>：理解集合通信原语和并行计算的基本概念</li>
+<li><strong>核心技术</strong>：掌握 ZeRO 系列、张量并行、流水线并行等关键技术</li>
+<li><strong>框架实践</strong>：深入学习 DeepSpeed、Megatron-LM、FSDP2 等主流框架</li>
+<li><strong>高级主题</strong>：研究容错训练、弹性训练、混合精度优化等进阶内容</li>
+<li><strong>工程实战</strong>：完成完整的3D并行训练项目，积累生产级经验</li>
+</ol>
+<p>推荐阅读顺序：<a href="03-DeepSpeed架构深度剖析.html">上一章</a> → 本章 → <a href="05-3D并行与混合并行.html">下一章</a></p>
+
+<div class="highlight">
+<strong>🚀 继续学习：</strong>掌握本章内容后，建议继续深入学习<a href="05-3D并行与混合并行.html">下一章</a>，将理论知识转化为实践能力。
+在实际项目中，Megatron-LM通常需要与其他章节的技术结合使用，才能发挥最大训练效率。
+下一步请学习下一章的详细内容，了解更高级的优化策略和工程实践。
+</div>
+
+<div class="ascii-art">
+Megatron-LM 在不同 GPU 拓扑下的最优配置：
+
+场景1: 单机 8×A100 (NVLink + NVSwitch)
+┌─────────────────────────────────────────┐
+│  TP=8, PP=1, DP=1                       │
+│  NVSwitch: 全互联，AllReduce 延迟 < 10μs│
+│  适用: 7B 模型训练                       │
+│  MFU: 45-55%                            │
+└─────────────────────────────────────────┘
+
+场景2: 2机 16×A100 (NVLink + IB 400G)
+┌─────────────────────────────────────────┐
+│  TP=8, PP=2, DP=1                       │
+│  机内 TP: NVLink (900 GB/s)             │
+│  机间 PP: IB P2P (50 GB/s)              │
+│  适用: 13B-30B 模型                      │
+│  MFU: 40-50%                            │
+└─────────────────────────────────────────┘
+
+场景3: 8机 64×H100 (NVLink + IB 400G)
+┌─────────────────────────────────────────┐
+│  TP=8, PP=4, DP=2                       │
+│  3D并行: 充分利用层级带宽               │
+│  适用: 70B-175B 模型                     │
+│  MFU: 38-48%                            │
+└─────────────────────────────────────────┘
+</div>
+
+<div class="ascii">Megatron-LM 集群拓扑示例：
+Node0: GPU[0-7] --NVLink/NVSwitch-- TP Group
+Node1: GPU[0-7] --NVLink/NVSwitch-- TP Group  --IB-- PP Stage
+Node2: GPU[0-7] --NVLink/NVSwitch-- TP Group  --IB-- PP Stage
+Node3: GPU[0-7] --NVLink/NVSwitch-- TP Group  --IB-- PP Stage
+  |                  |                  |                  |
+  +------IB Ring-----+------IB Ring-----+------IB Ring-----+
+                    DP AllReduce Group
+每一层的 TP 通信在 NVLink 上完成（900 GB/s）
+PP 通信跨节点走 IB（50 GB/s per direction）
+DP 梯度同步在 IB Ring 上完成</div>
+<pre><code># 序列并行 (Sequence Parallelism) 启用方式
+# 在 Megatron-LM 中，SP 与 TP 联动
+# 当 TP > 1 时自动启用序列并行
+model = GPTModel(
+    config,
+    sequence_parallel=True,  # 启用序列并行
+    # SP 将 LayerNorm/Dropout 的序列维度切分到 TP 组内
+    # 通信：AllGather (前向入口) + ReduceScatter (前向出口)
+)</code></pre>
+<pre><code># 上下文并行 (Context Parallelism) Ring Attention 配置
+# 用于超长序列训练 (100K+ tokens)
+model = GPTModel(
+    config,
+    context_parallel_size=4,  # 序列切成4段
+    # Ring Attention: 各 GPU 持有一段 KV
+    # 每步传递 KV 块并计算局部注意力
+    # 通信与计算重叠，隐藏延迟
+    # 适用：长文档、代码生成等场景
+)</code></pre>
+<div class="footer">分布式训练系统深度指南 © 2026</div></body></html>

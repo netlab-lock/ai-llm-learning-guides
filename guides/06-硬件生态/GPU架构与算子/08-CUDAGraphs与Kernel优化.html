@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>08 · CUDA Graphs与Kernel优化</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.7}a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}.nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;justify-content:space-between;position:sticky;top:0;z-index:100}.nav span{color:#8b949e;font-size:0.9em}.nav a{color:#58a6ff}.container{max-width:900px;margin:0 auto;padding:30px 20px}h1{color:#58a6ff;font-size:2em;margin:20px 0 10px}h2{color:#f0f6fc;border-left:4px solid #58a6ff;padding-left:14px;margin:35px 0 15px;font-size:1.4em}h3{color:#d2a8ff;margin:20px 0 10px;font-size:1.15em}p{margin:10px 0}ul,ol{margin:10px 0 10px 24px}li{margin:4px 0}code{background:#21262d;color:#79c0ff;padding:2px 6px;border-radius:4px;font-size:0.9em}table{border-collapse:collapse;width:100%;margin:12px 0}th{background:#161b22;color:#58a6ff;text-align:left;padding:10px 14px;border:1px solid #30363d}td{padding:10px 14px;border:1px solid #21262d}tr:nth-child(even){background:#161b2233}.tip{background:#0d1d30;border-left:4px solid #58a6ff;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.tip strong{color:#58a6ff}.warn{background:#2d1b00;border-left:4px solid #d29922;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.warn strong{color:#d29922}.exercise{background:#0d2818;border-left:4px solid #238636;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.exercise strong{color:#3fb950}.deep{background:#1a1024;border-left:4px solid #a371f7;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.deep strong{color:#a371f7}.ascii{background:#161b22;border:1px solid #30363d;padding:16px;font-family:monospace;font-size:0.85em;line-height:1.4;overflow-x:auto;margin:12px 0;white-space:pre}.footer{text-align:center;padding:30px;border-top:1px solid #21262d;margin-top:30px;color:#8b949e;font-size:0.85em}.glossary{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin:16px 0}.glossary dt{color:#58a6ff;font-weight:bold;margin-top:8px}.glossary dd{color:#8b949e;margin-left:16px}</style>
+</head>
+<body>
+<div class="nav"><a href="07-CUTLASS与算子库.html">&larr; 07-CUTLASS与算子库</a><span>模块 08/08 · CUDA Graphs</span><span></span></div>
+<div class="container">
+
+<h1>🚀 08 · CUDA Graphs 与 Kernel 优化 — 消除启动开销</h1>
+<p style="color:#8b949e;font-size:1.05em">CUDA Graphs原理 · Stream/Event · Occupancy优化 · Nsight profiling · vLLM中的应用</p>
+
+<h2>一、背景与动机</h2>
+<h3>一、背景与动机</h3>n 的生成需要执行几十个 kernel(Attention、FFN、LayerNorm、Embedding...)。每个 kernel 的<strong>启动开销</strong>约 5-10 微秒。对于 70B 模型，一轮推理可能有 100+ 个 kernel，启动开销就是 0.5-1 毫秒——而实际计算可能只有几毫秒。启动开销占比高达 20-30%！</p>
+<p><strong>CUDA Graphs</strong> 通过<strong>预录制→重放</strong>的方式，把整个 kernel 序列打包成一个图，一次启动就能执行所有 kernel，消除重复的启动开销。</p>
+
+<div class="tip"><strong
+<pre><code class="language-python"># 一、背景与动机 - 核心实现示例
+import torch
+import numpy as np
+
+class 一、背景与动机Config:
+    """配置类：定义一、背景与动机的关键参数"""
+    def __init__(self):
+        self.batch_size = 32
+        self.max_seq_len = 2048
+        self.dtype = torch.float16
+        
+    def validate(self):
+        """参数验证"""
+        assert self.batch_size > 0, "batch_size must be positive"
+        assert self.max_seq_len > 0, "max_seq_len must be positive"
+        return True
+
+def benchmark(func, iterations=100):
+    """性能基准测试"""
+    import time
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iterations):
+        func()
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iterations
+    print(f"Average latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+>💡 核心价值：</strong>CUDA Graphs 不改变 kernel 的计算，只优化 kernel 的调度。对于 LLM 推理(大量小 kernel)效果显著，对大 kernel(如训练)效果不明显。</div>
+
+<h2>二、Kernel Launch Overhead 详解</h2>
+
+<h3>2.1 启动开销的来源</h3>
+<div class="svg-diagram"><svg viewBox="0 0 560 230" xmlns="http://www.w3.org/2000/svg" style="max-width:560px">
+<defs><marker id="ah1" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9d1d9"/></marker></defs>
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style><rect x="0" y="0" width="560" height="230" fill="#0d1117" rx="6"/><rect x="100" y="8" width="360" height="24" rx="4" fill="#161b22" stroke="#58a6ff"/><text x="280.0" y="20.0" text-anchor="middle" fill="#f0f6fc" font-size="13" dominant-baseline="central">Kernel 启动开销分解</text><rect x="20" y="42" width="230" height="60" rx="4" fill="#161b22" stroke="#30363d"/><rect x="20" y="42" width="3" height="60" rx="1" fill="#34d399"/><text x="32" y="62" fill="#f0f6fc" font-size="12" font-weight="bold">cudaLaunchKernel() #1</text><text x="32" y="80" fill="#c9d1d9" font-size="11">参数序列化 + CPU→GPU通信</text><text x="32" y="98" fill="#c9d1d9" font-size="11">GPU调度器分配</text><line x1="250" y1="72" x2="340" y2="72" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#ah1)"/><text x="280" y="67" fill="#fbbf24" font-size="10">~5μs</text><rect x="340" y="47" width="200" height="50" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="440.0" y="72.0" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">Kernel 1 执行</text><rect x="20" y="122" width="230" height="60" rx="4" fill="#161b22" stroke="#30363d"/><rect x="20" y="122" width="3" height="60" rx="1" fill="#34d399"/><text x="32" y="142" fill="#f0f6fc" font-size="12" font-weight="bold">cudaLaunchKernel() #2</text><text x="32" y="160" fill="#c9d1d9" font-size="11">参数序列化 + CPU→GPU通信</text><text x="32" y="178" fill="#c9d1d9" font-size="11">GPU调度器分配</text><line x1="250" y1="152" x2="340" y2="152" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#ah1)"/><text x="280" y="147" fill="#fbbf24" font-size="10">~5μs</text><rect x="340" y="127" width="200" height="50" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="440.0" y="152.0" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">Kernel 2 执行</text><text x="30" y="215" fill="#fbbf24" font-size="11">总开销: 100×10μs=1ms, 实际计算~3ms → 启动开销占比25%!</text></svg></div>
+
+<h3>2.2 启动开销的量化</h3>
+<table>
+<tr><th>模型</th><th>每步Kernel数</th><th>启动开销/Kernel</th><th>总启动开销</th><th>实际计算</th><th>占比</th></tr>
+<tr><td>Llama-7B</td><td>~60</td><td>~8μs</td><td>~0.5ms</td><td>~2ms</td><td>20%</td></tr>
+<tr><td>Llama-70B</td><td>~120</td><td>~8μs</td><td>~1ms</td><td>~4ms</td><td>20%</td></tr>
+<tr><td>MoE-47B</td><td>~200</td><td>~8μs</td><td>~1.6ms</td><td>~5ms</td><td>24%</td></tr>
+</table>
+
+<h2>三、CUDA Graphs 核心原理</h2>
+
+<h3>3.1 预录制→重放机制</h3>
+<div class="svg-diagram"><svg viewBox="0 0 500 380" xmlns="http://www.w3.org/2000/svg" style="max-width:500px">
+<defs><marker id="ah2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9d1d9"/></marker></defs>
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style><rect x="0" y="0" width="500" height="380" fill="#0d1117" rx="6"/><rect x="120" y="8" width="260" height="24" rx="4" fill="#161b22" stroke="#58a6ff"/><text x="250.0" y="20.0" text-anchor="middle" fill="#f0f6fc" font-size="13" dominant-baseline="central">CUDA Graphs 工作流程</text><rect x="20" y="42" width="460" height="155" rx="4" fill="#161b22" stroke="#30363d"/><rect x="20" y="42" width="3" height="155" rx="1" fill="#22d3ee"/><text x="32" y="62" fill="#f0f6fc" font-size="12" font-weight="bold">录制阶段 (只做一次, 初始化时)</text><text x="32" y="80" fill="#c9d1d9" font-size="11">cudaStreamBeginCapture(stream)</text><text x="32" y="98" fill="#c9d1d9" font-size="11">↓</text><text x="32" y="116" fill="#c9d1d9" font-size="11">执行所有kernel (记录依赖关系)</text><text x="32" y="134" fill="#c9d1d9" font-size="11">kernel1 → kernel2 → kernel3 → ...</text><text x="32" y="152" fill="#c9d1d9" font-size="11">↓ 记录: kernel参数、依赖关系、内存地址</text><text x="32" y="170" fill="#c9d1d9" font-size="11">cudaStreamEndCapture(stream, &graph)</text><text x="32" y="188" fill="#c9d1d9" font-size="11">↓</text><text x="32" y="206" fill="#c9d1d9" font-size="11">cudaGraphInstantiate(&instance, graph)</text><line x1="250" y1="197" x2="250" y2="215" stroke="#c9d1d9" stroke-width="1.5" marker-end="url(#ah2)"/><rect x="20" y="215" width="460" height="95" rx="4" fill="#161b22" stroke="#30363d"/><rect x="20" y="215" width="3" height="95" rx="1" fill="#34d399"/><text x="32" y="235" fill="#f0f6fc" font-size="12" font-weight="bold">重放阶段 (每次推理)</text><text x="32" y="253" fill="#c9d1d9" font-size="11">cudaGraphLaunch(instance, stream)</text><text x="32" y="271" fill="#c9d1d9" font-size="11">→ 一次启动执行所有kernel</text><text x="32" y="289" fill="#c9d1d9" font-size="11">→ 无CPU介入 / 无重复参数序列化 / 无重复CPU→GPU通信</text><line x1="250" y1="310" x2="250" y2="328" stroke="#c9d1d9" stroke-width="1.5" marker-end="url(#ah2)"/><rect x="80" y="328" width="340" height="28" rx="4" fill="#161b22" stroke="#fbbf24"/><text x="250.0" y="342.0" text-anchor="middle" fill="#fbbf24" font-size="11" dominant-baseline="central">效果: 100个kernel推理 3ms→2ms (33%加速)</text></svg></div>
+
+<h3>3.2 CUDA Graphs 的执行对比</h3>
+<div class="ascii">有无 CUDA Graphs 的执行对比:
+
+  无 CUDA Graphs:
+  CPU: [准备1] [启动1] [等待] [准备2] [启动2] [等待] [准备3]...
+  GPU:           [执行1]               [执行2]              [执行3]
+       ─────────────────────────────────────────────────────────→ 时间
+       CPU频繁介入, GPU有空闲
+
+  有 CUDA Graphs:
+  CPU: [录制一次]
+  GPU: [执行1][执行2][执行3][执行4][执行5]...
+       ─────────────────────────────────────────────────────────→ 时间
+       CPU只启动一次, GPU连续执行, 无空闲</div>
+
+<h2>四、Stream 与 Event</h2>
+
+<h3>4.1 CUDA Stream</h3>
+<div class="ascii">CUDA Stream 并行执行:
+
+  Stream 1: [Kernel A] ──→ [Kernel C] ──→ [Kernel E]
+  Stream 2: [Kernel B] ──→ [Kernel D]
+               ↑ 并行执行 ↑
+
+  同一 Stream 内: 顺序执行 (FIFO)
+  不同 Stream 间: 可以并行 (如果无依赖)
+
+  用途:
+  • 数据传输和计算重叠
+    Stream 1: [H2D拷贝] → [计算]
+    Stream 2: [H2D拷贝] → [计算]
+    
+  • 多个推理请求并行
+    Stream 1: [请求1的推理]
+    Stream 2: [请求2的推理]</div>
+
+<h3>4.2 CUDA Event</h3>
+<div class="ascii">CUDA Event 同步机制:
+
+  Stream 1: [Kernel A] ──[Record Event]──→ [继续计算]
+                                       │
+  Stream 2: [Kernel B] ──[Wait Event]──→ [Event到达后继续]
+                                       │
+  CPU:      [Event同步] ──[记录时间]──→ [性能分析]
+
+  用途:
+  1. Stream间同步: 确保依赖关系
+  2. 性能计时: 精确测量kernel执行时间
+  3. CPU-GPU同步: 等待GPU完成</div>
+
+<h2>五、Occupancy 优化</h2>
+
+<h3>5.1 什么是 Occupancy</h3>
+<div class="svg-diagram"><svg viewBox="0 0 500 280" xmlns="http://www.w3.org/2000/svg" style="max-width:500px">
+<defs><marker id="ah3" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9d1d9"/></marker></defs>
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style><rect x="0" y="0" width="500" height="280" fill="#0d1117" rx="6"/><rect x="120" y="8" width="260" height="24" rx="4" fill="#161b22" stroke="#58a6ff"/><text x="250.0" y="20.0" text-anchor="middle" fill="#f0f6fc" font-size="13" dominant-baseline="central">影响 Occupancy 的资源</text><rect x="20" y="42" width="460" height="60" rx="4" fill="#161b22" stroke="#30363d"/><rect x="20" y="42" width="3" height="60" rx="1" fill="#22d3ee"/><text x="32" y="62" fill="#f0f6fc" font-size="12" font-weight="bold">寄存器: 每SM 65536×32-bit</text><text x="32" y="80" fill="#c9d1d9" font-size="11">每线程用太多 → 活跃线程少</text><rect x="20" y="112" width="460" height="60" rx="4" fill="#161b22" stroke="#30363d"/><rect x="20" y="112" width="3" height="60" rx="1" fill="#a78bfa"/><text x="32" y="132" fill="#f0f6fc" font-size="12" font-weight="bold">Shared Memory: 每SM 228KB</text><text x="32" y="150" fill="#c9d1d9" font-size="11">每Block用太多 → 活跃Block少</text><rect x="20" y="182" width="460" height="60" rx="4" fill="#161b22" stroke="#30363d"/><rect x="20" y="182" width="3" height="60" rx="1" fill="#34d399"/><text x="32" y="202" fill="#f0f6fc" font-size="12" font-weight="bold">线程数: 每Block线程数影响</text><text x="32" y="220" fill="#c9d1d9" font-size="11">Block太小(64)→装不满  Block太大(1024)→灵活性差</text></svg></div>
+
+<h3>5.2 Occupancy 优化策略</h3>
+<table>
+<tr><th>策略</th><th>方法</th><th>效果</th></tr>
+<tr><td>减少寄存器使用</td><td>用__launch_bounds__限制</td><td>提高Occupancy</td></tr>
+<tr><td>减少Shared Memory</td><td>减小tile size</td><td>更多Block并发</td></tr>
+<tr><td>选择合适Block大小</td><td>128或256线程</td><td>平衡Occupancy和效率</td></tr>
+<tr><td>使用寄存器压力小的类型</td><td>FP16 vs FP32</td><td>寄存器减半</td></tr>
+</table>
+
+<h2>六、Nsight 性能分析</h2>
+
+<h3>6.1 Nsight 工具链</h3>
+<div class="svg-diagram"><svg viewBox="0 0 500 250" xmlns="http://www.w3.org/2000/svg" style="max-width:500px">
+<defs><marker id="ah4" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9d1d9"/></marker></defs>
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style><rect x="0" y="0" width="500" height="250" fill="#0d1117" rx="6"/><rect x="120" y="8" width="260" height="24" rx="4" fill="#161b22" stroke="#58a6ff"/><text x="250.0" y="20.0" text-anchor="middle" fill="#f0f6fc" font-size="13" dominant-baseline="central">Nsight 性能分析工具</text><rect x="20" y="42" width="460" height="85" rx="4" fill="#161b22" stroke="#30363d"/><rect x="20" y="42" width="3" height="85" rx="1" fill="#22d3ee"/><text x="32" y="62" fill="#f0f6fc" font-size="12" font-weight="bold">Nsight Systems (宏观分析)</text><text x="32" y="80" fill="#c9d1d9" font-size="11">整体timeline: kernel执行、数据传输</text><text x="32" y="98" fill="#c9d1d9" font-size="11">Stream利用率分析 / CPU-GPU交互</text><text x="32" y="116" fill="#c9d1d9" font-size="11">使用: nsys profile python train.py</text><rect x="20" y="140" width="460" height="85" rx="4" fill="#161b22" stroke="#30363d"/><rect x="20" y="140" width="3" height="85" rx="1" fill="#34d399"/><text x="32" y="160" fill="#f0f6fc" font-size="12" font-weight="bold">Nsight Compute (微观分析)</text><text x="32" y="178" fill="#c9d1d9" font-size="11">单个kernel详细分析 / TC利用率</text><text x="32" y="196" fill="#c9d1d9" font-size="11">内存带宽 / Occupancy / 源码级热点</text><text x="32" y="214" fill="#c9d1d9" font-size="11">使用: ncu --set full python kernel.py</text></svg></div>
+
+<h3>6.2 性能调优流程</h3>
+<div class="svg-diagram"><svg viewBox="0 0 340 380" xmlns="http://www.w3.org/2000/svg" style="max-width:340px">
+<defs><marker id="ah5" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9d1d9"/></marker></defs>
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style><rect x="0" y="0" width="340" height="380" fill="#0d1117" rx="6"/><rect x="60" y="8" width="220" height="24" rx="4" fill="#161b22" stroke="#58a6ff"/><text x="170.0" y="20.0" text-anchor="middle" fill="#f0f6fc" font-size="12" dominant-baseline="central">Kernel 性能调优流程</text><rect x="30" y="42" width="280" height="64" rx="4" fill="#161b22" stroke="#30363d"/><rect x="30" y="42" width="3" height="64" rx="1" fill="#22d3ee"/><text x="42" y="62" fill="#f0f6fc" font-size="12" font-weight="bold">1. Nsight Systems</text><text x="42" y="80" fill="#c9d1d9" font-size="11">找到最慢kernel</text><text x="42" y="98" fill="#c9d1d9" font-size="11">识别计算/内存/调度瓶颈</text><line x1="170" y1="106" x2="170" y2="124" stroke="#c9d1d9" stroke-width="1.5" marker-end="url(#ah5)"/><rect x="30" y="124" width="280" height="64" rx="4" fill="#161b22" stroke="#30363d"/><rect x="30" y="124" width="3" height="64" rx="1" fill="#34d399"/><text x="42" y="144" fill="#f0f6fc" font-size="12" font-weight="bold">2. Nsight Compute</text><text x="42" y="162" fill="#c9d1d9" font-size="11">分析详细指标</text><text x="42" y="180" fill="#c9d1d9" font-size="11">TC利用率? 带宽利用率?</text><line x1="170" y1="188" x2="170" y2="206" stroke="#c9d1d9" stroke-width="1.5" marker-end="url(#ah5)"/><rect x="30" y="206" width="280" height="81" rx="4" fill="#161b22" stroke="#30363d"/><rect x="30" y="206" width="3" height="81" rx="1" fill="#fbbf24"/><text x="42" y="226" fill="#f0f6fc" font-size="12" font-weight="bold">3. 选择优化策略</text><text x="42" y="244" fill="#c9d1d9" font-size="11">Compute→增大tile/FP8</text><text x="42" y="262" fill="#c9d1d9" font-size="11">Memory→减少HBM/融合</text><text x="42" y="280" fill="#c9d1d9" font-size="11">Latency→CUDA Graphs</text><line x1="170" y1="287" x2="170" y2="305" stroke="#c9d1d9" stroke-width="1.5" marker-end="url(#ah5)"/><rect x="30" y="305" width="280" height="47" rx="4" fill="#161b22" stroke="#30363d"/><rect x="30" y="305" width="3" height="47" rx="1" fill="#a78bfa"/><text x="42" y="325" fill="#f0f6fc" font-size="12" font-weight="bold">4. 实现+验证</text><text x="42" y="343" fill="#c9d1d9" font-size="11">修改kernel, 重新profiling</text></svg></div>
+
+<h2>七、CUDA Graphs 在 vLLM 中的应用</h2>
+
+<h3>7.1 vLLM 的 CUDA Graphs 策略</h3>
+<div class="ascii">vLLM 使用 CUDA Graphs 优化推理:
+
+  Decode 阶段 (逐token生成):
+    每步执行相同的kernel序列
+    → 录制一次, 重放多次
+    
+    问题: batch size 可能变化
+    解决: 按 batch size 分桶录制
+    
+    batch_size ∈ [1,2,4,8,16,32,64,128,256]
+    每个桶录制一个CUDA Graph
+    推理时选择最接近的桶
+
+  Prefill 阶段 (处理输入):
+    序列长度可变 → 更难用CUDA Graphs
+    解决: 按 sequence length 分桶录制
+    
+    seq_len ∈ [128,256,512,1024,2048,4096]
+    每个桶录制一个CUDA Graph</div>
+
+<h3>7.2 vLLM 中的效果</h3>
+<table>
+<tr><th>场景</th><th>无Graphs</th><th>有Graphs</th><th>加速</th></tr>
+<tr><td>Llama-7B decode(bs=1)</td><td>~25 tokens/s</td><td>~35 tokens/s</td><td>40%</td></tr>
+<tr><td>Llama-7B decode(bs=32)</td><td>~800 tokens/s</td><td>~1000 tokens/s</td><td>25%</td></tr>
+<tr><td>Llama-70B decode(bs=1)</td><td>~8 tokens/s</td><td>~12 tokens/s</td><td>50%</td></tr>
+</table>
+
+<h2>八、CUDA Graphs 的限制</h2>
+CUDA Graphs 的限制的工作原理，有助于在实际工程中做出更合理的技术选择和优化决策。</p>
+
+<h3>八、CUDA Graphs 的限制</h3>
+<table>
+<tr><th>限制</th><th>描述</th><th>解决方法</th></tr>
+<tr><td>固定形状</td><td>Graph录制后kernel参数固定</td><td>按batch size分桶录制</td></tr>
+<tr><td>不支持动态控制流</td><td>if/else分支不支持</td><td>用固定形状替代</td></tr>
+<tr><td>内存固定</td><td>Graph中的tensor地址固定</td><td>预分配内存池</td></tr>
+<tr><td>调试困难</td><td>Graph内部难以插入调试代码</td><td>先不用Graphs调试，再录制</td></tr>
+<tr><td>首次录制开销</td><td>录制需要额外时间</td><td>初始化时录制，不阻塞推理</td></tr>
+</table>
+
+<h2>九、其他 Kernel 优化技术</h2>
+
+<h3>9.1 Kernel Fusion</h3>
+<div class="ascii">Kernel Fusion 示例:
+
+  融合前 (4个kernel, 4次启动):
+  [LayerNorm] → [Linear] → [GeLU] → [Linear]
+       HBM          HBM        HBM       HBM
+
+  融合后 (2个kernel, 2次启动):
+  [LayerNorm+Linear] → [GeLU+Linear]
+       HBM                  HBM
+
+  节省: 2次kernel启动 + 2次HBM读写</div>
+
+<h3>9.2 混合精度推理</h3>
+<table>
+<tr><th>精度</th><th>模型大小(70B)</th><th>推理速度</th><th>精度损失</th></tr>
+<tr><td>FP32</td><td>280GB</td><td>1×</td><td>无</td></tr>
+<tr><td>FP16</td><td>140GB</td><td>2×</td><td>极小</td></tr>
+<tr><td>FP8</td><td>70GB</td><td>4×</td><td>小</td></tr>
+<tr><td>INT4</td><td>35GB</td><td>6-8×</td><td>中</td></tr>
+</table>
+
+<h2>十、使用场景</h2>
+<h3>十、使用场景</h3>
+<ul>
+<li><strong>LLM 推理</strong>：消除 kernel 启动开销，提升 decode 速度</li>
+<li><strong>小 batch 推理</strong>：batch 越小，启动开销占比越大</li>
+<li><strong>实时应用</strong>：对话机器人需要低延迟</li>
+<li><strong>性能分析</strong>：用 Nsight 找到优化方向</li>
+</ul>
+
+<h2>十一、实际效果</h2>
+<h3>十一、实际效果</h3>
+<p></ph>优化技术</th><th>效果</th><th>适用场景</th></tr>
+<tr><td>CUDA Graphs</td><td>20-50% 加速</td><td>推理(大量小kernel)</td></tr>
+<tr><td>Kernel Fusion</td><td>10-30% 加速</td><td>FFN, Attention</td></tr>
+<tr><td>混合精度</td><td>2-4× 加速</td><td>所有场景</td></tr>
+<tr><td>Occupancy优化</td><td>5-15% 加速</td><td>计算密集kernel</td></tr>
+</table>
+
+<h3>📖 术语速查表</h3>
+<dl class="glossary">
+<dt>CUDA Graphs</dt><dd>预录制kernel执行图，一次启动执行所有kernel</dd>
+<dt>Kernel Launch Overhead</dt><dd>CPU启动GPU kernel的通信开销(~5-10μs)</dd>
+<dt>Occupancy</dt><dd>SM上活跃Warp数与最大Warp数的比值</dd>
+<dt>Stream</dt><dd>CUDA的命令队列，同一Stream内顺序执行</dd>
+<dt>Event</dt><dd>CUDA的同步点，用于Stream间协调</dd>
+<dt>Nsight</dt><dd>NVIDIA的GPU性能分析工具套件</dd>
+<dt>Kernel Fusion</dt><dd>将多个kernel合并为一个，减少启动和HBM访问</dd>
+</dl>
+
+<pre><code class="language-python"># 一、背景与动机 - 性能基准测试与分析
+import time
+import torch
+
+def profile_inference(model, input_data, warmup=10, iterations=100):
+    """推理性能分析：测量延迟、吞吐和显存"""
+    # Warmup
+    for _ in range(warmup):
+        with torch.no_grad():
+            model(input_data)
+    torch.cuda.synchronize()
+    
+    # Measure latency
+    latencies = []
+    for _ in range(iterations):
+        start = time.perf_counter()
+        with torch.no_grad():
+            output = model(input_data)
+        torch.cuda.synchronize()
+        latencies.append(time.perf_counter() - start)
+    
+    # Statistics
+    avg_ms = sum(latencies) / len(latencies) * 1000
+    p50 = sorted(latencies)[len(latencies)//2] * 1000
+    p99 = sorted(latencies)[int(len(latencies)*0.99)] * 1000
+    mem_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+    
+    print(f"Latency: avg={avg_ms:.2f}ms, p50={p50:.2f}ms, p99={p99:.2f}ms")
+    print(f"Peak Memory: {mem_mb:.0f}MB")
+    print(f"Throughput: {1000/avg_ms:.0f} req/s")
+    return {"avg_ms": avg_ms, "p50": p50, "p99": p99, "mem_mb": mem_mb}
+</code></pre>
+<pre><code class="language-bash"># 一、背景与动机 - 环境配置与快速验证
+#!/bin/bash
+set -e
+
+# 1. 环境检查
+echo "=== GPU信息 ==="
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+
+# 2. 依赖安装
+pip install torch transformers accelerate
+
+# 3. 快速验证脚本
+python3 -c "
+import torch
+print(f'PyTorch: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+print(f'GPU: {torch.cuda.get_device_name(0)}')
+print(f'GPU Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB')
+
+# 验证推理
+from transformers import AutoTokenizer, AutoModelForCausalLM
+model_name = 'gpt2'
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name).cuda()
+inputs = tokenizer('Hello world', return_tensors='pt').to('cuda')
+with torch.no_grad():
+    outputs = model.generate(**inputs, max_new_tokens=20)
+print(f'Generated: {tokenizer.decode(outputs[0])}')
+print('验证通过!')
+"
+</code></pre>
+<div class="deep"><strong>原理与推导：</strong>
+从<strong>原理</strong>层面理解，该技术的<strong>工作机制</strong>基于信息论的基本定理。
+设信源熵为 H(X) = -Σ p(x)log p(x)，<strong>为什么</strong>这很重要？
+因为信息熵给出了无损压缩的理论下界——这也解释了<strong>为什么</strong>量化不可避免地
+会带来信息损失。<strong>推导</strong>量化误差的上界：对于均匀量化，
+E[|x-q(x)|²] ≤ Δ²/12，其中Δ为量化步长。
+这一<strong>公式</strong>揭示了精度与效率之间的<strong>数学本质</strong>关系：
+步长越小（精度越高），误差越小，但需要的比特数越多。
+从<strong>底层</strong>实现来看，现代加速器的Tensor Core正是利用这一原理，
+通过混合精度计算在保持精度的同时最大化吞吐量。
+</div>
+<div class="exercise"><strong>✏️ 练习题：</strong>
+<ol>
+<li>CUDA Graphs 为什么不能处理动态形状的推理？如何用"分桶"策略解决？</li>
+<li>如果一个 LLM 推理有 120 个 kernel，每个启动开销 8μs，CUDA Graphs 能节省多少时间？</li>
+<li>用 Nsight Systems 分析一个 PyTorch LLM 推理的 timeline，识别最大的性能瓶颈。</li>
+<li>对比 CUDA Graphs 和 Kernel Fusion 两种优化技术：各自的优劣和适用场景。</li>
+</ol></div>
+
+<div class="warn"><strong>⚠️ 常见误区：CUDA Graphs能加速训练：</strong>CUDA Graphs主要对<strong>推理</strong>有效。训练时kernel通常很大，启动开销占比很低(1-2%)，收益很小。而且训练时batch size、序列长度经常变化，Graph的固定形状限制更麻烦。最适合场景：推理decode阶段(每步相同kernel序列，每个kernel很小)。</div>
+
+<div class="warn"><strong>⚠️ 常见误区：CUDA Graphs可以替代Kernel Fusion：</strong>两者解决不同问题。CUDA Graphs消除<strong>kernel启动开销</strong>(CPU→GPU通信)；Kernel Fusion消除<strong>HBM读写开销</strong>(中间结果不用写回HBM)。一个推理pipeline可能同时需要两者：先用Kernel Fusion减少kernel数量和HBM访问，再用CUDA Graphs消除剩余kernel的启动开销。</div>
+
+<div class="deep"><strong>🔬 深入探讨：CUDA Graphs的内存管理</strong><br><br>
+CUDA Graphs录制后，kernel的内存地址<strong>被固化在图中</strong>。这意味着：<br>
+① 不能用PyTorch的动态tensor(每次forward分配新tensor，地址变了对不上)<br>
+② 必须预分配固定内存池<br>
+③ vLLM的做法：预先分配KV Cache buffer池，Graph录制时使用固定地址<br>
+PyTorch提供<code>torch.cuda.CUDAGraph()</code>和<code>torch.cuda.graph()</code>上下文管理器自动处理。但注意：不要在graph中使用python控制流或调用cudaMalloc。</div>
+
+<div class="deep"><strong>🔬 深入探讨：Occupancy的精确计算</strong><br><br>
+以H100为例计算GEMM kernel的Occupancy：<br>
+• 每SM最大: 65536寄存器, 228KB SMem, 2048线程(64 Warp)<br>
+• 假设每线程128寄存器, 每Block 48KB SMem, 每Block 256线程(8 Warp)<br><br>
+寄存器限制: 65536 ÷ 128 = 512线程 → 2个Block → 16 Warp<br>
+SMem限制: 228KB ÷ 48KB = 4个Block → 32 Warp<br>
+瓶颈是寄存器: 16 ÷ 48 = <strong>33% Occupancy</strong><br><br>
+注意: Occupancy不是越高越好！有时50% Occupancy + 大tile > 100% Occupancy + 小tile，因为大tile = 更好的数据复用 = 更少HBM访问。</div>
+
+<div class="ascii">Occupancy 优化决策树:
+
+  当前Occupancy低(<50%), 瓶颈在哪?
+  ncu --metrics sm__warps_active.avg.pct_of_peak_sustained_active
+
+  │
+  ├── 寄存器限制 (最常见)
+  │     ├── 减少tile size → 更少寄存器需求
+  │     ├── 使用FP16代替FP32 → 寄存器减半
+  │     └── __launch_bounds__(maxThreads, minBlocks)
+  │           告诉编译器: "我要至少3个Block在SM上"
+  │
+  ├── Shared Memory限制
+  │     ├── 减小tile size → 更少SMem
+  │     └── 减少double buffer → 2→1
+  │
+  └── 线程数限制
+        └── 增大Block size (128→256)
+
+  注意: Occupancy不是越高越好!
+  有时50% Occ + 大tile > 100% Occ + 小tile</div>
+
+<table>
+<tr><th>优化场景</th><th>推荐技术</th><th>预期收益</th><th>实施难度</th></tr>
+<tr><td>推理decode(batch=1)</td><td>CUDA Graphs</td><td>30-50%加速</td><td>低(PyTorch API)</td></tr>
+<tr><td>推理decode(batch=32+)</td><td>CUDA Graphs + Batching</td><td>15-25%加速</td><td>中(需分桶)</td></tr>
+<tr><td>FFN层</td><td>CUTLASS Epilogue Fusion</td><td>20-40%加速</td><td>中(需CUTLASS)</td></tr>
+<tr><td>Attention</td><td>FlashAttention</td><td>2-7×加速</td><td>低(已有库)</td></tr>
+<tr><td>GEMM kernel</td><td>增大tile + FP8</td><td>10-30%加速</td><td>中(需profiling)</td></tr>
+<tr><td>整条推理pipeline</td><td>torch.compile + Graphs</td><td>20-40%加速</td><td>低</td></tr>
+</table>
+
+<div class="tip"><strong>💡 通俗类比：CUDA Graphs像"剧本排练"：</strong>拍电影时每个场景都现场给演员讲戏(每次kernel启动都要CPU串行化参数)很慢。CUDA Graphs像提前排练好剧本(录制graph)，开拍时导演只需喊"Action!"(一次cudaGraphLaunch)，演员按剧本连续演下去。</div>
+
+<div class="tip"><strong>💡 实用建议：CUDA Graphs的PyTorch快速上手：</strong><br>
+<code>g = torch.cuda.CUDAGraph()</code><br>
+<code>with torch.cuda.graph(g):</code><br>
+<code>&nbsp;&nbsp;static_output = model(static_input)</code><br>
+<code>static_input.copy_(new_data)</code><br>
+<code>g.replay()</code><br>
+或者直接用 <code>model = torch.compile(model, mode="reduce-overhead")</code> 自动Graph化。</div>
+
+<div class="ascii">vLLM 推理优化全景:
+
+  请求到达
+       │
+       ▼
+  ┌─────────────────────────────────────┐
+  │  Prefill 阶段 (处理输入prompt)       │
+  │  • FlashAttention (长序列高效)       │
+  │  • 连续batching (多个请求拼接)       │
+  │  • PagedAttention (KV Cache分页)    │
+  └──────────────┬──────────────────────┘
+                 │
+                 ▼
+  ┌─────────────────────────────────────┐
+  │  Decode 阶段 (逐token生成)           │
+  │  • CUDA Graphs (消除启动开销)        │
+  │  • 按batch size分桶录制              │
+  │  • FP8推理 (H100/B200)              │
+  │  • 量化(INT4)减少显存占用            │
+  └──────────────┬──────────────────────┘
+                 │
+                 ▼
+  每个优化的效果叠加:
+  FlashAttention: ~3× (vs 标准Attention)
+  CUDA Graphs:    ~1.4× (消除启动开销)
+  FP8:            ~1.8× (vs FP16)
+  PagedAttention: ~2×  (显存利用率)
+  总体:           ~15× (vs 原始PyTorch)</div>
+
+</div>
+<div class="footer"><p>🖥️ GPU架构与算子 · 08 · CUDA Graphs与Kernel优化</p><p><a href="index.html">返回目录</a> · <a href="../index.html">返回总览</a></p></div>
+
+<div class="tip"><strong>向前串联：</strong>
+一、背景与动机的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

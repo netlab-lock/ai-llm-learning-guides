@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>05 分布式缓存架构 | Context Caching</title>
+<style>:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--heading:#f0f6fc;--blue:#58a6ff;--green:#3fb950;--yellow:#d29922;--red:#f85149;--purple:#a371f7;--cyan:#39d2c0}*{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.8;font-size:16px}.container{max-width:900px;margin:0 auto;padding:2rem 1.5rem}h1{color:var(--blue);font-size:2rem;margin:1rem 0 .5rem}h2{color:var(--heading);font-size:1.5rem;margin:2rem 0 .8rem;padding-left:.8rem;border-left:4px solid var(--blue)}h3{color:var(--cyan);font-size:1.2rem;margin:1.5rem 0 .5rem}p{margin:.6rem 0}a{color:var(--blue);text-decoration:none}code{background:#21262d;color:#79c0ff;padding:.15em .4em;border-radius:4px;font-size:.9em}pre{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;overflow-x:auto;margin:1rem 0;font-size:.9em;line-height:1.6}pre code{background:none;padding:0}table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9em}th,td{border:1px solid var(--border);padding:.5rem .8rem;text-align:left}th{background:#161b22;color:var(--blue);font-weight:600}tr:nth-child(even){background:rgba(22,27,34,.5)}.nav{background:var(--card);border-bottom:1px solid var(--border);padding:.6rem 1.5rem;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.nav a{color:var(--blue);font-size:.9rem}.nav span{color:var(--heading);font-weight:600;font-size:.95rem}.footer{text-align:center;margin-top:3rem;padding:1.5rem;border-top:1px solid var(--border);color:#8b949e;font-size:.85rem}.tip,.warn,.exercise,.deep{border-radius:8px;padding:1rem 1.2rem;margin:1rem 0}.tip{background:#0d1d30;border-left:4px solid var(--blue)}.warn{background:#2d1b00;border-left:4px solid var(--yellow)}.exercise{background:#0d2818;border-left:4px solid var(--green)}.deep{background:#1a1024;border-left:4px solid var(--purple)}.ascii{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;font-family:monospace;font-size:.85em;line-height:1.5;overflow-x:auto;white-space:pre}.svg-diagram{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;margin:1rem 0;overflow-x:auto;text-align:center}.svg-diagram svg{max-width:100%;height:auto}.badge{display:inline-block;padding:.15em .6em;border-radius:12px;font-size:.75em;font-weight:600;margin:0 .3em}.badge-blue{background:rgba(88,166,255,.15);color:var(--blue)}.badge-green{background:rgba(63,185,80,.15);color:var(--green)}.badge-yellow{background:rgba(210,153,34,.15);color:var(--yellow)}.badge-purple{background:rgba(163,113,247,.15);color:var(--purple)}.badge-red{background:rgba(248,81,73,.15);color:var(--red)}.badge-cyan{background:rgba(57,210,192,.15);color:var(--cyan)}.formula{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1.2rem;margin:1rem 0;text-align:center;font-size:1.1em;color:var(--cyan);font-family:monospace}.next-prev{display:flex;justify-content:space-between;margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border)}ul,ol{margin:.5rem 0 .5rem 1.5rem}li{margin:.3rem 0}</style>
+</head>
+<body>
+<div class="nav"><a href="04-Semantic-Caching.html">&larr; 04</a><span>模块 05 · 分布式缓存</span><a href="06-缓存策略实战.html">06 &rarr;</a></div>
+<div class="container">
+
+<h1>🌐 05 · 分布式缓存架构</h1>
+<p><span class="badge badge-yellow">进阶</span> <span class="badge badge-cyan">架构</span></p>
+
+<h2>1. 单机 vs 分布式缓存</h2>
+<h3>单机 vs 分布式缓存</h3>><strong>通俗类比：</strong>就像私家厨房和连锁餐厅的中央厨房。单机缓存是自家小灶，快但容量小；分布式缓存是多个分店共享的大食材库，规模大、可扩展。</div>
+<div class="warn"><strong>常见误区：</strong>警惕“为分布式而分布式”的误区。低流量单体应用强行引入分布式缓存，会因网络开销和复杂性导致性能下降，得不偿失。</div>
+<div class="deep"><strong>深入探讨：</strong>单机缓存延迟通常在亚毫秒级（如Redis单机 P99 < 1ms）。引入网络后，分布式缓存（如跨可用区集群）延迟会增加到1-5ms。需权衡：单机Redis QPS可达10万+，而跨节点访问因序列化和网络，QPS可能降至数万。</div>
+<div class="ascii"><pre>用户请求 --> [应用服务器] --> [单机缓存] (快, 小)
+           |
+           \--> [应用服务器集群] --> [分布式缓存集群] (可扩展)</pre></div>
+<table><tr><th>维度</th><th>单机缓存</th><th>分布式缓存</th></tr><tr><td>容量</td><td>受限于单机内存（如64GB）</td><td>可扩展至TB/PB级</td></tr><tr><td>复杂度</td><td>低，运维简单</td><td>高，需处理一致性、分片、故障转移</td></tr><tr><td>典型场景</td><td>小型应用、会话缓存</td><td>大型互联网服务、全球业务</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="svg-diagram"><svg viewBox="0 0 740 320" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="ah2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#fbbf24"/></marker>
+</defs>
+<text x="370" y="22" fill="#f0f6fc" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold" text-anchor="middle">单机缓存 vs 分布式缓存</text>
+
+<!-- Left: Single Machine -->
+<rect x="20" y="36" width="310" height="270" rx="10" fill="none" stroke="#30363d" stroke-width="1.5" stroke-dasharray="6,3"/>
+<text x="175" y="56" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="12" font-weight="bold" text-anchor="middle">单机缓存</text>
+<rect x="40" y="70" width="270" height="50" rx="6" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1"/>
+<text x="175" y="90" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" text-anchor="middle">GPU 0: [Cache]</text>
+<text x="175" y="108" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="9" text-anchor="middle">独立缓存</text>
+<rect x="40" y="130" width="270" height="50" rx="6" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1"/>
+<text x="175" y="150" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" text-anchor="middle">GPU 1: [Cache]</text>
+<text x="175" y="168" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="9" text-anchor="middle">独立缓存</text>
+<line x1="100" y1="195" x2="250" y2="195" stroke="#f85149" stroke-width="1.5" stroke-dasharray="5,4"/>
+<text x="175" y="212" fill="#f85149" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">✕ 无法跨 GPU 复用</text>
+<text x="175" y="288" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">各自独立，缓存浪费</text>
+
+<!-- Right: Distributed -->
+<rect x="410" y="36" width="310" height="270" rx="10" fill="none" stroke="#30363d" stroke-width="1.5"/>
+<text x="565" y="56" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="12" font-weight="bold" text-anchor="middle">分布式缓存</text>
+<rect x="425" y="68" width="120" height="36" rx="5" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1"/>
+<text x="485" y="90" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">GPU 0 [Cache]</text>
+<rect x="555" y="68" width="120" height="36" rx="5" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1"/>
+<text x="615" y="90" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">GPU 1 [Cache]</text>
+<rect x="425" y="112" width="120" height="36" rx="5" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1"/>
+<text x="485" y="134" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">GPU 2 [Cache]</text>
+<rect x="555" y="112" width="120" height="36" rx="5" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1"/>
+<text x="615" y="134" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">GPU 3 [Cache]</text>
+<!-- Converge lines -->
+<line x1="485" y1="148" x2="535" y2="180" stroke="#fbbf24" stroke-width="1.2"/>
+<line x1="615" y1="148" x2="565" y2="180" stroke="#fbbf24" stroke-width="1.2"/>
+<line x1="485" y1="104" x2="535" y2="180" stroke="#fbbf24" stroke-width="1.2" opacity="0.5"/>
+<line x1="615" y1="104" x2="565" y2="180" stroke="#fbbf24" stroke-width="1.2" opacity="0.5"/>
+<!-- Shared Pool -->
+<rect x="500" y="180" width="130" height="50" rx="8" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="565" y="202" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="12" font-weight="bold" text-anchor="middle">Cache Pool</text>
+<text x="565" y="218" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="9" text-anchor="middle">(共享)</text>
+<text x="565" y="250" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">✓ 跨 GPU 复用</text>
+<text x="565" y="288" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">统一分配，高效共享</text>
+
+<!-- VS -->
+<text x="370" y="175" fill="#f0f6fc" font-family="'Cascadia Code','Fira Code',monospace" font-size="18" font-weight="bold" text-anchor="middle">VS</text>
+</svg></div>
+
+<h2>2. LMCache: 分布式 KV Cache 层</h2>
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>可以理解为餐厅的“智能食材预处理中心”。它把不同厨师（请求）都要用的“基础酱料”（公共前缀的KV Cache）集中存储和加工，避免重复劳动。</div>
+<div class="warn"><strong>常见误区：</strong>LMCache的核心优势在于对“公共前缀”（Common Prefix）的复用。如果业务请求的提示词（Prompt）几乎完全不同，没有共享部分，LMCache的效果会大打折扣。</div>
+<div class="deep"><strong>深入探讨：</strong>LMCache通过将KV Cache卸载到分布式存储层，实现跨请求、跨实例共享。例如，对于共享系统提示（System Prompt）或少样本示例（Few-shot Examples）的请求，其对应的KV Cache只需计算一次，后续请求可直接从LMCache加载，首令牌延迟可降低50%-80%。</div>
+<div class="ascii"><pre>请求1 (带公共前缀) --> [计算] --> [KV Cache] --> 存入 [LMCache]
+请求2 (相同前缀) --------------> [LMCache] --> [加载] --> [继续生成]</pre></div>
+<table><tr><th>特性</th><th>LMCache</th><th>传统单机KV Cache</th></tr><tr><td>共享范围</td><td>跨进程、跨机器</td><td>仅限单个推理进程内</td></tr><tr><td>存储介质</td><td>CPU内存、分布式存储</td><td>GPU显存</td></tr><tr><td>优势场景</td><td>多轮对话、长共享前缀、高并发相似请求</td><td>所有推理场景的基础</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p><a href="https://github.com/LMCache/LMCache">LMCache</a> 是 LLM 推理的分布式 KV Cache 扩展。</p>
+<h3>2.1 分层存储</h3>
+<div class="svg-diagram"><svg viewBox="0 0 700 380" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="ah3" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#fbbf24"/></marker>
+<marker id="ah4" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#f85149"/></marker>
+</defs>
+<text x="350" y="22" fill="#f0f6fc" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold" text-anchor="middle">LMCache 分层存储</text>
+
+<!-- Layer 1: GPU HBM -->
+<rect x="60" y="40" width="580" height="65" rx="8" fill="rgba(34,211,238,0.08)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="80" y="62" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="12" font-weight="bold">GPU HBM</text>
+<text x="200" y="62" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">最快 · 最贵 · ~80GB</text>
+<rect x="80" y="72" width="100" height="24" rx="4" fill="rgba(34,211,238,0.2)" stroke="#22d3ee" stroke-width="1"/>
+<text x="130" y="88" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">✓ 命中 → 直接使用</text>
+<rect x="190" y="72" width="120" height="24" rx="4" fill="rgba(248,81,73,0.1)" stroke="#f85149" stroke-width="1"/>
+<text x="250" y="88" fill="#f85149" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">✗ 未命中 ↓</text>
+
+<!-- Layer 2: CPU RAM -->
+<rect x="60" y="115" width="580" height="65" rx="8" fill="rgba(52,211,153,0.08)" stroke="#34d399" stroke-width="1.5"/>
+<text x="80" y="137" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="12" font-weight="bold">CPU RAM</text>
+<text x="200" y="137" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">快 · 便宜 · ~512GB</text>
+<rect x="80" y="147" width="120" height="24" rx="4" fill="rgba(52,211,153,0.2)" stroke="#34d399" stroke-width="1"/>
+<text x="140" y="163" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">✓ 命中 → 传输到 GPU</text>
+<rect x="210" y="147" width="120" height="24" rx="4" fill="rgba(248,81,73,0.1)" stroke="#f85149" stroke-width="1"/>
+<text x="270" y="163" fill="#f85149" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">✗ 未命中 ↓</text>
+
+<!-- Layer 3: NVMe SSD -->
+<rect x="60" y="190" width="580" height="65" rx="8" fill="rgba(167,139,250,0.08)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="80" y="212" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="12" font-weight="bold">NVMe SSD</text>
+<text x="200" y="212" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">中速 · 很便宜 · ~2TB</text>
+<rect x="80" y="222" width="140" height="24" rx="4" fill="rgba(167,139,250,0.2)" stroke="#a78bfa" stroke-width="1"/>
+<text x="150" y="238" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">✓ 命中 → 传输到 CPU→GPU</text>
+<rect x="230" y="222" width="120" height="24" rx="4" fill="rgba(248,81,73,0.1)" stroke="#f85149" stroke-width="1"/>
+<text x="290" y="238" fill="#f85149" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">✗ 未命中 ↓</text>
+
+<!-- Layer 4: S3/Object Storage -->
+<rect x="60" y="265" width="580" height="65" rx="8" fill="rgba(251,191,36,0.08)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="80" y="287" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="12" font-weight="bold">S3 / 对象存储</text>
+<text x="240" y="287" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">慢 · 最便宜 · 无限</text>
+<rect x="80" y="297" width="160" height="24" rx="4" fill="rgba(251,191,36,0.2)" stroke="#fbbf24" stroke-width="1"/>
+<text x="160" y="313" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">✓ 命中 → 传输到 SSD→CPU→GPU</text>
+<rect x="250" y="297" width="140" height="24" rx="4" fill="rgba(248,81,73,0.1)" stroke="#f85149" stroke-width="1"/>
+<text x="320" y="313" fill="#f85149" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">✗ 未命中 → 重新计算</text>
+
+<!-- Vertical miss arrows on right side -->
+<line x1="580" y1="90" x2="580" y2="115" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#ah3)"/>
+<line x1="580" y1="165" x2="580" y2="190" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#ah3)"/>
+<line x1="580" y1="240" x2="580" y2="265" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#ah3)"/>
+
+<!-- Speed indicators -->
+<text x="660" y="75" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="end">⚡⚡⚡</text>
+<text x="660" y="150" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="end">⚡⚡</text>
+<text x="660" y="225" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="end">⚡</text>
+<text x="660" y="300" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="end">🐌</text>
+
+<!-- Legend -->
+<rect x="60" y="345" width="580" height="28" rx="6" fill="rgba(139,148,158,0.05)" stroke="#30363d" stroke-width="0.5"/>
+<circle cx="90" cy="359" r="5" fill="rgba(34,211,238,0.3)" stroke="#22d3ee" stroke-width="1"/>
+<text x="100" y="363" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">GPU</text>
+<circle cx="150" cy="359" r="5" fill="rgba(52,211,153,0.3)" stroke="#34d399" stroke-width="1"/>
+<text x="160" y="363" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">CPU</text>
+<circle cx="210" cy="359" r="5" fill="rgba(167,139,250,0.3)" stroke="#a78bfa" stroke-width="1"/>
+<text x="220" y="363" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">NVMe</text>
+<circle cx="280" cy="359" r="5" fill="rgba(251,191,36,0.3)" stroke="#fbbf24" stroke-width="1"/>
+<text x="290" y="363" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">S3</text>
+<line x1="340" y1="359" x2="370" y2="359" stroke="#fbbf24" stroke-width="1.2"/>
+<text x="376" y="363" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">Miss 下降</text>
+</svg></div>
+
+<h3>2.2 核心特性</h3>
+<ul>
+<li><strong>引擎无关</strong>：集成 vLLM v1、SGLang、NVIDIA Dynamo</li>
+<li><strong>任意文本复用</strong>：不只缓存前缀，任意重复文本都可复用</li>
+<li><strong>3-10x 延迟节省</strong>：在多轮 QA 和 RAG 场景</li>
+<li><strong>P2P KV Cache 共享</strong>：跨节点传输缓存</li>
+</ul>
+
+<h2>3. 代码示例</h2>
+策。</p>
+
+<h3>代码示例</h3>
+<div class="tip"><strong>通俗类比：</strong>如同阅读餐厅的操作手册。看懂API调用（如何存取食材）是第一步，但真正做好菜（优化性能）需要理解背后的原理（如数据结构、通信协议）。</div>
+<div class="warn"><strong>常见误区：</strong>示例代码常为演示而简化。直接用于生产环境会忽略错误处理、连接池管理、超时设置、序列化效率（如使用pickle而非更高效的msgpack）等关键细节。</div>
+<div class="deep"><strong>深入探讨：</strong>以存储一个10层、1024维度、序列长度512的KV Cache为例。其数据大小为：2 (K和V) * 10 (层) * 1024 (维度) * 512 (序列长) * 2 (字节/FP16) ≈ 20MB。在分布式环境下，序列化和网络传输这20MB数据需要毫秒级优化。</div>
+<div class="ascii"><pre># 伪代码：KV Cache 存取流程
+kv_cache = model.generate_with_cache(prompt)
+# 序列化并存储
+serialized_kv = serialize(kv_cache)
+redis.setex(“key:session123”, 300, serialized_kv)
+# 后续请求加载
+cached_data = redis.get(“key:session123”)
+kv_cache = deserialize(cached_data)
+model.generate(new_prompt, past_key_values=kv_cache)</pre></div>
+<table><tr><th>步骤</th><th>操作</th><th>关键考虑</th></tr><tr><td>1. 序列化</td><td>将KV Cache Tensor转为字节流</td><td>格式（JSON/Pickle/MsgPack）、压缩率、速度</td></tr><tr><td>2. 网络传输</td><td>发送至缓存服务器</td><td>协议（HTTP/gRPC）、压缩、连接复用</td></tr><tr><td>3. 存储</td><td>缓存服务器接收并存储</td><td>内存淘汰策略（LRU/LFU）、数据持久化</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<pre><code># LMCache 使用示例
+import lmcache
+
+# 初始化 LMCache
+cache = lmcache.LMCache(
+    backend="local",  # 或 "redis", "s3"
+    max_cache_size="10GB"
+)
+
+# 在 vLLM 中使用
+from vllm import LLM
+
+llm = LLM(
+    model="meta-llama/Llama-3-8B-Instruct",
+    enable_prefix_caching=True,
+    lmcache_config={
+        "backend": "local",
+        "max_size": "10GB"
+    }
+)
+
+# 缓存会自动管理
+# 相同前缀的请求会自动复用 KV Cache</code></pre>
+
+<h2>4. Mooncake 的 KV Cache Pool</h2>
+决策。</p>
+
+<h3>Mooncake 的 KV Cache Pool</h3>
+<div class="tip"><strong>通俗类比：</strong>好比餐厅的“智能中央冷藏库与加工站”。它不仅能存取半成品（KV Cache），还能智能调度、预热，并可能对“食材”进行二次加工（如量化）。</div>
+<div class="warn"><strong>常见误区：</strong>Mooncake架构中，Cache Pool的内存和网络带宽成为新的关键瓶颈。如果监控和扩容不及时，Pool本身会成为性能单点，导致整体推理延迟飙升。</div>
+<div class="deep"><strong>深入探讨：</strong>Mooncake架构将KV Cache Pool与计算单元解耦。其“以存换算”策略旨在用廉价、可扩展的存储和内存资源（如分布式缓存集群），来节省昂贵的GPU计算资源。典型配置中，一个KV Cache Pool可能使用数十TB的聚合内存，并通过高速网络（如RDMA）与数十个推理节点互联。</div>
+<div class="ascii"><pre>用户请求 --> [调度器] --> [推理节点集群] <--(高速网络)--> [KV Cache Pool] (分布式内存)
+                               |
+                               \--> [GPU集群] (计算)</pre></div>
+<table><tr><th>组件</th><th>角色</th><th>典型技术选型</th></tr><tr><td>KV Cache Pool</td><td>集中存储和提供KV Cache</td><td>Redis Cluster, 分布式共享内存, CXL内存池</td></tr><tr><td>调度器</td><td>路由请求，管理Cache生命周期</td><td>自研服务，基于一致性哈希或代理</td></tr><tr><td>推理节点</td><td>执行模型推理和Cache的加载/卸载</td><td>基于vLLM/TensorRT-LLM的改造</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>月之暗面（Moonshot）的 Mooncake 架构：</p>
+<ul>
+<li>将 KV Cache 从 GPU 卸载到 CPU 内存池</li>
+<li>通过高速网络（RDMA）在节点间共享</li>
+<li>支持数千并发请求的缓存复用</li>
+</ul>
+
+<h2>5. 缓存预热（Cache Warming）</h2>
+<h3>缓存预热（Cache Warming）</h3>
+<p></p
+
+<div class="tip"><strong>通俗类比：</strong>如同餐厅在营业前就备好热门菜品。在流量高峰来临前，提前将预测的“热门食材”（常见查询的KV Cache）加载好，避免“现炒现卖”的排队。</div>
+<div class="warn"><strong>常见误区：</strong>预热策略失当会浪费资源。盲目预热所有可能的数据会挤占在线请求的缓存空间和带宽，应基于历史访问模式进行预测性预热。</div>
+<div class="deep"><strong>深入探讨：</strong>缓存预热可分为：1）定时预热：在每日流量低谷期，加载次日热门内容。2）触发式预热：当模型版本更新或系统启动时，加载关键业务的提示词。3）预测预热：基于时间序列预测（如LSTM），提前加载可能即将被访问的前缀。预热期间需注意控制并发，避免冲击源站或缓存集群。</div>
+<div class="ascii"><pre>时间线:
+[低峰期] --> [启动预热任务] --> [加载 Top 100 热门Prompt的KV Cache]
+                                |
+[高峰期] <------------------------ [Cache已就绪，请求直接命中]</pre></div>
+<table><tr><th>预热类型</th><th>时机</th><th>目标</th><th>挑战</th></tr><tr><td>冷启动预热</td><td>服务首次上线或重启</td><td>基础系统提示、功能示例</td><td>增加启动时间</td></tr><tr><td>业务触发预热</td><td>新品发布、活动开始</td><td>与该活动相关的所有提示词</td><td>需业务系统配合</td></tr><tr><td>智能预测预热</td><td>持续</td><td>预测将被访问的非热点但可能升温的数据</td><td>算法准确性，资源消耗</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<pre><code># 缓存预热策略
+cache_warmup_queries = [
+    "你是一个专业的客服助手...",  # 系统 prompt
+    "常见问题1的答案...",          # FAQ
+    "文档A的内容...",              # RAG 上下文
+]
+
+# 启动时预加载常用前缀
+for query in cache_warmup_queries:
+    model.generate(query)  # 触发缓存
+
+# 后续请求直接命中缓存</code></pre>
+
+<h2>6. 缓存监控指标</h2>
+<h3>缓存预热（Cache Warming）</h3>"tip"><strong>通俗类比：</strong>就像餐厅的运营仪表盘。不能只看“出菜速度”（延迟），还要看“厨师利用率”（命中率）、“后厨拥挤度”（内存使用）和“食材浪费率”（淘汰率）。</div>
+<div class="warn"><strong>常见误区：</strong>避免只监控“命中率”这一个指标。高命中率但伴随极高的延迟（如因网络抖动），或者高命中率但内存已饱和导致频繁淘汰，都会严重影响服务质量。</div>
+<div class="deep"><strong>深入探讨：</strong>关键监控指标应形成闭环：1) 命中率（Hit Rate）> 80% 通常较好。2) P99延迟：定义缓存访问的服务等级目标（SLO），如P99 < 5ms。3) 内存使用率：设置阈值（如80%）预警。4) 驱逐/淘汰率（Eviction Rate）：频繁淘汰意味着容量不足。5) 网络I/O：避免成为瓶颈。</div>
+<div class="ascii"><pre>监控看板:
+[命中率: 95%] [P99延迟: 2ms] [内存使用: 70%] [淘汰率: 0.1%]
+    |               |               |               |
+    \____判断缓存健康状态，触发告警或自动扩缩容____/</pre></div>
+<table><tr><th>指标</th><th>健康状态</th><th>风险状态</th><th>可能原因及动作</th></tr><tr><td>缓存命中率</td><td>>80%</td><td>持续低于60%</td><td>预热不足、Key设计不佳、容量太小 -> 检查业务，考虑扩容</td></tr><tr><td>P99访问延迟</td><td>低于SLO（如5ms）</td><td>持续高于SLO</td><td>网络问题、缓存服务器负载高、序列化慢 -> 诊断网络，检查服务器性能</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+<tr><th>指标</th><th>含义</th><th>目标</th></tr>
+<tr><td>Hit Rate</td><td>缓存命中率</td><td>> 70%</td></tr>
+<tr><td>TTFT (cached)</td><td>缓存命中时首 token 延迟</td><td>< 100ms</td></tr>
+<tr><td>Cache Size</td><td>缓存总大小</td><td>控制在 GPU 内存 50% 内</td></tr>
+<tr><td>Eviction Rate</td><td>驱逐频率</td><td>< 5%</td></tr>
+</table>
+
+<div class="deep"><strong>原理与推导：</strong>
+从<strong>原理</strong>层面理解，该技术的<strong>工作机制</strong>基于信息论的基本定理。
+设信源熵为 H(X) = -Σ p(x)log p(x)，<strong>为什么</strong>这很重要？
+因为信息熵给出了无损压缩的理论下界——这也解释了<strong>为什么</strong>量化不可避免地
+会带来信息损失。<strong>推导</strong>量化误差的上界：对于均匀量化，
+E[|x-q(x)|²] ≤ Δ²/12，其中Δ为量化步长。
+这一<strong>公式</strong>揭示了精度与效率之间的<strong>数学本质</strong>关系：
+步长越小（精度越高），误差越小，但需要的比特数越多。
+从<strong>底层</strong>实现来看，现代加速器的Tensor Core正是利用这一原理，
+通过混合精度计算在保持精度的同时最大化吞吐量。
+</div>
+<div class="exercise">
+<p><strong>🧪 练习</strong>：用 LMCache 搭建一个带缓存的 vLLM 服务，测量多轮对话的 TTFT 改善。</p>
+</div>
+
+<div class="next-prev"><a href="04-Semantic-Caching.html">&larr; 上一模块</a><a href="06-缓存策略实战.html">下一模块 &rarr;</a></div>
+</div>
+<div class="footer"><p><a href="index.html">返回总览</a></p></div>
+
+<div class="tip"><strong>向前串联：</strong>
+单机 vs 分布式缓存的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习单机 vs 分布式缓存建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

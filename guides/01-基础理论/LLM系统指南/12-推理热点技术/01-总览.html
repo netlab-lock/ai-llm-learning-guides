@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01-推理优化全景总览 | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}
+.svg-diagram{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:1rem;margin:1rem 0;overflow-x:auto;text-align:center}.svg-diagram svg{max-width:100%;height:auto}</style>
+</head>
+<body>
+<div class="nav"><span></span><span>12-推理热点 / 总览</span><a href="02-连续批处理.html">02-连续批处理 &rarr;</a></div>
+<div class="container">
+
+<h1>🗺️ 1. 推理优化全景总览</h1>
+
+<h2>1.1 LLM 推理为什么需要优化？</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>LLM 推理就像一个"答题机器"——用户问一个问题（prompt），机器需要先"读题"（Prefill），然后一个字一个字地"写答案"（Decode）。读题可以很快（一次处理所有文字），但写答案很慢（每写一个字都要重新看一遍所有已写的内容）。而且每写一个字，需要参考的"笔记"（KV Cache）越来越长，速度越来越慢。</div>
+<p>LLM 推理（Inference）和训练有本质区别。训练时大量矩阵乘法可以充分利用 GPU 算力；推理时却面临独特挑战：</p>
+
+<div class="ascii">LLM 推理的两大阶段:
+
+  Prefill (预填充):  处理用户输入的 prompt
+                     一次性计算所有 token → 矩阵乘法密集 → GPU 利用率高
+                     瓶颈: 计算 (Compute-bound)
+
+  Decode  (解码):    逐个生成输出 token
+                     每步只算 1 个 token → 大部分时间在读 KV Cache
+                     瓶颈: 内存带宽 (Memory/IO-bound)
+                     
+                     每生成 1 个 token 需要:
+                     读取所有层的 KV Cache (GB级数据)
+                     但计算量很小 (只有 1 个 token 的 Q × K^T)
+                     → GPU 算力 95%+ 空闲在等数据搬运</div>
+
+<h2>1.2 核心瓶颈：三个"不够用"</h2>
+<div class="box warn"><div class="label">⚠️ 常见误区</div>很多人以为"买更好的 GPU"就能解决推理问题。但实际上，推理瓶颈往往是"内存带宽"而非"算力"——A100 的 312 TFLOPS 算力在 Decode 阶段 95% 时间空闲，因为等 HBM 喂数据。因此推理优化的核心是"减少数据搬运"（FlashAttention、量化）和"提高 GPU 利用率"（批处理、投机解码），而非单纯堆算力。</div>
+<table>
+<tr><th>瓶颈</th><th>表现</th><th>对应的优化方向</th></tr>
+<tr><td><strong>算力不够用</strong></td><td>单卡无法在合理时间内完成大模型推理</td><td>量化、投机解码、模型并行</td></tr>
+<tr><td><strong>内存不够用</strong></td><td>KV Cache 随序列长度线性增长，可能超过模型权重</td><td>GQA/MLA、PagedAttention、KV 压缩</td></tr>
+<tr><td><strong>带宽不够用</strong></td><td>Decode 阶段 95% 时间在等 HBM 读数据</td><td>FlashAttention、批处理调度、投机解码</td></tr>
+</table>
+
+<h2>1.3 优化技术全景图</h2>
+<div class="box info"><div class="label">🔬 深入探讨</div>推理优化技术可以分为四层：调度层（连续批处理、Chunked Prefill）解决"谁进 batch"的问题；计算层（FlashAttention、量化、投机解码）解决"怎么算更快"的问题；内存层（GQA/MLA、PagedAttention）解决"怎么省内存"的问题；输出层（结构化输出）解决"输出格式稳定"的问题。这四层技术通常组合使用，效果叠加。</div>
+<div class="svg-diagram"><svg viewBox="0 0 780 460" xmlns="http://www.w3.org/2000/svg">
+<rect width="780" height="460" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="390" y="32" text-anchor="middle" fill="#f0f6fc" font-family="'Cascadia Code','Fira Code',monospace" font-size="15" font-weight="bold">LLM 推理优化技术全景</text>
+<rect x="24" y="52" width="732" height="96" rx="6" fill="#1c2128" stroke="#30363d"/>
+<rect x="24" y="52" width="4" height="96" rx="2" fill="#fbbf24"/>
+<text x="42" y="72" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold">调度层 (Scheduling)</text>
+<text x="52" y="94" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5">├── 连续批处理 (Continuous Batching)</text>
+<text x="540" y="94" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">← 第 02 讲</text>
+<text x="52" y="114" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5">├── Chunked Prefill</text>
+<text x="540" y="114" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">← 第 03 讲</text>
+<text x="52" y="134" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5">└── Prefill-Decode 分离 (DistServe)</text>
+<text x="540" y="134" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">← 第 03 讲</text>
+<rect x="24" y="158" width="732" height="96" rx="6" fill="#1c2128" stroke="#30363d"/>
+<rect x="24" y="158" width="4" height="96" rx="2" fill="#22d3ee"/>
+<text x="42" y="178" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold">计算层 (Compute)</text>
+<text x="52" y="200" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5">├── FlashAttention</text>
+<text x="540" y="200" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">← 第 04 讲</text>
+<text x="52" y="220" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5">├── 量化 (GPTQ/AWQ/FP8)</text>
+<text x="540" y="220" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">← 第 06 讲</text>
+<text x="52" y="240" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5">└── 投机解码 (Speculative Decoding)</text>
+<text x="540" y="240" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">← 第 07 讲</text>
+<rect x="24" y="264" width="732" height="116" rx="6" fill="#1c2128" stroke="#30363d"/>
+<rect x="24" y="264" width="4" height="116" rx="2" fill="#a78bfa"/>
+<text x="42" y="284" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold">内存层 (Memory)</text>
+<text x="52" y="306" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5">├── 注意力头优化 (GQA/MQA/MLA)</text>
+<text x="540" y="306" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">← 第 05 讲</text>
+<text x="52" y="326" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5">├── PagedAttention</text>
+<text x="540" y="326" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">← 第 08 讲</text>
+<text x="52" y="346" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5">├── Prefix Caching</text>
+<text x="540" y="346" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">← 第 08 讲</text>
+<text x="52" y="366" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5">└── KV Cache 压缩/量化</text>
+<text x="540" y="366" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">← 第 08 讲</text>
+<rect x="24" y="390" width="732" height="56" rx="6" fill="#1c2128" stroke="#30363d"/>
+<rect x="24" y="390" width="4" height="56" rx="2" fill="#34d399"/>
+<text x="42" y="410" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold">输出层 (Output)</text>
+<text x="52" y="432" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5">└── 结构化输出 (Grammar-guided)</text>
+<text x="540" y="432" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">← 第 09 讲</text>
+</svg></div>
+
+<h2>1.4 技术之间的关联</h2>
+<div class="box tip"><div class="label">💡 学习建议</div>建议按调度层→计算层→内存层的顺序学习。调度层是理解推理服务的基础，计算层是性能提升最大的方向，内存层决定你能跑多大的模型和多长的序列。每学一个技术，都要想清楚它解决的是哪个层面的问题。</div>
+<p>这些技术不是孤立的，它们通常组合使用。以下是核心关联关系：</p>
+
+<div class="svg-diagram"><svg viewBox="0 0 780 350" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0,0.5 L7,3 L0,5.5" fill="#8b949e"/></marker></defs>
+<rect width="780" height="350" rx="8" fill="#161b22" stroke="#30363d"/>
+
+<rect x="20" y="12" width="175" height="100" rx="8" fill="#0c4a6e" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="107" y="42" text-anchor="middle" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5" font-weight="bold">FlashAttention</text>
+<text x="107" y="62" text-anchor="middle" fill="#67e8f9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">─── 计算更快</text>
+<line x1="195" y1="35" x2="230" y2="24" stroke="#22d3ee" stroke-width="1" opacity="0.5"/>
+<line x1="230" y1="24" x2="230" y2="100" stroke="#22d3ee" stroke-width="1" opacity="0.5"/>
+<line x1="230" y1="24" x2="250" y2="24" stroke="#22d3ee" stroke-width="1" opacity="0.5" marker-end="url(#arr)"/>
+<line x1="230" y1="49" x2="250" y2="49" stroke="#22d3ee" stroke-width="1" opacity="0.5" marker-end="url(#arr)"/>
+<line x1="230" y1="74" x2="250" y2="74" stroke="#22d3ee" stroke-width="1" opacity="0.5" marker-end="url(#arr)"/>
+<line x1="230" y1="100" x2="250" y2="100" stroke="#22d3ee" stroke-width="1" opacity="0.5" marker-end="url(#arr)"/>
+<rect x="255" y="12" width="510" height="24" rx="5" fill="#1c2128" stroke="#30363d"/>
+<text x="265" y="29" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">配合 → 连续批处理</text>
+<text x="440" y="29" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10.5">(多请求共享计算)</text>
+<rect x="255" y="40" width="510" height="24" rx="5" fill="#1c2128" stroke="#30363d"/>
+<text x="265" y="57" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">配合 → GQA/MLA</text>
+<text x="440" y="57" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10.5">(减少 KV 头数 → 更少计算量)</text>
+<rect x="255" y="68" width="510" height="24" rx="5" fill="#1c2128" stroke="#30363d"/>
+<text x="265" y="85" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">配合 → PagedAttention</text>
+<text x="440" y="85" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10.5">(KV 分页存储，FA 负责计算)</text>
+<rect x="255" y="96" width="510" height="24" rx="5" fill="#1c2128" stroke="#30363d"/>
+<text x="265" y="113" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">配合 → 量化</text>
+<text x="440" y="113" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10.5">(FA-3 原生支持 FP8)</text>
+
+<rect x="20" y="145" width="175" height="68" rx="8" fill="#422006" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="107" y="172" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5" font-weight="bold">连续批处理</text>
+<text x="107" y="192" text-anchor="middle" fill="#fcd34d" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">─── 调度更高效</text>
+<line x1="195" y1="168" x2="230" y2="157" stroke="#fbbf24" stroke-width="1" opacity="0.5"/>
+<line x1="230" y1="157" x2="230" y2="200" stroke="#fbbf24" stroke-width="1" opacity="0.5"/>
+<line x1="230" y1="157" x2="250" y2="157" stroke="#fbbf24" stroke-width="1" opacity="0.5" marker-end="url(#arr)"/>
+<line x1="230" y1="200" x2="250" y2="200" stroke="#fbbf24" stroke-width="1" opacity="0.5" marker-end="url(#arr)"/>
+<rect x="255" y="145" width="510" height="24" rx="5" fill="#1c2128" stroke="#30363d"/>
+<text x="265" y="162" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">增强 → Chunked Prefill</text>
+<text x="440" y="162" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10.5">(解决长 prompt 阻塞)</text>
+<rect x="255" y="173" width="510" height="24" rx="5" fill="#1c2128" stroke="#30363d"/>
+<text x="265" y="190" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">增强 → Prefill-Decode 分离</text>
+<text x="440" y="190" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10.5">(彻底解耦两种计算)</text>
+
+<rect x="20" y="248" width="175" height="68" rx="8" fill="#052e16" stroke="#34d399" stroke-width="1.5"/>
+<text x="107" y="275" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5" font-weight="bold">投机解码</text>
+<text x="107" y="295" text-anchor="middle" fill="#6ee7b7" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">─── 一次出多个 token</text>
+<line x1="195" y1="271" x2="230" y2="260" stroke="#34d399" stroke-width="1" opacity="0.5"/>
+<line x1="230" y1="260" x2="230" y2="303" stroke="#34d399" stroke-width="1" opacity="0.5"/>
+<line x1="230" y1="260" x2="250" y2="260" stroke="#34d399" stroke-width="1" opacity="0.5" marker-end="url(#arr)"/>
+<line x1="230" y1="303" x2="250" y2="303" stroke="#34d399" stroke-width="1" opacity="0.5" marker-end="url(#arr)"/>
+<rect x="255" y="248" width="510" height="24" rx="5" fill="#1c2128" stroke="#30363d"/>
+<text x="265" y="265" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">依赖 → FlashAttention</text>
+<text x="440" y="265" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10.5">(验证阶段需要快速注意力)</text>
+<rect x="255" y="276" width="510" height="24" rx="5" fill="#1c2128" stroke="#30363d"/>
+<text x="265" y="293" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11.5">依赖 → 连续批处理</text>
+<text x="440" y="293" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10.5">(草稿模型也需要调度)</text>
+
+<rect x="20" y="330" width="745" height="1" fill="none"/>
+</svg></div>
+
+<h2>1.5 各技术的适用场景速查</h2>
+<div class="box warn"><div class="label">⚠️ 常见误区</div>不要试图一次性用上所有优化技术。正确的做法是：(1) 先用连续批处理（几乎所有引擎默认开启）；(2) 根据瓶颈选择优化——如果显存不够用量化，如果延迟高用投机解码，如果长 prompt 阻塞用 Chunked Prefill；(3) 最后用 FlashAttention 优化注意力计算。每一步都要测量效果，避免过度优化。</div>
+<table>
+<tr><th>技术</th><th>解决什么问题</th><th>何时必须用</th><th>收益</th></tr>
+<tr><td>连续批处理</td><td>GPU 空闲槽位</td><td>多用户并发服务</td><td>吞吐 2-5x</td></tr>
+<tr><td>Chunked Prefill</td><td>长 prompt 阻塞 decode</td><td>输入长度差异大的场景</td><td>延迟降低 50%+</td></tr>
+<tr><td>FlashAttention</td><td>注意力 IO 瓶颈</td><td>序列长度 > 4K</td><td>速度 2-4x, 显存 O(n²)→O(n)</td></tr>
+<tr><td>GQA/MLA</td><td>KV Cache 太大</td><td>长上下文推理</td><td>KV Cache 减少 4-14x</td></tr>
+<tr><td>量化</td><td>模型太大放不下</td><td>显存受限</td><td>显存减半，速度提升 1.5-2x</td></tr>
+<tr><td>投机解码</td><td>一次只出一个 token</td><td>延迟敏感场景</td><td>延迟降低 2-3x</td></tr>
+<tr><td>PagedAttention</td><td>KV Cache 内存碎片</td><td>多请求并发</td><td>显存利用率接近 100%</td></tr>
+<tr><td>结构化输出</td><td>输出格式不稳定</td><td>API/Agent 场景</td><td>100% 格式合规</td></tr>
+</table>
+
+<div class="box tip"><div class="label">💡 学习建议</div>
+建议按 A → B → C 的顺序学习。调度层是理解推理服务的基础，计算层是性能提升最大的方向，内存层决定你能跑多大的模型和多长的序列。</div>
+
+<div class="box tip"><div class="label">🗺️ 学习路径</div>
+本章是 12-推理热点技术 的总览。建议按顺序学习：① 本章了解全景 → ② 连续批处理（调度基础）→ ③ Chunked Prefill（长 prompt 处理）→ ④ FlashAttention（计算优化）→ ⑤ 注意力头优化（内存优化）。每讲都解决一个具体问题，组合使用效果叠加。
+</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨：推理优化的性能分析方法论</div>
+推理优化的第一步不是「用什么技术」，而是「瓶颈在哪里」。性能分析方法论：(1) 区分 Prefill 和 Decode 阶段——两者的瓶颈完全不同；(2) 用 GPU Profiler（如 nsys、NVIDIA Nsight）分析计算/访存比例；(3) 计算 Arithmetic Intensity（算术强度）——如果 < 100 FLOPs/Byte，说明是 Memory-bound；(4) 测量 GPU SM 利用率——如果 < 50%，说明计算没喂饱。典型的瓶颈诊断：Prefill 阶段算力利用率 > 80% → Compute-bound → 用量化/FlashAttention；Decode 阶段算力利用率 < 20% → Memory-bound → 用投机解码/批处理。不要盲目堆优化——先找到瓶颈再对症下药。
+</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨：Prefill vs Decode 的计算特征深入分析</div>
+Prefill 和 Decode 的根本差异在于「矩阵乘法的形状」。Prefill：输入 n 个 token → Q(n×d) × K(n×d)^T = n×n 矩阵乘法 → 大矩阵乘，GPU 利用率高。Decode：输入 1 个 token → Q(1×d) × K(n×d)^T = 1×n 向量乘法 → 矩阵-向量乘，GPU 利用率极低。A100 的理论算力 312 TFLOPS，但 Decode 阶段因为矩阵太小，实际只用到 10-30 TFLOPS（利用率 < 10%）。这就是为什么 Decode 是 Memory-bound——不是因为计算量大，而是因为计算量太小，来不及隐藏访存延迟。解决思路：(1) 增大 batch size → 把多个 1×n 合并成 m×n → 提高利用率；(2) 投机解码 → 一次验证多个 token → 增大计算密度；(3) 量化 → 减少数据搬运量 → 降低访存压力。
+</div>
+
+<table>
+<tr><th>优化技术</th><th>解决的瓶颈</th><th>实现层面</th><th>加速倍数</th><th>复杂度</th></tr>
+<tr><td>连续批处理</td><td>GPU 利用率低</td><td>调度器</td><td>2-5x</td><td>低</td></tr>
+<tr><td>Chunked Prefill</td><td>长 prompt 阻塞</td><td>调度器</td><td>延迟降低50%</td><td>中</td></tr>
+<tr><td>FlashAttention</td><td>注意力 IO 瓶颈</td><td>算子</td><td>2-4x</td><td>低（框架集成）</td></tr>
+<tr><td>GQA/MLA</td><td>KV Cache 过大</td><td>模型架构</td><td>KV减少8-64x</td><td>中（需改模型）</td></tr>
+<tr><td>INT8/FP8 量化</td><td>模型太大/太慢</td><td>模型+算子</td><td>1.5-2x</td><td>中</td></tr>
+<tr><td>投机解码</td><td>一次一个 token</td><td>推理流程</td><td>2-3x</td><td>高</td></tr>
+<tr><td>PagedAttention</td><td>KV Cache 碎片</td><td>内存管理</td><td>显存利用率↑</td><td>中</td></tr>
+<tr><td>结构化输出</td><td>格式不稳定</td><td>解码</td><td>100%合规</td><td>低</td></tr>
+</table>
+
+<table>
+<tr><th>推理引擎</th><th>调度层</th><th>计算层</th><th>内存层</th><th>特色</th></tr>
+<tr><td>vLLM</td><td>连续批处理</td><td>FlashAttention</td><td>PagedAttention</td><td>PagedAttention 发源地</td></tr>
+<tr><td>SGLang</td><td>连续批处理</td><td>FlashAttention</td><td>RadixAttention</td><td>Prefix Caching 优化</td></tr>
+<tr><td>TensorRT-LLM</td><td>In-flight Batching</td><td>TRT优化+FA</td><td>显式管理</td><td>NVIDIA 硬件最优</td></tr>
+<tr><td>llama.cpp</td><td>连续批处理</td><td>量化+SIMD</td><td>简洁管理</td><td>CPU/边缘设备</td></tr>
+<tr><td>Ollama</td><td>多用户模式</td><td>llama.cpp</td><td>自动管理</td><td>易用性</td></tr>
+</table>
+
+<div class="box exercise"><div class="label">🎯 练习</div>
+<ol>
+<li>环境搭建：安装 vLLM 或 SGLang，部署一个 7B 模型，用 benchmark 工具测试吞吐量和延迟。</li>
+<li>瓶颈诊断：用 NVIDIA Nsight Systems 分析一次 LLM 推理的 GPU 活动，识别 Prefill 和 Decode 阶段的瓶颈。</li>
+<li>对比测试：分别用 vLLM 和 llama.cpp 部署同一个模型，对比 API 服务的吞吐量和延迟差异。</li>
+</ol>
+</div>
+
+<div class="box info"><div class="label">🔗 相关深入章节</div>
+• <a href="../../../../05-推理优化/index.html">推理优化目录</a> — 量化/推理框架/ContextCaching/编译优化<br>
+• <a href="../../../../05-推理优化/推理框架/index.html">推理框架</a> — vLLM/SGLang/TGI/TensorRT-LLM选型指南
+</div>
+
+<h2>1.2 Prefill 与 Decode 的计算特征</h2>
+
+<p>理解 LLM 推理优化的关键在于理解 Prefill 和 Decode 两个阶段的计算特征差异。Prefill 阶段处理用户输入的 prompt，一次性计算所有 token 的 KV Cache。这个阶段的计算特征是「大矩阵乘法」——输入矩阵的形状是 (batch_size, seq_len, hidden_dim)，GPU 可以充分利用其并行计算能力。因此 Prefill 是 Compute-bound（计算密集型）的。</p>
+
+<h3>Decode 阶段的 Memory Wall</h3>
+
+<p>Decode 阶段每次只生成一个 token，输入矩阵的形状是 (batch_size, 1, hidden_dim)。由于 batch 维度只有 1（或很小的 batch size），矩阵乘法的规模很小，GPU 的计算单元大部分空闲。此时瓶颈在于读取模型权重和 KV Cache——这需要大量的内存带宽。因此 Decode 是 Memory-bound（访存密集型）的。在 A100 GPU 上，Decode 阶段的算力利用率通常只有 5-15%，远低于 Prefill 阶段的 60-80%。这就是为什么推理优化的核心挑战是 Decode 阶段。</p>
+
+<h3>KV Cache 的增长模型</h3>
+
+<p>KV Cache 的大小随序列长度线性增长，公式为：KV Cache = 2 × n_layers × n_kv_heads × d_head × seq_len × bytes_per_element。对于 LLaMA-2 70B（80 层、64 个 KV 头、128 维每头、FP16），每个 token 的 KV Cache 大小为 2 × 80 × 64 × 128 × 2 = 2.5 MB。序列长度为 4K 时 KV Cache 为 10 GB，128K 时为 320 GB——远超单卡显存。这就是为什么 KV Cache 优化（GQA/MLA、PagedAttention）是推理优化的核心主题。</p>
+
+<table>
+<tr><th>优化技术</th><th>解决的问题</th><th>优化层面</th><th>收益倍数</th><th>代表实现</th></tr>
+<tr><td>连续批处理</td><td>GPU槽位空闲</td><td>调度层</td><td>2-10x 吞吐量</td><td>vLLM/SGLang</td></tr>
+<tr><td>Chunked Prefill</td><td>长prompt阻塞</td><td>调度层</td><td>20-50% 延迟降低</td><td>vLLM/SGLang</td></tr>
+<tr><td>FlashAttention</td><td>注意力计算慢</td><td>算子层</td><td>2-4x 注意力加速</td><td>FlashAttention-3</td></tr>
+<tr><td>PagedAttention</td><td>KV Cache碎片</td><td>内存层</td><td>2-4x 内存效率</td><td>vLLM</td></tr>
+<tr><td>GQA/MLA</td><td>KV Cache太大</td><td>模型层</td><td>8-64x KV压缩</td><td>LLaMA-2/DeepSeek</td></tr>
+<tr><td>量化</td><td>模型太大</td><td>模型层</td><td>2-4x 模型压缩</td><td>GPTQ/AWQ/FP8</td></tr>
+<tr><td>投机解码</td><td>一次一个token</td><td>算法层</td><td>2-3x 生成加速</td><td>SpecDec/SGLang</td></tr>
+<tr><td>Prefill-Decode分离</td><td>两类计算干扰</td><td>架构层</td><td>1.5-2x 独立优化</td><td>DistServe</td></tr>
+</table>
+
+<h2>1.3 推理引擎的技术架构</h2>
+
+<p>现代 LLM 推理引擎的技术架构可以分为四层：(1) 模型层——管理模型权重的加载、量化和分片；(2) 算子层——实现高效的矩阵乘法、注意力计算和归一化；(3) 调度层——管理请求队列、批处理策略和资源分配；(4) 服务层——提供 API 接口、负载均衡和监控。每一层都有独立的优化空间，且层间的优化可以叠加。</p>
+
+<h3>vLLM vs SGLang vs TensorRT-LLM 的技术路线差异</h3>
+
+<p>三个主流推理引擎的技术路线有显著差异。vLLM 以 PagedAttention 为核心创新，强调内存管理的效率——它将 KV Cache 的管理从「连续内存分配」改为「分页管理」，类似于操作系统的虚拟内存。SGLang 以 RadixAttention 为核心创新，强调前缀复用——它用基数树组织所有请求的 KV Cache，自动发现和复用共享前缀。TensorRT-LLM 以 NVIDIA 硬件优化为核心，强调算子级别的极致性能——它使用 TensorRT 编译器将模型编译为优化的 CUDA 内核。</p>
+
+<div class="ascii">LLM 推理优化技术栈全景:
+
+  ┌──────────────────────────────────────────────────────────┐
+  │                    应用层 (API/Chat/Agent)                │
+  ├──────────────────────────────────────────────────────────┤
+  │  服务层: OpenAI API兼容 · 负载均衡 · 监控 · 限流        │
+  ├──────────────────────────────────────────────────────────┤
+  │  调度层: 连续批处理 · Chunked Prefill · 前缀缓存         │
+  ├──────────────────────────────────────────────────────────┤
+  │  内存层: PagedAttention · KV Cache管理 · Swap策略        │
+  ├──────────────────────────────────────────────────────────┤
+  │  算子层: FlashAttention · GEMM优化 · 融合算子            │
+  ├──────────────────────────────────────────────────────────┤
+  │  模型层: GQA/MLA · 量化(INT4/FP8) · 投机解码            │
+  ├──────────────────────────────────────────────────────────┤
+  │  硬件层: A100/H100 · NVLink · HBM · Tensor Core          │
+  └──────────────────────────────────────────────────────────┘
+  
+  每一层的优化独立贡献 2-5x 收益
+  叠加后整体优化可达 100x+</div>
+
+<h3>推理成本的构成分析</h3>
+
+<p>理解推理成本的构成对优化决策至关重要。LLM 推理的成本主要包括：(1) GPU 硬件成本——A100-80GB 约 $15,000/张，H100-80GB 约 $30,000/张；(2) 电力成本——A100 功耗 400W，H100 功耗 700W；(3) 网络成本——多卡通信需要 NVLink 或 RDMA 网络；(4) 存储成本——模型权重和 KV Cache 需要高速存储。在总成本中，GPU 硬件通常占 60-70%，电力占 15-20%，网络和存储占 10-20%。优化推理效率的核心目标是最大化「每美元的 token 吞吐量」。</p>
+
+<h2>1.4 推理优化的评估指标</h2>
+
+<p>评估 LLM 推理性能需要关注几个核心指标。Time To First Token（TTFT）衡量从用户发送请求到模型输出第一个 token 的延迟，主要由 Prefill 阶段决定。Time Per Output Token（TPOT）衡量每生成一个 token 的平均延迟，主要由 Decode 阶段决定。Throughput（吞吐量）衡量每秒处理的 token 总数，反映系统的整体效率。Concurrent Requests（并发数）衡量系统能同时处理的请求数量。</p>
+
+<table>
+<tr><th>指标</th><th>定义</th><th>理想范围</th><th>瓶颈因素</th><th>优化方向</th></tr>
+<tr><td>TTFT</td><td>首token延迟</td><td><500ms</td><td>Prefill计算</td><td>FlashAttention/CP</td></tr>
+<tr><td>TPOT</td><td>每token延迟</td><td><50ms</td><td>Decode带宽</td><td>量化/GQA/投机解码</td></tr>
+<tr><td>Throughput</td><td>tokens/sec</td><td>>1000/s</td><td>GPU利用率</td><td>连续批处理</td></tr>
+<tr><td>P99延迟</td><td>99分位延迟</td><td><2s</td><td>长请求</td><td>Chunked Prefill</td></tr>
+<tr><td>GPU利用率</td><td>算力使用率</td><td>>80%</td><td>调度效率</td><td>批处理优化</td></tr>
+<tr><td>并发数</td><td>同时请求数</td><td>>100</td><td>显存容量</td><td>量化/PagedAttn</td></tr>
+</table>
+
+<div class="box tip"><div class="label">💡 实践技巧</div>选择推理优化方案时，首先要明确你的优化目标——是最低延迟（用户体验优先）还是最高吞吐量（成本效率优先）还是最大并发数（服务能力优先）。不同的目标对应不同的优化组合。在线对话服务通常优先 TTFT 和 P99 延迟，离线批处理任务优先吞吐量，API 服务优先并发数。</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区</div>不要盲目追求单一指标的极致。例如，过大的 batch size 可以提升吞吐量，但会增加单个请求的延迟。过多的量化可以减少内存占用，但会降低模型质量。推理优化是一个多目标优化问题，需要在延迟、吞吐量、成本和质量之间找到最佳平衡点。</div>
+
+<div class="box info"><div class="label">🔗 继续学习</div>推理优化是一个系统工程，涉及从模型架构到硬件的全栈优化。继续学习：<a href='02-连续批处理.html'>02-连续批处理</a> 了解调度层优化，<a href='03-Chunked-Prefill.html'>03-Chunked Prefill</a> 了解长 prompt 处理，<a href='04-FlashAttention.html'>04-FlashAttention</a> 了解算子层优化。</div>
+
+<h2>1.5 推理性能基准测试方法</h2>
+<p>进行 LLM 推理性能基准测试需要使用标准化的工具和方法。以下是使用 vLLM 的内置 benchmark 工具进行性能测试的完整流程：</p>
+<pre><code>from vllm import LLM, SamplingParams
+import time
+
+model = LLM(
+    model="meta-llama/Llama-3-8B-Instruct",
+    max_num_seqs=64,
+    tensor_parallel_size=1,
+)
+params = SamplingParams(temperature=0.7, max_tokens=256)
+
+# 生成测试数据 (混合长度)
+prompts = ["Explain quantum computing in detail"] * 100
+
+# 预热 (第一次推理通常较慢)
+model.generate(prompts[:10], params)
+
+# 正式测试
+start = time.time()
+outputs = model.generate(prompts, params)
+elapsed = time.time() - start
+
+total_tokens = sum(len(o.outputs[0].token_ids) for o in outputs)
+print(f"吞吐量: {total_tokens/elapsed:.1f} tokens/sec")
+print(f"平均延迟: {elapsed/len(prompts)*1000:.1f} ms/请求")</code></pre>
+<p>基准测试的关键注意事项包括：(1) 测试前需要预热——第一次推理涉及模型编译和 CUDA 内核初始化，通常较慢；(2) 使用多样化的 prompt 长度——单一长度的测试不能反映真实场景的性能特征；(3) 监控 GPU 利用率——如果利用率低于 70%，说明 batch size 太小或调度策略有问题；(4) 多次运行取平均——至少运行 3 次并报告标准差，因为 GPU 的性能可能受温度和功耗限制影响。</p>
+<p>推理优化是一个多目标优化问题。在选择技术方案时，需要明确你的优化目标——是最低延迟（用户体验优先）、最高吞吐量（成本效率优先）还是最大并发数（服务能力优先）。在线对话服务通常优先 TTFT 和 P99 延迟，离线批处理任务优先吞吐量，API 服务优先并发数和稳定性。不要盲目追求单一指标的极致，而应该在多个指标之间找到最佳平衡点。</p>
+
+
+<h2>1.6 推理优化的决策框架与成本分析</h2>
+<p>推理优化是一个多目标优化问题，需要在延迟、吞吐量、成本和质量之间找到最佳平衡点。选择优化方案的决策框架包括三个步骤：(1) 明确优化目标——是最低延迟（用户体验优先）、最高吞吐量（成本效率优先）还是最大并发数（服务能力优先）；(2) 识别性能瓶颈——通过监控 GPU 利用率、内存带宽使用率和延迟分布来判断瓶颈是在计算、内存还是调度层面；(3) 选择针对性优化——计算瓶颈用 FlashAttention/量化，内存瓶颈用 GQA/PagedAttention，调度瓶颈用连续批处理/Chunked Prefill。推理成本的主要构成包括 GPU 硬件成本（60-70%）、电力成本（15-20%）和网络存储成本（10-20%），优化的核心目标是最大化每美元的 token 吞吐量。</p>
+
+<h3>推理延迟的分解与优化优先级</h3><p>理解推理延迟的分解对优化决策至关重要。LLM 推理的端到端延迟可以分解为：网络传输延迟（通常 5-20ms）、调度延迟（通常 0.1-1ms）、Prefill 延迟（与 prompt 长度成正比，通常 100-5000ms）和 Decode 延迟（与输出长度成正比，每个 token 10-50ms）。优化的优先级应该是：先消除异常延迟（如长 prompt 的 Prefill 阻塞），再优化平均延迟（如通过量化降低 TPOT），最后优化尾部延迟（如通过连续批处理降低 P99）。监控指标方面，建议同时跟踪 TTFT（首 token 延迟）、TPOT（每 token 延迟）、P99 延迟和吞吐量四个指标，因为它们反映不同层面的性能特征。</p>
+<h3>推理优化的常见陷阱与最佳实践</h3><p>推理优化的常见陷阱包括：(1) 过度优化单一指标——例如追求极致的吞吐量但忽略了延迟，导致用户体验下降；(2) 忽视数据分布——在均匀长度的测试数据上表现良好的配置，在真实场景（长短混合）下可能表现很差；(3) 不做端到端测试——单独优化每个组件后没有做整体测试，可能导致组件间的不兼容或性能回退。最佳实践包括：使用真实的请求流量进行压测（而不是合成数据）、建立完整的监控体系（GPU 利用率、内存使用、延迟分布）、以及定期重新评估优化策略（因为模型和硬件都在快速迭代）。</p>
+<pre><code># 推理延迟分解示例
+# Prefill: 2048 tokens on A100 = ~500ms
+# Decode: 256 tokens on A100 = ~5s
+# KV Cache (GQA g=8): 10GB for 4K seq</code></pre>
+<h3>推理服务的 SLA 设计与容量规划</h3><p>设计推理服务的 SLA（Service Level Agreement）需要明确四个关键指标：可用性（通常 99.9% 以上）、首 token 延迟（TTFT，通常 <1 秒）、每 token 延迟（TPOT，通常 <50ms）和吞吐量（tokens/sec）。容量规划的步骤包括：(1) 估算峰值 QPS——通常为平均 QPS 的 3-5 倍；(2) 计算单卡吞吐量——通过基准测试确定；(3) 计算所需 GPU 数量——峰值 QPS 乘以平均请求 token 数除以单卡吞吐量，再乘以 1.5 的安全系数；(4) 考虑冗余——至少保留 20% 的额外容量应对突发流量和硬件故障。推理服务的弹性伸缩也是重要的设计考虑——白天对话请求多可以多分配 GPU，晚上批量处理多可以调整配置。</p>
+<h3>多模型部署与模型路由策略</h3><p>在实际生产中，通常需要同时部署多个模型（如 7B 快速模型和 70B 高质量模型）。模型路由策略决定了每个请求应该发送到哪个模型。简单的路由方法包括：基于 prompt 长度路由（短 prompt 用小模型，长 prompt 用大模型）、基于任务类型路由（简单问答用小模型，复杂推理用大模型）、基于用户等级路由（免费用户用小模型，付费用户用大模型）。更高级的路由方法使用轻量级分类器预测问题难度，自动选择最合适的模型。这种多模型部署可以将整体推理成本降低 50-70% 同时保持 95% 以上的用户体验。</p>
+<pre><code># 推理延迟分解示例
+# Prefill: 2048 tokens on A100 = ~500ms
+# Decode: 256 tokens on A100 = ~5s
+# KV Cache (GQA g=8): 10GB for 4K seq</code></pre>
+<h3>推理优化中的内存带宽瓶颈分析</h3><p>在 LLM 推理的 decode 阶段，内存带宽是最大的性能瓶颈。以 LLaMA-70B INT4 模型为例，模型权重约 35GB，每生成一个 token 需要读取全部权重一次。在 A100-80GB 上（HBM 带宽 2TB/s），仅读取权重就需要 35GB / 2TB/s = 17.5ms。这意味着即使计算是无限快的，decode 速度也无法超过约 57 tokens/sec。优化内存带宽的方法包括：(1) 量化减少权重大小（INT4 比 FP16 小 4 倍）；(2) 批处理让多个请求共享一次权重读取；(3) 使用更高带宽的硬件（H100 的 HBM3 带宽 3.35TB/s）。理解内存带宽瓶颈是推理优化的基础——所有 decode 阶段的优化本质上都是在减少内存访问量或提高内存访问效率。</p>
+<h3>推理服务的故障恢复与高可用设计</h3><p>生产环境的推理服务需要考虑故障恢复和高可用性。常见的故障类型包括：GPU 硬件故障（ECC 错误、温度过高）、CUDA 内核崩溃（OOM、非法内存访问）、网络故障（KV Cache 传输超时）和模型加载失败。高可用设计的核心是冗余和快速恢复。建议的方案包括：(1) 多副本部署——同一模型部署至少 2 个副本，一个故障时流量自动切换到另一个；(2) 健康检查——定期向推理服务发送测试请求，检测延迟和准确率，异常时自动重启；(3) 优雅降级——当 GPU 资源不足时，自动切换到量化版本或更小的模型，保证服务不中断；(4) 状态恢复——使用外部存储（如 Redis）缓存请求状态，服务重启后可以恢复未完成的请求。</p>
+<div class="next-prev"><span></span><a href="02-连续批处理.html">02-连续批处理 →</a></div>
+
+</div>
+<div class="highlight">
+<strong>🔗 相关深入章节：</strong><br>
+• <a href="../../../../05-推理优化/index.html">推理优化目录</a> — 量化/推理框架/ContextCaching/编译优化<br>
+• <a href="../../../../05-推理优化/推理框架/index.html">推理框架</a> — vLLM/SGLang/TGI/TensorRT-LLM选型指南
+</div>
+
+<div class="footer"><p>LLM 系统学习 · 01-推理优化全景总览</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="tip"><strong>相关章节：</strong>
+LLM 推理为什么需要优化？与以下内容密切相关：<a href="02-连续批处理.html">02-连续批处理</a> | <a href="03-Chunked-Prefill.html">03-Chunked-Prefill</a> | <a href="04-FlashAttention.html">04-FlashAttention</a>。建议结合学习。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+建议先在单GPU单请求场景下测量decode阶段的tokens/s和GPU利用率，确认系统是计算瓶颈还是带宽瓶颈。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+从推理优化的<strong>系统原理</strong>出发，LLM推理是一个包含prefill（预填充）和decode（解码）两个阶段的流水线。<strong>为什么</strong>推理优化如此复杂？<strong>推导</strong>：prefill阶段是计算密集型（处理整个prompt），而decode阶段是内存密集型（每步只生成一个token，但需加载全部KV-Cache）。两阶段对硬件资源的需求截然不同。<strong>数学本质</strong>上，推理性能受算术强度（FLOPs/Byte）制约——prefill的算术强度高（受计算限制），decode的算术强度低（受内存带宽限制），需要不同的优化策略。
+</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释LLM 推理为什么需要优化？的核心原理，并举一个实际应用场景。</li>
+<li>LLM 推理为什么需要优化？在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比LLM 推理为什么需要优化？与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+LLM 推理为什么需要优化？的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="ascii">
+LLM 推理为什么需要优化？ 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+从推理优化的<strong>系统原理</strong>出发，LLM推理是一个包含prefill（预填充）和decode（解码）两个阶段的流水线。<strong>为什么</strong>推理优化如此复杂？<strong>推导</strong>：prefill阶段是计算密集型（处理整个prompt），而decode阶段是内存密集型（每步只生成一个token，但需加载全部KV-Cache）。两阶段对硬件资源的需求截然不同。<strong>数学本质</strong>上，推理性能受算术强度（FLOPs/Byte）制约——prefill的算术强度高（受计算限制），decode的算术强度低（受内存带宽限制），需要不同的优化策略。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习推理优化时，很多人只看加速比数据不理解底层瓶颈。建议用nsight或torch.profiler分析推理kernel的执行时间分布，识别当前系统是计算瓶颈还是内存带宽瓶颈。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为推理优化就是简单的工程调参可以直接上手。理解prefill/decode阶段特性、算术强度、内存层次等基础概念是有效优化的前提。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+LLM 推理为什么需要优化？与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

@@ -1,0 +1,329 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>拒绝采样与迭代对齐 - RLHF训练深度</title><style>
+*{margin:0;padding:0;box-sizing:border-box}body{background:#0f1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;line-height:1.8;padding:20px;max-width:1000px;margin:0 auto}h1{color:#58a6ff;font-size:1.8em;margin:20px 0 10px;border-bottom:2px solid #30363d;padding-bottom:10px}h2{color:#79c0ff;font-size:1.4em;margin:25px 0 10px}h3{color:#d2a8ff;font-size:1.2em;margin:20px 0 8px}p{margin:10px 0}.nav{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:25px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}.nav a{color:#58a6ff;text-decoration:none;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;overflow-x:auto;margin:15px 0;font-size:0.9em}code{background:#161b22;padding:2px 6px;border-radius:4px;font-size:0.9em;color:#e6edf3}pre code{background:none;padding:0}table{border-collapse:collapse;width:100%;margin:15px 0}th,td{border:1px solid #30363d;padding:10px 12px;text-align:left}th{background:#161b22;color:#58a6ff}tr:nth-child(even){background:#161b22}.highlight{background:#1a2332;border-left:4px solid #58a6ff;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.formula{background:#1a1a2e;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;text-align:center;font-family:'Courier New',monospace;color:#e6edf3}ul,ol{margin:10px 0 10px 25px}li{margin:5px 0}.warning{background:#2d1b00;border-left:4px solid #d29922;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.tip{background:#0d2818;border-left:4px solid #3fb950;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.footer{margin-top:40px;padding-top:20px;border-top:1px solid #30363d;font-size:0.85em;color:#8b949e}
+</style></head><body>
+<div class="nav">
+<a href="01-对齐训练全景图.html">01 全景图</a>
+<a href="02-RLHF经典方法详解.html">02 RLHF</a>
+<a href="03-DPO偏好优化原理.html">03 DPO</a>
+<a href="04-KTO与单偏好优化.html">04 KTO</a>
+<a href="05-GRPO群体相对策略优化.html">05 GRPO</a>
+<a href="06-RLVR与推理增强训练.html">06 RLVR</a>
+<a href="07-奖励模型训练.html">07 奖励模型</a>
+<a href="08-拒绝采样与迭代对齐.html">08 拒绝采样</a>
+<a href="09-对齐训练工程实践.html">09 工程实践</a>
+<a href="10-对齐方法选型指南.html">10 选型指南</a>
+</div>
+
+<h1>08 - 拒绝采样与迭代对齐</h1>
+
+<h2>1. 拒绝采样微调（RFT）</h2>
+<h3>对齐训练的工程实践与最新进展</h3>
+<p>对齐训练的工程实现涉及多个精密调优的环节。数据管线方面，偏好数据需要经过严格的质量控制：标注者一致性检查(agreement rate需>60%)、异常样本过滤(如明显的标注错误)、以及数据平衡(确保chosen/rejected的质量差异适中——差异太大模型学不到细微差别，差异太小模型分不清好坏)。</p>
+<p>训练稳定性是RLHF/PPO的核心挑战。常见问题包括：(1)奖励黑客——模型发现RM的漏洞，生成高分但低质量的输出；(2)KL散度爆炸——模型偏离SFT基线太远，输出变得不可控；(3)训练崩溃——奖励分数突然归零，模型忘记所有已学知识。对策包括：定期更新RM(对抗性训练)、使用clip范围限制策略更新幅度、以及checkpoint回退(检测到异常时恢复到最近的正常checkpoint)。</p>
+<p>最新的对齐方法正在向"无需奖励模型"的方向发展。DPO直接从偏好对学习，省去了RM训练的开销。GRPO用组内相对排名替代绝对奖励，进一步简化了流程。KTO只需要好/坏标签(不需要配对)，降低了数据收集成本。RLVR(Reinforcement Learning with Verifiable Rewards)用于数学/代码等可验证任务，奖励信号来自客观的正确性判断而非人类偏好。这些方法使得对齐训练的成本从RLHF的数万美元降到数千美元。</p>
+
+<p><strong>拒绝采样微调（Rejection Sampling Fine-Tuning, RFT）</strong>是一种简单但有效的对齐方法：对同一问题生成多个回答，通过奖励模型或规则筛选出最好的回答，然后用这些高质量回答做监督微调。</p>
+
+<h3>1.1 基本流程</h3>
+<ol>
+<li><strong>生成阶段：</strong>对每个 prompt 生成 N 个候选回答（通常 N=8~64）</li>
+<li><strong>评分阶段：</strong>用奖励模型（或规则验证器）对每个回答打分</li>
+<li><strong>筛选阶段：</strong>选择得分最高的回答（或 top-k 回答）</li>
+<li><strong>训练阶段：</strong>用筛选后的高质量数据做 SFT</li>
+</ol>
+
+<div class="highlight">
+<strong>核心直觉：</strong>RFT 本质上是"用搜索代替学习"——不做梯度更新优化策略，而是通过大量采样+筛选来找到好的回答，再让模型模仿这些好回答。这在数学推理等场景特别有效，因为正确答案可以被验证。
+</div>
+
+<h3>1.2 RFT 的理论基础</h3>
+<div class="formula">
+P_RFT(y|x) ∝ P_base(y|x) · 𝟙[r(x,y) ≥ threshold]
+</div>
+<p>RFT 通过截断基座模型的分布，只保留高奖励区域的质量。当 N→∞ 时，RFT 可以逼近最优策略（在奖励模型准确的前提下）。</p>
+
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「1. 拒绝采样微调（RFT）」的常见陷阱：不要盲目照搬网上的配置参数。不同的数据分布和模型规模下，拒绝采样微调的最优配置可能完全不同。务必在自己的场景下做充分的验证实验。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「1. 拒绝采样微调（RFT）」的深层理解：RFT 的理论优雅之处在于将对齐问题分解为搜索和模仿两个子问题。与直接优化奖励函数的 RL 方法（如 PPO 不稳定）不同，RFT 将问题拆分为两个成熟的子问题：(1) 高效探索输出空间以找到高奖励样本，(2) 用监督学习让模型复现这些样本。这种分离使得 RFT 比 PPO 稳定得多，同时保持强劲性能。核心洞察来自极值理论：随着采样数 N 增加，Best-of-N 的期望质量趋近理论最优。实践中 N=16-64 已能捕获大部分收益，使 RFT 在计算上可行。</div>
+
+<div class="ascii">
+RLHF Pipeline (4个模型):
+  Prompt → [Actor] → Response → [Reward Model] → Score
+                          ↓                           ↓
+                    [Critic] → Value          PPO Update ← KL Penalty
+                          ↓
+                    [Reference] → KL
+
+DPO Pipeline (2个模型):
+  (Prompt, y_w, y_l) → [Policy] → log π(y_w), log π(y_l)
+                              ↓
+                        [Reference] → log π_ref(y_w), log π_ref(y_l)
+                              ↓
+                        DPO Loss (无需奖励模型)
+
+GRPO Pipeline (2个模型):
+  Prompt → [Actor] × G次采样 → {y_1,...,y_G}
+                              ↓
+              [Rule-based Reward] → {r_1,...,r_G}
+                              ↓
+              组内排名归一化 → 优势估计A_i
+                              ↓
+              GRPO Update (无需Critic)
+</div><h2>2. Best-of-N 采样</h2>
+
+<div class="ascii">
+系统架构与数据流
+
+Input → [预处理] → [核心计算] → [后处理] → Output
+  │         │           │           │
+  ▼         ▼           ▼           ▼
+编码     特征提取     推理决策     结果格式化
+
+优化方向:
+  ├─ 算法优化: 降低计算复杂度
+  ├─ 系统优化: 内存/调度/批处理
+  └─ 硬件优化: GPU/量化/编译
+</div>
+
+
+<div class="ascii">
+系统架构与数据流
+
+Input → [预处理] → [核心计算] → [后处理] → Output
+  │         │           │           │
+  ▼         ▼           ▼           ▼
+编码     特征提取     推理决策     结果格式化
+
+优化方向:
+  ├─ 算法优化: 降低计算复杂度
+  ├─ 系统优化: 内存/调度/批处理
+  └─ 硬件优化: GPU/量化/编译
+</div>
+
+<p><strong>Best-of-N</strong>是 RFT 的推理时版本：在推理时对同一问题生成 N 个回答，直接选最好的给用户，不做任何训练。</p>
+
+<h3>2.1 Best-of-N 的效果</h3>
+<table>
+<tr><th>N 值</th><th>典型效果</th><th>推理成本</th></tr>
+<tr><td>N=1</td><td>基线性能</td><td>1x</td></tr>
+<tr><td>N=4</td><td>显著提升</td><td>4x</td></tr>
+<tr><td>N=16</td><td>接近微调效果</td><td>16x</td></tr>
+<tr><td>N=64</td><td>接近最优</td><td>64x</td></tr>
+</table>
+
+<div class="tip">
+<strong>实用价值：</strong>Best-of-N 是评估奖励模型质量的重要基线。如果 Best-of-N(N=64) 的效果远优于 PPO 训练的模型，说明奖励模型可能有问题，或者 RL 训练没有充分利用奖励信号。
+</div>
+
+<h3>2.2 Best-of-N vs RL 训练</h3>
+<table>
+<tr><th>维度</th><th>Best-of-N</th><th>RL 训练（PPO/DPO）</th></tr>
+<tr><td>推理成本</td><td>N 倍（每次推理都需要）</td><td>1 倍（训练一次即可）</td></tr>
+<tr><td>训练成本</td><td>零</td><td>较高</td></tr>
+<tr><td>上限</td><td>受采样多样性限制</td><td>可学习新策略模式</td></tr>
+<tr><td>稳定性</td><td>非常稳定</td><td>需要调参</td></tr>
+<tr><td>生产适用性</td><td>高延迟场景不适用</td><td>推理效率高</td></tr>
+</table>
+
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「2. Best-of-N 采样」的常见陷阱：常见陷阱：忽略DPO的边界条件和异常情况。这些在小规模测试中可能不会暴露，但在生产环境中往往是最先出问题的地方。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「2. Best-of-N 采样」的深层理解：DPO背后的核心权衡是灵活性与效率之间的平衡。更灵活的方案通常计算开销更大，更高效的方案往往需要更强的假设。在PPO的设计中也能看到类似的权衡。</div>
+<h2>3. 迭代对齐（Iterative Alignment）</h2>
+<p>迭代对齐将拒绝采样与模型训练结合，形成"生成→筛选→训练→再生成"的循环。</p>
+
+<h3>3.1 迭代对齐的基本框架</h3>
+<pre><code>for iteration in range(num_iterations):
+    # 1. 用当前策略模型生成候选回答
+    candidates = generate(policy_model, prompts, n_samples=N)
+    
+    # 2. 用奖励模型/规则筛选
+    best_responses = select_best(candidates, reward_fn)
+    
+    # 3. 构建训练数据
+    train_data = build_dataset(prompts, best_responses)
+    
+    # 4. SFT 微调当前模型
+    policy_model = sft_train(policy_model, train_data)
+    
+    # 5. （可选）更新奖励模型
+    if iteration % reward_update_freq == 0:
+        reward_model = update_reward_model(new_preferences)</code></pre>
+
+<h3>3.2 迭代对齐的优势</h3>
+<ul>
+<li><strong>自我改进：</strong>每轮迭代后模型能生成更好的候选，进一步提升筛选质量</li>
+<li><strong>训练简单：</strong>每轮只需要 SFT，比 PPO 简单得多</li>
+<li><strong>数据效率：</strong>通过在线生成不断获取新的高质量数据</li>
+<li><strong>可验证任务友好：</strong>数学、代码等可以用执行结果替代奖励模型</li>
+</ul>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>关于「3. 迭代对齐（Iterative Alignment）」的实用建议：实战技巧：善用日志和可视化工具来理解系统行为。Iterative相关指标的监控可以帮助你快速定位问题。建立完善的实验记录习惯。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「3. 迭代对齐（Iterative Alignment）」的常见陷阱：最常见的错误是跳过baseline直接上复杂方案。没有Iterative的baseline对比，你无法判断复杂方案是否真的带来了提升。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「3. 迭代对齐（Iterative Alignment）」的深层理解：从信息论的角度思考——理解Iterative需要信息的压缩与保留、信号与噪声的分离、冗余与效率的权衡，这些都是贯穿整个AI工程的核心主题。</div>
+<h2>4. Constitutional AI 的迭代自改进</h2>
+<p><strong>Constitutional AI（CAI）</strong>由 Anthropic 提出，是迭代对齐的经典范例。其核心思想是让 AI 根据一组"宪法原则"自我批评和改进。</p>
+
+<h3>4.1 CAI 的两阶段流程</h3>
+<p><strong>阶段一：监督自改进（SL）</strong></p>
+<ol>
+<li>模型生成一个初始回答（可能有害）</li>
+<li>模型根据宪法原则自我批评："这个回答违反了哪条原则？"</li>
+<li>模型修改回答使其符合原则</li>
+<li>用修改后的回答做 SFT</li>
+</ol>
+
+<p><strong>阶段二：强化学习自改进（RL）</strong></p>
+<ol>
+<li>对同一问题生成多个修改后的回答</li>
+<li>AI 根据宪法原则对回答进行排序</li>
+<li>用排序数据训练奖励模型</li>
+<li>用 RL 优化策略模型</li>
+</ol>
+
+<div class="highlight">
+<strong>宪法原则示例：</strong>"请选择最无害、最诚实、最有帮助的回答"、"请选择不包含歧视性内容的回答"、"请选择不会帮助用户从事危险活动的回答"。
+</div>
+
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「4. Constitutional AI 的迭代自改进」的常见陷阱：一次只改一个变量。在调整CAI的参数时，如果同时改多个参数，你无法确定是哪个改动带来了效果变化或引入了问题。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「4. Constitutional AI 的迭代自改进」的深层理解：从历史视角看，当前CAI的主流方法经历了多年的演进。早期被认为过时的技术在大规模场景下可能重新焕发生机。保持对经典方法的了解很重要。</div>
+<h2>5. DeepSeek-R1 的拒绝采样实践</h2>
+<p><strong>DeepSeek-R1</strong>在其训练流程中大量使用了拒绝采样，特别是将 RL 训练的推理模型的高质量输出蒸馏到更小模型中。</p>
+
+<h3>5.1 DeepSeek-R1 的多阶段流程</h3>
+<ol>
+<li><strong>冷启动 SFT：</strong>用少量高质量推理数据微调基座模型</li>
+<li><strong>RL 训练（GRPO）：</strong>用可验证奖励训练推理能力</li>
+<li><strong>拒绝采样：</strong>从 RL 模型生成大量回答，筛选正确且推理过程清晰的样本</li>
+<li><strong>SFT 蒸馏：</strong>用筛选后的数据训练小模型（1.5B/7B/14B/32B）</li>
+<li><strong>再次 RL：</strong>对小模型再做一轮 RL 训练</li>
+</ol>
+
+<h3>5.2 拒绝采样的筛选标准</h3>
+<pre><code>def deepseek_filter(question, response, ground_truth):
+    """DeepSeek-R1 风格的筛选逻辑"""
+    # 1. 正确性检查
+    is_correct = verify_answer(response, ground_truth)
+    
+    # 2. 格式检查（是否包含 &lt;think&gt; 标签）
+    has_thinking = "&lt;think&gt;" in response and "&lt;/think&gt;" in response
+    
+    # 3. 长度合理性（不太短也不太长）
+    thinking_length = extract_thinking(response)
+    is_reasonable_length = 200 &lt; len(thinking_length) &lt; 8000
+    
+    # 4. 语言一致性（不混杂多种语言）
+    is_consistent_lang = check_language_consistency(response)
+    
+    return all([is_correct, has_thinking, is_reasonable_length,
+                is_consistent_lang])</code></pre>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>关于「5. DeepSeek-R1 的拒绝采样实践」的实用建议：建议优先使用成熟的开源工具和框架，避免重复造轮子。RL生态中有许多经过生产验证的工具可以选择。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「5. DeepSeek-R1 的拒绝采样实践」的常见陷阱：隐蔽的陷阱是评估数据泄漏。确保RL的评估数据完全没有出现在训练集中。即使部分重叠也会导致评估结果严重失真。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「5. DeepSeek-R1 的拒绝采样实践」的深层理解：工程哲学：在RL的实践中，简单但规模大往往胜过复杂但规模小。Chinchilla定律和Scaling Law都指向同一个方向——数据和计算的规模比精巧的算法设计更重要。</div>
+<h2>6. 实现模式与工程实践</h2>
+
+<h3>6.1 大规模拒绝采样实现</h3>
+<pre><code>import torch
+from vllm import LLM, SamplingParams
+
+# 使用 vLLM 进行高效批量生成
+llm = LLM(model="your_model_path", tensor_parallel_size=4)
+sampling_params = SamplingParams(
+    temperature=0.8,
+    top_p=0.95,
+    n=32,            # 每个 prompt 生成 32 个候选
+    max_tokens=2048,
+)
+
+# 批量生成
+outputs = llm.generate(prompts, sampling_params)
+
+# 筛选最佳回答
+selected = []
+for output in outputs:
+    candidates = output.outputs
+    scored = [(c.text, reward_fn(output.prompt, c.text)) 
+              for c in candidates]
+    best = max(scored, key=lambda x: x[1])
+    selected.append({"prompt": output.prompt, "response": best[0]})</code></pre>
+
+<h3>6.2 迭代轮次选择</h3>
+<table>
+<tr><th>迭代次数</th><th>效果</th><th>说明</th></tr>
+<tr><td>1 轮</td><td>显著提升</td><td>大多数场景已经足够</td></tr>
+<tr><td>2-3 轮</td><td>继续提升但边际递减</td><td>推荐的迭代次数</td></tr>
+<tr><td>4+ 轮</td><td>趋于饱和</td><td>收益递减明显</td></tr>
+</table>
+
+<div class="warning">
+<strong>注意事项：</strong>迭代对齐可能导致模型逐渐偏离原始分布（distribution drift）。建议每轮迭代后检查模型在通用基准上的表现，避免过拟合到奖励模型的偏好。使用 KL 约束或定期回退到参考数据可以缓解此问题。
+</div>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>关于「6. 实现模式与工程实践」的实用建议：好习惯：定期做checkpoint并保存实验配置。特别是在调整SamplingParams的参数时，记录每组参数的效果对比。这些记录在后续复盘时非常有价值。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「6. 实现模式与工程实践」的深层理解：SamplingParams的发展遵循AI领域的通用演进模式——从手工规则到数据驱动，从监督学习到自监督/强化学习，从单一模态到多模态融合。在KL中也能观察到这个趋势。</div>
+<div class="footer">
+<p>RLHF训练深度 · 拒绝采样与迭代对齐 · 第08章</p>
+</div>
+
+<div class="deep"><strong>思考与练习：</strong>
+<ol>
+<li>本节介绍的核心概念有哪些？请用自己的话总结其关键原理。</li>
+<li>尝试对比本节涉及的不同方法，分析各自的优缺点和适用场景。</li>
+<li>如果要将本节知识应用到实际项目中，你会如何设计方案？列出关键步骤。</li>
+</ol>
+</div>
+
+
+
+<div class="deep"><strong>深入探讨：</strong>
+
+</div>
+
+<div class="tip"><strong>向前串联：</strong>
+本节内容为后续更高级的主题奠定了坚实基础。建议在学习后续章节时，回顾本节的核心概念和关键公式。特别是本节介绍的技术原理，将在推理优化、部署实践和系统工程等场景中反复应用。
+</div>
+
+
+
+
+
+<div class="ascii">
+技术方案选型决策树
+
+问题类型
+├─ 事实查询 → Greedy Decoding (1x成本, ~95%准确率)
+├─ 多步推理 → Self-Consistency (5-20x, ~85%)
+├─ 复杂推理 → Extended Thinking (10-100x, ~90%)
+├─ 数学证明 → Multi-Agent+Verifier (100-1000x, ~95%)
+└─ 代码生成 → Best-of-N+测试 (5-20x, ~88%)
+
+性能优化路径
+├─ 短期: 量化(INT8) + 算子融合 → 成本降低50%
+├─ 中期: 投机解码 + 连续批处理 → 吞吐提升3x
+└─ 长期: 架构搜索 + 知识蒸馏 → 成本降低10x
+</div>
+
+<div class="deep"><strong>前沿研究方向：</strong>
+
+
+</div>
+
+<div class="deep"><strong>🔬 拒绝采样与迭代对齐技术深度剖析：</strong>
+<p>拒绝采样微调（RFT）的理论基础来自极值理论：当从基座模型P_base(y|x)中采样N个候选时，Best-of-N的期望奖励随N增加而单调递增，且满足E[r(y*)] = E[max_{i=1..N} r(y_i)]。Yuan等人（"Scaling Relationship on Learning Mathematical Reasoning with Large Language Models", 2023）在GSM8K上的实验表明，RFT(N=64)可将Llama-2-7B的准确率从基线26.3%提升至53.8%，而相同计算预算下的PPO仅提升至42.1%，证明RFT在可验证任务上的优越性。DeepSeek-R1的完整训练流程包含5个阶段：(1)冷启动SFT使用约5K高质量推理样本，(2)GRPO训练约8000步（生成温度0.7，G=16），(3)拒绝采样从RL模型生成约800K候选回答并筛选约100K高质量样本（筛选标准包括答案正确性、think标签存在、推理长度在200-8000字符之间、语言一致性），(4)SFT蒸馏训练1.5B/7B/14B/32B小模型，(5)对小模型再做一轮GRPO训练。迭代对齐的边际收益递减明显：第1轮通常带来最大提升（10-20个百分点），第2轮提升3-8个百分点，第3轮及以后趋于饱和。Constitutional AI的迭代自改进流程（Bai et al., 2022）使用约16条宪法原则，每轮SL阶段对约131K有害prompt进行"生成→批评→修正"循环（通常5轮修正），RL阶段使用AI排序的约135K偏好对训练RM，最终将有害输出率从约15%降至约1.5%。工程实现上，vLLM框架支持高效批量生成（4×A100上Llama-2-7B的吞吐约2000 tokens/s），配合tensor_parallel_size=4和n=32的采样配置，可在1小时内完成约10K prompt的拒绝采样流程。</p>
+</div>
+
+<p style="margin-top:1.5rem;padding:0.8rem;background:var(--surface-2,#1e1e2e);border-radius:6px;border-left:3px solid var(--accent,#7c3aed);">📌 <strong>学习目标：</strong>通过本节学习，掌握核心概念与技术原理，为后续进阶学习奠定基础。</p>
+<div class="tip"><strong>学习路径建议：</strong><p>建议先理解本节的基础概念和核心原理，再深入学习数学推导和工程实现细节。可结合配套的代码示例进行动手实践，最后通过对比分析巩固所学知识。</p></div>
+</body></html>

@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02 - 内存管理 | LLM 推理框架</title>
+<style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff; --green: #3fb950; --orange: #d29922; --red: #f85149; --purple: #bc8cff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+  .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
+  .breadcrumb { font-size: 0.85rem; color: var(--text-dim); margin-bottom: 1.5rem; }
+  .breadcrumb a { color: var(--accent); text-decoration: none; }
+  h1 { font-size: 1.8rem; margin-bottom: 0.5rem; }
+  .subtitle { color: var(--text-dim); margin-bottom: 2rem; }
+  h2 { font-size: 1.3rem; color: var(--accent); margin: 2rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; color: var(--green); margin: 1.5rem 0 0.5rem; }
+  p { margin: 0.5rem 0; font-size: 0.95rem; }
+  .box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; margin: 1rem 0; }
+  .box.tip { border-left: 3px solid var(--green); }
+  .box.warn { border-left: 3px solid var(--orange); }
+  .box.info { border-left: 3px solid var(--accent); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--accent); background: var(--surface); }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; }
+  code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; color: var(--green); }
+  pre code { background: none; padding: 0; color: var(--text); }
+  ul, ol { padding-left: 1.5rem; margin: 0.5rem 0; }
+  li { margin-bottom: 0.4rem; font-size: 0.93rem; }
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+  .nav-bottom { display: flex; justify-content: space-between; margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--border); }
+  .nav-bottom a { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="breadcrumb"><a href="../index.html">首页</a> / 02 - 内存管理</div>
+<h1>💾 模块 02：内存管理</h1>
+<div class="subtitle">PagedAttention 与 KV Cache 内存管理——推理框架的核心创新</div>
+
+<h2>一、KV Cache 的内存问题</h2>
+<div class="warn"><strong>常见误区：</strong>
+学习一、KV Cache 的内存问题时，很多人只看概念不动手实验。建议每学完一个知识点就写验证代码，
+在实际运行中观察行为是否符合预期。理论和实践的差距往往比想象中大。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为一、KV Cache 的内存问题可以跳过基础直接上手高级内容。基础概念是后续所有优化和应用的前提，
+跳过基础会导致后续学习事倍功半。
+</div>
+
+<h3>一、KV Cache 的内存问题</h3>俗类比：</strong>一、KV Cache 的内存问题</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>在模块 01 中我们了解了 KV Cache 的重要性。但直接管理 KV Cache 会面临严重的<strong>内存碎片</strong>问题：</p>
+
+<h3>1.1 传统方案：预分配连续内存</h3>
+<div class="diagram">
+传统方案：为每个请求预分配最大长度的连续内存
+
+请求 A (实际需要 500 tokens，预分配 2048):
+┌────────────────────────────────────────────────────────┐
+│ ████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
+│ 实际使用 500        浪费 1548 tokens 的内存空间！        │
+└────────────────────────────────────────────────────────┘
+
+问题：
+  1. 60-80% 的预分配内存被浪费（内部碎片）
+  2. 不同请求长度不同，无法共享空闲空间（外部碎片）
+  3. 短请求占用大量未使用空间，导致能同时服务的请求数减少
+</div>
+
+<div class="box warn">
+<strong>真实影响：</strong>在一个典型场景中，预分配方案可能只能同时服务 20 个请求，而实际内存足够服务 50+ 个请求。浪费率高达 60%+。
+</div>
+
+<h2>二、PagedAttention（vLLM 的核心创新）</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>2.1 核心思想：借鉴操作系统的虚拟内存</h3>
+<p>PagedAttention 将 KV Cache 分成固定大小的<strong>块（Block）</strong>，就像操作系统的内存页（Page）一样：</p>
+
+<div class="diagram">
+PagedAttention：按 Block 分配 KV Cache
+
+GPU 显存被划分为固定大小的 Block（如每个 Block 存 16 个 token 的 KV）:
+
+┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐
+│ B0  │ B1  │ B2  │ B3  │ B4  │ B5  │ B6  │ B7  │ B8  │ B9  │ ...
+└─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘
+
+请求 A（需要 3 个 Block）:              请求 B（需要 2 个 Block）:
+  B0 → B3 → B7                            B1 → B5
+  
+Block Table（类似页表）:
+┌──────────┬───────────┐
+│ 请求 A    │ Block 链表  │
+│ 逻辑块 0  │ → 物理块 0  │
+│ 逻辑块 1  │ → 物理块 3  │
+│ 逻辑块 2  │ → 物理块 7  │
+├──────────┼───────────┤
+│ 请求 B    │ Block 链表  │
+│ 逻辑块 0  │ → 物理块 1  │
+│ 逻辑块 1  │ → 物理块 5  │
+└──────────┴───────────┘
+</div>
+
+<h3>2.2 PagedAttention 的优势</h3>
+<table>
+  <tr><th>特性</th><th>传统方案</th><th>PagedAttention</th></tr>
+  <tr><td>内存分配</td><td>预分配连续最大长度</td><td>按需分配固定大小 Block</td></tr>
+  <tr><td>内部碎片</td><td>60-80% 浪费</td><td>仅最后一个 Block 有碎片（~平均 8 个 token）</td></tr>
+  <tr><td>外部碎片</td><td>严重（不同长度请求）</td><td>无（Block 大小统一）</td></tr>
+  <tr><td>内存利用率</td><td>20-40%</td><td>~96%+</td></tr>
+  <tr><td>并发请求数</td><td>受限于预分配</td><td>提升 2-4 倍</td></tr>
+</table>
+
+<h3>2.3 Block 管理细节</h3>
+<ul>
+  <li><strong>Block 大小</strong>：通常 16 个 token（可配置）。太小增加管理开销，太大增加碎片。</li>
+  <li><strong>Block Table</strong>：每个请求维护一个逻辑块→物理块的映射表（类似页表）。</li>
+  <li><strong>Copy-on-Write</strong>：当请求需要修改共享 Block 时才复制，类似 OS 的 COW 机制。</li>
+  <li><strong>Block 回收</strong>：请求完成后，其 Block 被标记为空闲，可分配给新请求。</li>
+</ul>
+
+<h2>三、Prefix Caching（前缀缓存）</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>3.1 场景</h3>
+<p>很多请求共享相同的前缀（如系统 prompt、few-shot examples）。Prefix Caching 让这些共享前缀的 KV Cache 只存一份：</p>
+
+<div class="diagram">
+场景：多个请求共享系统 prompt
+
+请求 A: [系统 prompt (100 tokens)] + [用户问题 A (50 tokens)]
+请求 B: [系统 prompt (100 tokens)] + [用户问题 B (30 tokens)]
+请求 C: [系统 prompt (100 tokens)] + [用户问题 C (40 tokens)]
+
+没有 Prefix Caching:
+  请求 A 的 KV Cache: [系统 prompt 的 KV] + [问题 A 的 KV]  → 150 tokens
+  请求 B 的 KV Cache: [系统 prompt 的 KV] + [问题 B 的 KV]  → 130 tokens
+  请求 C 的 KV Cache: [系统 prompt 的 KV] + [问题 C 的 KV]  → 140 tokens
+  总计: 420 tokens 的 KV Cache
+
+有 Prefix Caching:
+  共享 KV Cache: [系统 prompt 的 KV]  → 100 tokens（只存一份！）
+  请求 A: 引用共享 + [问题 A 的 KV]  → 50 tokens
+  请求 B: 引用共享 + [问题 B 的 KV]  → 30 tokens
+  请求 C: 引用共享 + [问题 C 的 KV]  → 40 tokens
+  总计: 220 tokens 的 KV Cache（节省 48%！）
+</div>
+
+<h3>3.2 RadixAttention（SGLang 的创新）</h3>
+<p>SGLang 使用 <strong>Radix Tree（基数树）</strong>来管理前缀缓存，可以高效地找到最长公共前缀，实现更智能的缓存复用。</p>
+
+<div class="box tip">
+<strong>Prefix Caching 的典型收益：</strong>
+<ul>
+  <li>系统 prompt 相同的场景：节省 30-50% 的 Prefill 计算和 KV Cache 内存</li>
+  <li>Few-shot 场景：多个请求共享示例的 KV Cache</li>
+  <li>多轮对话：前几轮的 KV Cache 可以复用</li>
+  <li>Agent 场景：共享工具描述的前缀</li>
+</ul>
+</div>
+
+<h2>四、KV Cache 压缩技术</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>4.1 KV Cache 量化</h3>
+<p>将 KV Cache 从 FP16 量化到 FP8 或 INT8，内存减半，精度损失很小。</p>
+
+<h3>4.2 KV Cache 驱逐（Eviction）</h3>
+<p>当内存不足时，智能地丢弃不重要的 KV Cache 条目：</p>
+<ul>
+  <li><strong>H2O (Heavy-Hitter Oracle)</strong>：保留 Attention 权重最高的 token</li>
+  <li><strong>SnapKV</strong>：基于 Attention 模式压缩 KV Cache</li>
+  <li><strong>StreamingLLM</strong>：保留开头 + 最近的 token（"注意力汇聚"现象）</li>
+</ul>
+
+<h3>4.3 KV Cache 共享</h3>
+<p>在并行解码（如 Speculative Decoding）中，Draft Model 和 Target Model 可以共享部分 KV Cache。</p>
+
+<h2>五、内存管理在框架中的实现</h2>
+做出更合理的技术选择和优化决策。</p>
+
+<h3>五、内存管理在框架中的实现</h3>
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+  <tr><th>框架</th><th>KV Cache 管理方案</th><th>特点</th></tr>
+  <tr><td>vLLM</td><td>PagedAttention</td><td>Block 管理，COW，高效内存利用</td></tr>
+  <tr><td>SGLang</td><td>RadixAttention</td><td>Radix Tree 管理前缀缓存</td></tr>
+  <tr><td>TensorRT-LLM</td><td>Paged KV Cache</td><td>类似 PagedAttention，深度 GPU 优化</td></tr>
+  <tr><td>llama.cpp</td><td>预分配 + 上下文复用</td><td>简单但有效，适合单请求场景</td></tr>
+  <tr><td>TGI</td><td>连续批处理 + 块管理</td><td>Docker 化部署，自动管理</td></tr>
+</table>
+
+<h2>六、小结</h2>
+<h3>六、小结</h3>
+<p></p
+
+
+
+
+<div class="deep"><strong>深入探讨：</strong>从系统设计的<strong>底层原理</strong>看，一、KV Cache 的内存问题的核心挑战是在性能、精度和资源三者之间寻找最优平衡。<strong>为什么</strong>不能同时最大化三者？因为提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），减少资源又会降低性能。理解这个三角约束，就能推导出大多数技术选择背后的逻辑。</div>
+<div class="ascii"><pre>LLM 推理全流程
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
+│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
+└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
+                                       └──────────────┘    └────┬─────┘
+                     ┌──────────────┐    ┌──────────────┐      │
+                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
+                     │  "你好！..." │    │  解码        │
+                     └──────────────┘    └──────────────┘</pre></div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="box tip">
+<strong>本模块核心要点：</strong>
+<ol>
+  <li>传统预分配方案浪费 60-80% 内存</li>
+  <li><strong>PagedAttention</strong> 借鉴 OS 虚拟内存，将 KV Cache 分成固定 Block，消除碎片</li>
+  <li><strong>Prefix Caching</strong> 让共享前缀的请求复用 KV Cache，节省内存和计算</li>
+  <li><strong>RadixAttention</strong> 用 Radix Tree 管理前缀缓存，更智能</li>
+  <li>KV Cache 量化、驱逐、共享是进一步的优化手段</li>
+</ol>
+</div>
+
+<div class="nav-bottom">
+  <a href="../01-核心概念/README.html">← 模块 01：核心概念</a>
+  <a href="../03-批处理技术/README.html">模块 03：批处理技术 →</a>
+</div>
+
+</div>
+
+<div class="deep"><strong>一、KV Cache 的内存问题的技术原理与数学推导：</strong>
+从<strong>底层</strong>硬件角度分析，一、KV Cache 的内存问题的性能瓶颈通常在于内存带宽而非计算能力。
+<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
+因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
+这一<strong>数学本质</strong>决定了一、KV Cache 的内存问题的所有优化策略都应围绕减少内存访问展开。
+从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
+是提升算术强度的两大核心手段。
+</div>
+<div class="deep"><strong>一、KV Cache 的内存问题的系统架构分析：</strong>
+从系统设计的<strong>原理</strong>出发，一、KV Cache 的内存问题采用分层架构来管理复杂性。
+<strong>为什么</strong>分层是主流选择？<strong>推导</strong>如下：
+设系统有N个组件，全连接交互复杂度为O(N²)，分层后降低到O(N·L)，L为层数。
+<strong>数学本质</strong>上，这是用少量层间通信开销换取大幅降低的组件间耦合。
+在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过标准接口解耦——
+这类似于TCP/IP协议栈的设计<strong>原理</strong>，每层独立优化，层内改动不影响整体。
+</div>
+<h3>一、KV Cache 的内存问题的性能优化策略</h3>
+<p>优化一、KV Cache 的内存问题性能需要系统性的方法论。首先用profiling工具定位瓶颈——
+从<strong>底层</strong>看，GPU推理的瓶颈通常表现为三种模式：
+1) 计算受限（GPU利用率>80%，SM活跃）；
+2) 内存受限（带宽利用率高，但计算单元空闲）；
+3) 通信受限（多卡场景，NCCL等待时间长）。
+<strong>为什么</strong>要区分这三种模式？因为优化策略完全不同：
+计算受限→减少FLOPs（量化/剪枝）；内存受限→减少数据搬运（算子融合/缓存）；
+通信受限→优化通信拓扑（梯度压缩/异步通信）。
+这一<strong>原理</strong>是推理性能调优的基础框架。</p>
+<pre><code class="language-python"># 一、KV Cache 的内存问题 - 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    """测量推理延迟和吞吐"""
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    print(f"Throughput: {1/elapsed:.0f} req/s")
+    return elapsed
+</code></pre>
+<pre><code class="language-python"># 一、KV Cache 的内存问题 - 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    """测量推理延迟和吞吐"""
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    print(f"Throughput: {1/elapsed:.0f} req/s")
+    return elapsed
+</code></pre>
+<div class="ascii">
+一、KV Cache 的内存问题 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+  PCIe传输       Tensor Core          结果回传
+</div>
+<div class="ascii">
+一、KV Cache 的内存问题 性能分析 (屋顶模型)
+                    
+  计算吞吐  │         ╱ 计算受限区
+  (TFLOPS)  │       ╱
+            │     ╱   ← 实际工作点
+            │   ╱
+            │ ╱ 带宽受限区
+            │╱
+            └──────────────── 带宽利用率
+             
+  转折点 = 峰值算力 / 峰值带宽
+  A100: 312T/2T = 156 FLOPs/Byte
+  H100: 989T/3.35T = 295 FLOPs/Byte
+</div>
+<div class="tip"><strong>相关章节：</strong>
+一、KV Cache 的内存问题与以下内容密切相关：<a href="00-总览.html">00-总览</a> | <a href="01-GPU内存层次.html">01-GPU内存层次</a> | <a href="02-PagedAttention.html">02-PagedAttention</a>。
+建议结合这些章节一起学习，形成完整的知识体系。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+在学习一、KV Cache 的内存问题时，建议先建立整体认知框架，再深入细节。
+用最小化实验验证核心概念——比如用小模型+短序列跑通完整流程，
+确认理解正确后再扩展到生产规模。记录每一步的性能数据，
+建立自己的"优化知识库"，这些经验在后续项目中会反复用到。
+</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+  <li>请用自己的话解释<strong>一、KV Cache 的内存问题</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>二、PagedAttention（vLLM 的核心创新）</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>三、Prefix Caching（前缀缓存）</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>四、KV Cache 压缩技术</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>五、内存管理在框架中的实现</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+一、KV Cache 的内存问题的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

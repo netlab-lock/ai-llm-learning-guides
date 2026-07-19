@@ -1,0 +1,1824 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Module 05: KV Cache 量化技术</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #1c2333;
+            --bg-card: #21262d;
+            --border-color: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-orange: #d29922;
+            --accent-red: #f85149;
+            --accent-purple: #bc8cff;
+            --accent-cyan: #39d2c0;
+            --accent-pink: #f778ba;
+            --gradient-blue: linear-gradient(135deg, #1a3a5c, #0d2137);
+            --gradient-green: linear-gradient(135deg, #1a3c2a, #0d2118);
+            --gradient-purple: linear-gradient(135deg, #2d1b4e, #1a0f2e);
+            --gradient-orange: linear-gradient(135deg, #3c2a0d, #2d1f0a);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', Helvetica, Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.7;
+            font-size: 16px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px 30px; }
+
+        /* Header */
+        .hero {
+            background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 50px 40px;
+            margin-bottom: 30px;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(88,166,255,0.05) 0%, transparent 50%);
+            animation: pulse 8s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+        .hero h1 {
+            font-size: 2.8em;
+            background: linear-gradient(90deg, var(--accent-cyan), var(--accent-blue), var(--accent-purple));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 15px;
+            position: relative;
+            z-index: 1;
+        }
+        .hero .subtitle {
+            font-size: 1.15em;
+            color: var(--text-secondary);
+            position: relative;
+            z-index: 1;
+        }
+        .badge-row {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+            position: relative;
+            z-index: 1;
+        }
+        .badge {
+            padding: 5px 14px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+        .badge-blue { background: rgba(88,166,255,0.15); color: var(--accent-blue); border: 1px solid rgba(88,166,255,0.3); }
+        .badge-green { background: rgba(63,185,80,0.15); color: var(--accent-green); border: 1px solid rgba(63,185,80,0.3); }
+        .badge-purple { background: rgba(188,140,255,0.15); color: var(--accent-purple); border: 1px solid rgba(188,140,255,0.3); }
+        .badge-orange { background: rgba(210,153,34,0.15); color: var(--accent-orange); border: 1px solid rgba(210,153,34,0.3); }
+
+        /* TOC */
+        .toc {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 25px 30px;
+            margin-bottom: 30px;
+        }
+        .toc h2 {
+            color: var(--accent-blue);
+            margin-bottom: 15px;
+            font-size: 1.3em;
+        }
+        .toc-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        .toc a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            padding: 6px 10px;
+            border-radius: 6px;
+            transition: all 0.2s;
+            font-size: 0.95em;
+        }
+        .toc a:hover { background: var(--bg-card); color: var(--accent-blue); }
+
+        /* Sections */
+        .section {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 35px;
+            margin-bottom: 25px;
+        }
+        .section h2 {
+            font-size: 1.7em;
+            color: var(--accent-blue);
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid var(--border-color);
+        }
+        .section h3 {
+            font-size: 1.25em;
+            color: var(--accent-cyan);
+            margin: 25px 0 12px;
+        }
+        .section h4 {
+            font-size: 1.05em;
+            color: var(--accent-orange);
+            margin: 18px 0 8px;
+        }
+        .section p { margin-bottom: 12px; color: var(--text-secondary); }
+
+        /* Cards */
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 20px;
+            margin: 15px 0;
+        }
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 16px;
+            margin: 15px 0;
+        }
+
+        /* Memory Savings Visualization */
+        .memory-bar-container {
+            margin: 15px 0;
+        }
+        .memory-bar-row {
+            display: flex;
+            align-items: center;
+            margin: 8px 0;
+            gap: 12px;
+        }
+        .memory-bar-label {
+            min-width: 90px;
+            font-weight: 600;
+            font-size: 0.9em;
+            color: var(--text-primary);
+        }
+        .memory-bar-track {
+            flex: 1;
+            height: 28px;
+            background: var(--bg-primary);
+            border-radius: 6px;
+            overflow: hidden;
+            position: relative;
+        }
+        .memory-bar-fill {
+            height: 100%;
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            padding-right: 10px;
+            font-size: 0.8em;
+            font-weight: 700;
+            color: #fff;
+            transition: width 0.8s ease;
+        }
+
+        /* Quantization Formula */
+        .formula-box {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-left: 4px solid var(--accent-purple);
+            border-radius: 8px;
+            padding: 18px 22px;
+            margin: 12px 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.95em;
+            color: var(--accent-cyan);
+            overflow-x: auto;
+        }
+        .formula-box .label {
+            color: var(--accent-orange);
+            font-weight: 700;
+            margin-bottom: 6px;
+            font-family: -apple-system, sans-serif;
+        }
+        .formula-box .comment {
+            color: var(--text-muted);
+            font-family: -apple-system, sans-serif;
+            font-size: 0.85em;
+            margin-top: 4px;
+        }
+
+        /* Code */
+        pre {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 18px;
+            margin: 12px 0;
+            overflow-x: auto;
+            font-size: 0.88em;
+            line-height: 1.5;
+        }
+        code {
+            font-family: 'Fira Code', 'Cascadia Code', 'Courier New', monospace;
+        }
+        .kw { color: var(--accent-purple); }
+        .fn { color: #d2a8ff; }
+        .str { color: #a5d6ff; }
+        .num { color: var(--accent-green); }
+        .cmt { color: var(--text-muted); font-style: italic; }
+        .type { color: var(--accent-cyan); }
+        .op { color: var(--accent-red); }
+
+        /* SVG diagrams */
+        .diagram-container {
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 20px;
+            margin: 18px 0;
+            text-align: center;
+            overflow-x: auto;
+        }
+        .diagram-container svg { max-width: 100%; height: auto; }
+        .diagram-caption {
+            font-size: 0.85em;
+            color: var(--text-muted);
+            margin-top: 10px;
+            font-style: italic;
+        }
+
+        /* Tables */
+        .table-wrap {
+            overflow-x: auto;
+            margin: 15px 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.92em;
+        }
+        th {
+            background: var(--bg-primary);
+            color: var(--accent-blue);
+            padding: 12px 14px;
+            text-align: left;
+            border-bottom: 2px solid var(--accent-blue);
+            font-weight: 600;
+        }
+        td {
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-secondary);
+        }
+        tr:hover td { background: rgba(88,166,255,0.04); }
+
+        /* Highlight boxes */
+        .highlight-box {
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin: 14px 0;
+            border-left: 4px solid;
+        }
+        .highlight-blue { background: rgba(88,166,255,0.08); border-color: var(--accent-blue); }
+        .highlight-green { background: rgba(63,185,80,0.08); border-color: var(--accent-green); }
+        .highlight-orange { background: rgba(210,153,34,0.08); border-color: var(--accent-orange); }
+        .highlight-red { background: rgba(248,81,73,0.08); border-color: var(--accent-red); }
+        .highlight-purple { background: rgba(188,140,255,0.08); border-color: var(--accent-purple); }
+
+        /* Three-layer */
+        .three-layer {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 10px;
+            margin: 12px 0;
+        }
+        .layer {
+            border-radius: 8px;
+            padding: 14px 18px;
+        }
+        .layer-1 { background: rgba(88,166,255,0.06); border: 1px solid rgba(88,166,255,0.2); }
+        .layer-2 { background: rgba(188,140,255,0.06); border: 1px solid rgba(188,140,255,0.2); }
+        .layer-3 { background: rgba(63,185,80,0.06); border: 1px solid rgba(63,185,80,0.2); }
+        .layer-title {
+            font-weight: 700;
+            font-size: 0.85em;
+            margin-bottom: 4px;
+        }
+        .layer-1 .layer-title { color: var(--accent-blue); }
+        .layer-2 .layer-title { color: var(--accent-purple); }
+        .layer-3 .layer-title { color: var(--accent-green); }
+        .layer p { margin: 0; font-size: 0.92em; color: var(--text-secondary); }
+
+        /* Paper card */
+        .paper-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 22px;
+            margin: 16px 0;
+            position: relative;
+        }
+        .paper-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0;
+            width: 4px;
+            height: 100%;
+            border-radius: 10px 0 0 10px;
+        }
+        .paper-card.kivi::before { background: var(--accent-red); }
+        .paper-card.kvquant::before { background: var(--accent-blue); }
+        .paper-card.gear::before { background: var(--accent-green); }
+        .paper-card.qserve::before { background: var(--accent-orange); }
+        .paper-card h4 {
+            margin: 0 0 10px;
+            font-size: 1.1em;
+        }
+        .paper-meta {
+            font-size: 0.85em;
+            color: var(--text-muted);
+            margin-bottom: 10px;
+        }
+
+        /* Tradeoff curve */
+        .tradeoff-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin: 15px 0;
+        }
+        @media (max-width: 768px) {
+            .tradeoff-container { grid-template-columns: 1fr; }
+            .toc-grid { grid-template-columns: 1fr; }
+            .card-grid { grid-template-columns: 1fr; }
+            .hero h1 { font-size: 2em; }
+        }
+
+        /* Comparison badge */
+        .cmp {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.82em;
+            font-weight: 600;
+        }
+        .cmp-good { background: rgba(63,185,80,0.15); color: var(--accent-green); }
+        .cmp-mid { background: rgba(210,153,34,0.15); color: var(--accent-orange); }
+        .cmp-bad { background: rgba(248,81,73,0.15); color: var(--accent-red); }
+
+        /* Footer */
+        .footer {
+            text-align: center;
+            padding: 30px;
+            color: var(--text-muted);
+            font-size: 0.85em;
+            border-top: 1px solid var(--border-color);
+            margin-top: 30px;
+        }
+
+        /* Utility */
+        .flex-center { display: flex; align-items: center; justify-content: center; }
+        .mt-10 { margin-top: 10px; }
+        .mb-10 { margin-bottom: 10px; }
+        ul { padding-left: 20px; margin: 8px 0; }
+        li { margin: 5px 0; color: var(--text-secondary); }
+        li strong { color: var(--text-primary); }
+        .tag {
+            display: inline-block;
+            background: rgba(88,166,255,0.1);
+            color: var(--accent-blue);
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.82em;
+            margin: 2px;
+        }
+    
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<nav class="nav-bar">
+  <a href="00-index.html">← 目录</a>
+  <span style="opacity:0.4">|</span>
+  <a href="04-GQA-MQA架构与KV-Cache压缩.html">← GQA/MQA/MLA架构</a>
+  <span class="title">模块05: KV Cache量化</span>
+  <a href="06-KV-Cache驱逐与稀疏化策略.html">驱逐与稀疏化 →</a>
+  <a href="00-index.html">目录 →</a>
+</nav>
+<div class="container">
+
+<!-- ==================== HERO ==================== -->
+<div class="hero">
+    <h1>KV Cache 量化技术</h1>
+    <p class="subtitle">Module 05 — 以精度换空间：KV Cache的低比特量化是长序列推理的关键杠杆</p>
+    <div class="badge-row">
+        <span class="badge badge-blue">INT8/INT4 量化</span>
+        <span class="badge badge-green">FP8 KV Cache</span>
+        <span class="badge badge-purple">Per-Channel 方案</span>
+        <span class="badge badge-orange">2-bit KV Cache</span>
+    </div>
+</div>
+
+<!-- ==================== TOC ==================== -->
+<div class="toc">
+    <h2>📑 目录</h2>
+<h3>📑 目录</h3>class="tip"><strong>通俗类比：</strong>目录就像餐厅菜单：快速指引你找到想了解的菜品（技术点），避免在厨房（海量技术细节）中迷路。</div>
+<div class="warn"><strong>常见误区：</strong>切勿跳过目录直接跳读后续章节，这如同不看菜单乱点菜，容易错过前置知识（如量化基础）导致理解断层。</div>
+<div class="deep"><strong>深入探讨：</strong>本指南结构：动机(Why) → 基础(What) → 细粒度方案(How) → 对比(Comparison) → 实现(Kernel) → 组合(Combination) → 实践(Practice)，形成从理论到落地的完整闭环。</div>
+<div class="ascii"><pre>  ┌─────────────┐
+  │   目录菜单   │
+  ├─────────────┤
+  │ 1.为什么量化 │
+  │ 2.量化基础   │
+  │  ...         │
+  └─────────────┘</pre></div>
+<table><tr><th>章节</th><th>核心问题</th><th>解决什么</th></tr><tr><td>1-3</td><td>What & Why</td><td>基础概念与动机</td></tr><tr><td>4-5</td><td>How</td><td>具体技术与方案</td></tr><tr><td>6-7</td><td>Practice</td><td>工程实践与组合</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="toc-grid">
+        <a href="#sec1">1. 为什么量化 KV Cache</a>
+        <a href="#sec2">2. 量化基础回顾</a>
+        <a href="#sec3">3. KV Cache 特定量化方案</a>
+        <a href="#sec4">4. Per-Token vs Per-Channel 量化</a>
+        <a href="#sec5">5. 量化 Kernel 实现</a>
+        <a href="#sec6">6. 与其他压缩方法的组合</a>
+        <a href="#sec7">7. 工程实践</a>
+    </div>
+</div>
+
+<!-- ==================== SEC 1 ==================== -->
+<div class="section" id="sec1">
+    <h2>1. 为什么量化 KV Cache</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>量化KV Cache如同给厨房储物柜“瘦身”——柜子（显存）大小固定，压缩食材（KV Cache）就能存更多菜谱（上下文），同时降低存取成本。</div>
+<div class="warn"><strong>常见误区：</strong>切勿只关注模型权重压缩而忽视KV Cache，它占推理显存大头。忽视它，如同只优化厨具却任由食材乱堆，厨房照样混乱。</div>
+<div class="deep"><strong>深入探讨：</strong>KV Cache显存计算公式：`Mem = 2 * L * d * b * s * p`（2: K和V，L: 层数，d: 维度，b: 批次，s: 序列长，p: 精度字节）。以L=32, d=4096, b=32, s=4096, p=2(FP16)为例，单次推理占用高达32GB，远超模型权重本身。</div>
+<div class="ascii"><pre>  原始KV Cache: [██████] 2字节/值
+  量化后(4bit): [██] 0.5字节/值
+  节省显存: 75%</pre></div>
+<table><tr><th>指标</th><th>FP16 KV Cache</th><th>INT4 量化后</th></tr><tr><td>每值字节</td><td>2 Bytes</td><td>0.5 Bytes</td></tr><tr><td>显存占用</td><td>基准 100%</td><td>~25%</td></tr><tr><td>上下文长度</td><td>基准 1x</td><td>~4x</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>1.1 核心动机：内存瓶颈</h3>
+
+    <div class="three-layer">
+        <div class="layer layer-1">
+            <div class="layer-title">💡 直觉层</div>
+            <p>KV Cache 是 FP16 存储的，每个 token 每层需要存 2×d_model 个参数。如果我们把精度从 16-bit 降到 4-bit，就能把 KV Cache 缩小到原来的 1/4，相当于免费多了 4 倍的上下文长度。</p>
+        </div>
+        <div class="layer layer-2">
+            <div class="layer-title">⚙️ 技术层</div>
+            <p>Decode 阶段是 Memory-bound 的，每个 token 需要从 HBM 读取全部 KV Cache。降低 KV Cache 的比特宽度 = 降低 HBM 带宽需求 = 提升 decode 吞吐。量化带来的带宽节省是直接的：FP16→INT8 带宽减半，FP16→INT4 带宽降到 1/4。</p>
+        </div>
+        <div class="layer layer-3">
+            <div class="layer-title">📐 数学层</div>
+            <p>对于 L 层、d_model 维、seq_len 长度的模型，FP16 KV Cache 大小 = 2 × 2 × L × d_model × seq_len bytes。以 LLaMA-70B (L=80, d=6144) 为例，4096 tokens 的 KV Cache = 2×2×80×6144×4096 ≈ 7.5 GB。INT4 量化后降至 ≈1.9 GB。</p>
+        </div>
+    </div>
+
+    <h3>1.2 不同精度的内存节省</h3>
+
+    <div class="memory-bar-container">
+        <div class="memory-bar-row">
+            <span class="memory-bar-label">FP16 (原始)</span>
+            <div class="memory-bar-track">
+                <div class="memory-bar-fill" style="width:100%; background: linear-gradient(90deg, #f85149, #da3633);">100%</div>
+            </div>
+        </div>
+        <div class="memory-bar-row">
+            <span class="memory-bar-label">FP8 (E4M3)</span>
+            <div class="memory-bar-track">
+                <div class="memory-bar-fill" style="width:50%; background: linear-gradient(90deg, #d29922, #e3b341);">50%</div>
+            </div>
+        </div>
+        <div class="memory-bar-row">
+            <span class="memory-bar-label">INT8</span>
+            <div class="memory-bar-track">
+                <div class="memory-bar-fill" style="width:50%; background: linear-gradient(90deg, #58a6ff, #388bfd);">50%</div>
+            </div>
+        </div>
+        <div class="memory-bar-row">
+            <span class="memory-bar-label">INT4</span>
+            <div class="memory-bar-track">
+                <div class="memory-bar-fill" style="width:25%; background: linear-gradient(90deg, #3fb950, #238636);">25%</div>
+            </div>
+        </div>
+        <div class="memory-bar-row">
+            <span class="memory-bar-label">INT2 (极端)</span>
+            <div class="memory-bar-track">
+                <div class="memory-bar-fill" style="width:12.5%; background: linear-gradient(90deg, #bc8cff, #8957e5);">12.5%</div>
+            </div>
+        </div>
+    </div>
+
+    <h3>1.3 对 Decode 吞吐的影响</h3>
+
+    <div class="table-wrap">
+        <table>
+            <tr>
+                <th>精度</th>
+                <th>相对内存</th>
+                <th>带宽需求</th>
+                <th>等效上下文倍增</th>
+                <th>质量影响</th>
+            </tr>
+            <tr>
+                <td>FP16 (Baseline)</td>
+                <td>1.0×</td>
+                <td>1.0×</td>
+                <td>1×</td>
+                <td><span class="cmp cmp-good">无损</span></td>
+            </tr>
+            <tr>
+                <td>FP8 (E4M3)</td>
+                <td>0.5×</td>
+                <td>0.5×</td>
+                <td>2×</td>
+                <td><span class="cmp cmp-good">几乎无损</span></td>
+            </tr>
+            <tr>
+                <td>INT8</td>
+                <td>0.5×</td>
+                <td>0.5×</td>
+                <td>2×</td>
+                <td><span class="cmp cmp-good">极小损失</span></td>
+            </tr>
+            <tr>
+                <td>INT4</td>
+                <td>0.25×</td>
+                <td>0.25×</td>
+                <td>4×</td>
+                <td><span class="cmp cmp-mid">轻微损失</span></td>
+            </tr>
+            <tr>
+                <td>INT2</td>
+                <td>0.125×</td>
+                <td>0.125×</td>
+                <td>8×</td>
+                <td><span class="cmp cmp-bad">显著损失</span></td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="highlight-box highlight-orange">
+        <strong>🔑 关键洞察：</strong>KV Cache 量化与 Weight 量化不同。Weight 量化在 prefill 阶段计算，一次性完成；KV Cache 量化需要在每个 decode step 对新产生的 KV 向量实时量化，并在 attention 计算时实时反量化。这决定了它对 kernel 的要求：低延迟的 quantize/dequantize 操作。
+    </div>
+</div>
+
+<!-- ==================== SEC 2 ==================== -->
+<div class="section" id="sec2">
+    <h2>2. 量化基础回顾</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>量化基础就像学习“压缩打包”技巧：用更小的箱子（低精度）装东西，关键在于如何选择箱子（量化粒度）并填写装箱单（scale/zero-point）。</div>
+<div class="warn"><strong>常见误区：</strong>切忌将对称量化与非对称量化混淆。对称量化假设数据对称分布（如中心0），非对称更灵活。选错如同用圆筒装长方形蛋糕，空间浪费或损坏。</div>
+<div class="deep"><strong>深入探讨：</strong>量化通用公式：`q = round(x / scale) + zero_point`。其中 `scale = (max(x) - min(x)) / (q_max - q_min)`，`zero_point = round(-min(x)/scale) - q_min`。INT8量化范围通常为[-128, 127]或[0, 255]。</div>
+<div class="ascii"><pre>  原始浮点值: -1.2, 0.5, 3.7
+  INT8对称:   -60,  25, 185
+  计算: q = round(x / 0.02) + 128</pre></div>
+<table><tr><th>量化类型</th><th>数据分布要求</th><th>典型应用</th></tr><tr><td>对称量化</td><td>零中心对称</td><td>权重、激活值</td></tr><tr><td>非对称量化</td><td>任意分布</td><td>KV Cache（值域常非对称）</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>2.1 Symmetric vs Asymmetric 量化</h3>
+
+    <div class="card-grid">
+        <div class="card">
+            <h4 style="color: var(--accent-blue);">对称量化 (Symmetric)</h4>
+            <div class="formula-box">
+                <div class="label">// 对称量化公式</div>
+                q = round(x / scale)<br>
+                x_hat = q × scale<br><br>
+                <div class="comment">// scale = max(|x|) / (2^(b-1) - 1)</div>
+                <div class="comment">// 零点 zp = 0，映射关于原点对称</div>
+            </div>
+            <p><strong>优点：</strong>计算简单，无零点偏移开销<br>
+            <strong>缺点：</strong>分布不对称时（如 ReLU 后的激活）浪费表示范围</p>
+        </div>
+        <div class="card">
+            <h4 style="color: var(--accent-orange);">非对称量化 (Asymmetric)</h4>
+            <div class="formula-box">
+                <div class="label">// 非对称量化公式</div>
+                q = round((x - zp) / scale)<br>
+                x_hat = q × scale + zp<br><br>
+                <div class="comment">// scale = (max(x) - min(x)) / (2^b - 1)</div>
+                <div class="comment">// zp = min(x)，引入额外存储</div>
+            </div>
+            <p><strong>优点：</strong>更好利用表示范围，适合非对称分布<br>
+            <strong>缺点：</strong>需要存储零点，计算稍复杂</p>
+        </div>
+    </div>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 800 280" xmlns="http://www.w3.org/2000/svg">
+            <!-- Symmetric -->
+            <text x="200" y="25" fill="#58a6ff" font-size="16" text-anchor="middle" font-weight="bold">对称量化 (Symmetric)</text>
+            <line x1="50" y1="140" x2="350" y2="140" stroke="#30363d" stroke-width="2"/>
+            <line x1="200" y1="60" x2="200" y2="200" stroke="#30363d" stroke-width="1" stroke-dasharray="4"/>
+            <!-- distribution -->
+            <path d="M100,180 Q130,170 160,130 Q180,80 200,70 Q220,80 240,130 Q270,170 300,180" fill="none" stroke="#58a6ff" stroke-width="2"/>
+            <circle cx="200" cy="70" r="4" fill="#58a6ff"/>
+            <!-- quantized ticks -->
+            <g stroke="#6e7681" stroke-width="1">
+                <line x1="80" y1="135" x2="80" y2="145"/>
+                <line x1="140" y1="135" x2="140" y2="145"/>
+                <line x1="200" y1="135" x2="200" y2="145"/>
+                <line x1="260" y1="135" x2="260" y2="145"/>
+                <line x1="320" y1="135" x2="320" y2="145"/>
+            </g>
+            <text x="80" y="160" fill="#6e7681" font-size="11" text-anchor="middle">-128</text>
+            <text x="200" y="160" fill="#3fb950" font-size="11" text-anchor="middle" font-weight="bold">0</text>
+            <text x="320" y="160" fill="#6e7681" font-size="11" text-anchor="middle">+127</text>
+            <text x="200" y="215" fill="#8b949e" font-size="12" text-anchor="middle">scale = max|x| / 127</text>
+
+            <!-- Asymmetric -->
+            <text x="600" y="25" fill="#d29922" font-size="16" text-anchor="middle" font-weight="bold">非对称量化 (Asymmetric)</text>
+            <line x1="450" y1="140" x2="750" y2="140" stroke="#30363d" stroke-width="2"/>
+            <line x1="550" y1="60" x2="550" y2="200" stroke="#30363d" stroke-width="1" stroke-dasharray="4"/>
+            <!-- skewed distribution -->
+            <path d="M480,180 Q510,170 540,120 Q560,70 580,65 Q620,90 650,140 Q680,170 710,185" fill="none" stroke="#d29922" stroke-width="2"/>
+            <circle cx="580" cy="65" r="4" fill="#d29922"/>
+            <g stroke="#6e7681" stroke-width="1">
+                <line x1="480" y1="135" x2="480" y2="145"/>
+                <line x1="550" y1="135" x2="550" y2="145"/>
+                <line x1="710" y1="135" x2="710" y2="145"/>
+            </g>
+            <text x="480" y="160" fill="#6e7681" font-size="11" text-anchor="middle">0</text>
+            <text x="550" y="160" fill="#f85149" font-size="11" text-anchor="middle" font-weight="bold">zp</text>
+            <text x="710" y="160" fill="#6e7681" font-size="11" text-anchor="middle">255</text>
+            <text x="580" y="215" fill="#8b949e" font-size="12" text-anchor="middle">scale = (max-min) / 255</text>
+        </svg>
+        <div class="diagram-caption">图 2.1: 对称量化 vs 非对称量化 —— KV Cache 中 Key 和 Value 的分布决定了哪种更优</div>
+    </div>
+
+    <h3>2.2 量化粒度</h3>
+
+    <div class="table-wrap">
+        <table>
+            <tr>
+                <th>粒度</th>
+                <th>Scale 数量</th>
+                <th>精度</th>
+                <th>实现复杂度</th>
+                <th>KV Cache 适用性</th>
+            </tr>
+            <tr>
+                <td><strong>Per-Tensor</strong></td>
+                <td>每层每个 tensor 1 个 scale</td>
+                <td><span class="cmp cmp-mid">中等</span></td>
+                <td><span class="cmp cmp-good">最低</span></td>
+                <td>分布差异大时不推荐</td>
+            </tr>
+            <tr>
+                <td><strong>Per-Token</strong></td>
+                <td>每个 token 1 个 scale</td>
+                <td><span class="cmp cmp-good">较好</span></td>
+                <td><span class="cmp cmp-good">低</span></td>
+                <td>✅ 常用方案，实现简单</td>
+            </tr>
+            <tr>
+                <td><strong>Per-Channel</strong></td>
+                <td>每个 head 的每个维度 1 个 scale</td>
+                <td><span class="cmp cmp-good">最好</span></td>
+                <td><span class="cmp cmp-mid">中等</span></td>
+                <td>✅ KVQuant 等方案采用</td>
+            </tr>
+            <tr>
+                <td><strong>Per-Group</strong></td>
+                <td>每 g 个维度共享 1 个 scale</td>
+                <td><span class="cmp cmp-good">好</span></td>
+                <td><span class="cmp cmp-mid">中等</span></td>
+                <td>✅ Group size=128 常用</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 800 300" xmlns="http://www.w3.org/2000/svg">
+            <!-- KV Cache matrix -->
+            <text x="400" y="25" fill="#e6edf3" font-size="15" text-anchor="middle" font-weight="bold">KV Cache 量化粒度对比</text>
+            <!-- Per-tensor -->
+            <text x="120" y="60" fill="#58a6ff" font-size="13" text-anchor="middle">Per-Tensor</text>
+            <rect x="30" y="70" width="180" height="100" fill="rgba(88,166,255,0.1)" stroke="#58a6ff" stroke-width="1.5"/>
+            <text x="120" y="125" fill="#58a6ff" font-size="12" text-anchor="middle">1 scale for all</text>
+            <text x="120" y="145" fill="#6e7681" font-size="11" text-anchor="middle">→ → → same scale → → →</text>
+            <!-- Per-token -->
+            <text x="400" y="60" fill="#3fb950" font-size="13" text-anchor="middle">Per-Token</text>
+            <rect x="280" y="70" width="240" height="100" fill="rgba(63,185,80,0.06)" stroke="#3fb950" stroke-width="1"/>
+            <g stroke="#3fb950" stroke-width="1" stroke-dasharray="4">
+                <line x1="340" y1="70" x2="340" y2="170"/>
+                <line x1="400" y1="70" x2="400" y2="170"/>
+                <line x1="460" y1="70" x2="460" y2="170"/>
+            </g>
+            <text x="310" y="120" fill="#3fb950" font-size="10" text-anchor="middle">s₁</text>
+            <text x="370" y="120" fill="#3fb950" font-size="10" text-anchor="middle">s₂</text>
+            <text x="430" y="120" fill="#3fb950" font-size="10" text-anchor="middle">s₃</text>
+            <text x="490" y="120" fill="#3fb950" font-size="10" text-anchor="middle">s₄</text>
+            <!-- Per-channel -->
+            <text x="680" y="60" fill="#d29922" font-size="13" text-anchor="middle">Per-Channel</text>
+            <rect x="600" y="70" width="160" height="100" fill="rgba(210,153,34,0.06)" stroke="#d29922" stroke-width="1"/>
+            <g stroke="#d29922" stroke-width="1" stroke-dasharray="4">
+                <line x1="600" y1="95" x2="760" y2="95"/>
+                <line x1="600" y1="120" x2="760" y2="120"/>
+                <line x1="600" y1="145" x2="760" y2="145"/>
+            </g>
+            <text x="590" y="88" fill="#d29922" font-size="10" text-anchor="end">s₁</text>
+            <text x="590" y="113" fill="#d29922" font-size="10" text-anchor="end">s₂</text>
+            <text x="590" y="138" fill="#d29922" font-size="10" text-anchor="end">s₃</text>
+            <text x="590" y="163" fill="#d29922" font-size="10" text-anchor="end">s₄</text>
+            <!-- Legend -->
+            <text x="400" y="210" fill="#8b949e" font-size="12" text-anchor="middle">
+                [token_1] [token_2] [token_3] ...  ← 每列是一个 token 的 KV 向量
+            </text>
+            <text x="400" y="240" fill="#6e7681" font-size="11" text-anchor="middle">
+                Per-Tensor: 全局一个 scale | Per-Token: 每列一个 scale | Per-Channel: 每行一个 scale
+            </text>
+            <text x="400" y="270" fill="#6e7681" font-size="11" text-anchor="middle">
+                Per-Group (未画出): 每列中每 g 个元素共享一个 scale
+            </text>
+        </svg>
+        <div class="diagram-caption">图 2.2: 不同量化粒度对 KV Cache 矩阵的 scale 分配方式</div>
+    </div>
+
+    <h3>2.3 动态 vs 静态量化</h3>
+    <div class="card-grid">
+        <div class="card">
+            <h4 style="color: var(--accent-green);">🟢 动态量化 (Dynamic)</h4>
+            <p>在运行时根据实际数据计算 scale/zp。</p>
+            <ul>
+                <li>✅ 适配实时分布变化</li>
+                <li>✅ 不需要校准数据</li>
+                <li>❌ 有计算开销（每个 token 需计算 min/max）</li>
+            </ul>
+            <p style="margin-top:8px;"><strong>KV Cache 默认使用动态量化</strong>，因为 KV 向量在 decode 时动态生成。</p>
+        </div>
+        <div class="card">
+            <h4 style="color: var(--accent-orange);">🟡 静态量化 (Static)</h4>
+            <p>使用预先确定的 scale/zp，来自校准阶段。</p>
+            <ul>
+                <li>✅ 无运行时开销</li>
+                <li>❌ 需要校准数据集</li>
+                <li>❌ 无法适应分布变化</li>
+            </ul>
+            <p style="margin-top:8px;"><strong>对 KV Cache 不适用</strong>，因为 KV 分布随序列动态变化。</p>
+        </div>
+    </div>
+
+    <h3>2.4 量化误差度量</h3>
+    <div class="formula-box">
+        <div class="label">// 常用量化误差度量</div>
+        MSE     = (1/N) × Σ(x_i - x̂_i)²        // 均方误差<br>
+        SNR     = 10 × log₁₀(var(x) / MSE)       // 信噪比 (dB)<br>
+        CosSim  = (x · x̂) / (||x|| × ||x̂||)     // 余弦相似度<br>
+        MaxErr  = max(|x_i - x̂_i|)                // 最大绝对误差<br><br>
+        <div class="comment">// KV Cache 关注: CosSim > 0.99 通常质量损失可忽略</div>
+        <div class="comment">// INT8 量化后 CosSim 通常 > 0.999</div>
+        <div class="comment">// INT4 量化后 CosSim 通常 > 0.98</div>
+    </div>
+</div>
+
+<!-- ==================== SEC 3 ==================== -->
+<div class="section" id="sec3">
+    <h2>3. KV Cache 特定量化方案</h2>
+入理解KV Cache 特定量化方案的工作原理，有助于在实际工程中做出更合理的技术选择和优化决策。</p>
+
+<h3>KV Cache 特定量化方案</h3>
+<div class="tip"><strong>通俗类比：</strong>KV Cache量化如同处理“特殊食材”：K（键）和V（值）性格不同（K常更敏感），需定制方案，不能粗暴地一刀切。</div>
+<div class="warn"><strong>常见误区：</strong>避免对K和V使用完全相同的量化参数。V通常比K对量化更鲁棒，忽略此差异可能导致注意力计算精度显著下降。</div>
+<div class="deep"><strong>深入探讨：</strong>研究发现：将Key量化至INT8精度损失约0.1-0.5%，而Value量化至INT4仍可保持<1%损失。常见方案：K用INT8，V用INT4（K8V4），实现精度与效率的最佳平衡。</div>
+<div class="ascii"><pre>  注意力计算: Attn = Softmax(Q * K^T) * V
+           ┌──────────┐
+           │ K (敏感)  │ -> INT8
+           │ V (鲁棒)  │ -> INT4
+           └──────────┘</pre></div>
+<table><tr><th>方案</th><th>K精度</th><th>V精度</th><th>综合影响</th></tr><tr><td>全FP16</td><td>FP16</td><td>FP16</td><td>基准</td></tr><tr><td>K8V4</td><td>INT8</td><td>INT4</td><td>损失小，显存省大</td></tr><tr><td>全INT4</td><td>INT4</td><td>INT4</td><td>损失可能大</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<!-- KIVI -->
+    <div class="paper-card kivi">
+        <h4 style="color: var(--accent-red);">📌 KIVI: A Tuning-Free 2bit Quantization for KV Cache (2024)</h4>
+        <div class="paper-meta">Liu et al. | ICML 204 | arXiv: 2402.02750</div>
+        <div class="three-layer">
+            <div class="layer layer-1">
+                <div class="layer-title">💡 核心思想</div>
+                <p>发现 K 和 V 在不同维度上的分布特征不同：Key 在 channel 维度有显著 outlier，而 Value 在 token 维度有 outlier。因此对 K 采用 per-channel 量化，对 V 采用 per-token 量化。</p>
+            </div>
+            <div class="layer layer-2">
+                <div class="layer-title">⚙️ 算法</div>
+                <p>1) Key: per-channel 对称量化到 INT2，每个 channel 一个 scale<br>
+                   2) Value: per-token 对称量化到 INT2，每个 token 一个 scale<br>
+                   3) 最近 token 保留 FP16 不量化（保护最新上下文）<br>
+                   4) 非对称量化采用 asymmetric 方式减少 INT2 损失</p>
+            </div>
+            <div class="layer layer-3">
+                <div class="layer-title">📊 结果</div>
+                <p>2-bit KV Cache 在 LLaMA-7B/13B/70B 上质量损失极小。相比 FP16，KV Cache 内存降低 8×。在 1-shot MMLU 上精度损失 < 0.5%。支持 4× 更长的上下文。</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="formula-box">
+        <div class="label">// KIVI: 量化策略选择</div>
+        <span class="cmt">// Key: outlier 在 channel 维度 → per-channel 量化</span><br>
+        K_quant[i, :] = round(K[i, :] / scale_K[i])    <span class="cmt">// i = channel index</span><br>
+        scale_K[i] = max(|K[i, :]|) / 3                 <span class="cmt">// INT2: [-2, +2] → /3</span><br><br>
+        <span class="cmt">// Value: outlier 在 token 维度 → per-token 量化</span><br>
+        V_quant[:, j] = round(V[:, j] / scale_V[j])     <span class="cmt">// j = token index</span><br>
+        scale_V[j] = max(|V[:, j]|) / 3<br><br>
+        <span class="cmt">// 保留最近 w 个 token 为 FP16 (w=128 常用)</span><br>
+        Cache = [INT2_K[:, :-w], FP16_K[:, -w:]]  &amp;  [INT2_V[:, :-w], FP16_V[:, -w:]]
+    </div>
+
+    <!-- KVQuant -->
+    <div class="paper-card kvquant">
+        <h4 style="color: var(--accent-blue);">📌 KVQuant: Towards 10 Million Context Length LLM Inference (2024)</h4>
+        <div class="paper-meta">Hooper et al. | arXiv: 2401.18079</div>
+        <div class="three-layer">
+            <div class="layer layer-1">
+                <div class="layer-title">💡 核心思想</div>
+                <p>系统性地研究 KV Cache 量化，提出 per-channel 量化 + outlier 保护方案。使用非对称量化 + 学习的最优 group size 来最小化量化误差。额外提出了 Per-Channel-Key + Per-Token-Value 的混合策略。</p>
+            </div>
+            <div class="layer layer-2">
+                <div class="layer-title">⚙️ 关键技术</div>
+                <p>1) <strong>Per-Channel Key 量化：</strong>发现 Key 在 channel 维度分布差异大，per-channel 量化 INT4 效果最佳<br>
+                   2) <strong>Per-Token Value 量化：</strong>Value 在 token 维度变化大，per-token 量化更优<br>
+                   3) <strong>Pre-RoPE Key 量化：</strong>在 RoPE 旋转之前量化 Key，减少旋转引入的 outlier<br>
+                   4) <strong>Norm 常量吸收：</strong>将 LayerNorm 的 scale 吸收到量化参数中</p>
+            </div>
+            <div class="layer layer-3">
+                <div class="layer-title">📊 结果</div>
+                <p>INT3 KV Cache 在 LLaMA-70B 上达到接近无损质量。支持 10M context length 的 3-bit KV Cache 量化。Per-channel key + per-token value 的组合比纯 per-token 方案精度提升 0.5-1.0 perplexity。</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Gear -->
+    <div class="paper-card gear">
+        <h4 style="color: var(--accent-green);">📌 Gear: An Efficient KV Cache for LLM Inference (2024)</h4>
+        <div class="paper-meta">Kang et al. | arXiv: 2403.05527</div>
+        <div class="three-layer">
+            <div class="layer layer-1">
+                <div class="layer-title">💡 核心思想</div>
+                <p>采用低秩矩阵 + 量化残差的混合压缩方案。将 KV Cache 分为两部分：低秩近似（捕获主要模式）和量化残差（存储差值）。残差天然接近零，非常适合低位量化。</p>
+            </div>
+            <div class="layer layer-2">
+                <div class="layer-title">⚙️ 算法</div>
+                <p>1) 对历史 KV Cache 做 SVD 低秩分解: KV ≈ U × V<br>
+                   2) 计算残差: R = KV - U × V<br>
+                   3) 残差 R 用 INT4 量化（因分布集中在 0 附近，量化误差小）<br>
+                   4) Attention 计算时: KV ≈ U×V + dequant(R)</p>
+            </div>
+            <div class="layer layer-3">
+                <div class="layer-title">📊 结果</div>
+                <p>在 LLaMA-2-7B 上，3.12× 压缩比下 perplexity 损失 < 0.1。比纯 INT4 量化精度更高，因为低秩近似保留了主信息。额外计算开销约 5-10%（SVD 计算可以增量更新）。</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- QServe -->
+    <div class="paper-card qserve">
+        <h4 style="color: var(--accent-orange);">📌 QServe: W4A8KV4 Quantization for LLM Serving (2024)</h4>
+        <div class="paper-meta">Lin et al. | MLSys 2025 | arXiv: 2405.04532</div>
+        <div class="three-layer">
+            <div class="layer layer-1">
+                <div class="layer-title">💡 核心思想</div>
+                <p>提出 W4A8KV4 统一量化方案：4-bit Weight + 8-bit Activation + 4-bit KV Cache。系统性地优化了 GPU kernel 以实现端到端加速。</p>
+            </div>
+            <div class="layer layer-2">
+                <div class="layer-title">⚙️ 算法</div>
+                <p>1) Weight: INT4 对称 per-group 量化 (group=128)<br>
+                   2) Activation: INT8 动态量化，per-token scale<br>
+                   3) KV Cache: INT4 对称量化，per-channel for Key, per-token for Value<br>
+                   4) SmoothQuant 的 smooth 技术处理 outlier<br>
+                   5) 自研 CUDA kernel 实现 fused quantized attention</p>
+            </div>
+            <div class="layer layer-3">
+                <div class="layer-title">📊 结果</div>
+                <p>在 L40S GPU 上，QServe-LLaMA-70B 达到 1.0-1.3× 吞吐提升。相比 FP16 基线，KV Cache 内存降低 4×，质量损失在 benchmark 上 < 1%。首个实现 W4A8KV4 端到端加速的系统。</p>
+            </div>
+        </div>
+    </div>
+
+    <h3>方案对比总结</h3>
+    <div class="table-wrap">
+        <table>
+            <tr>
+                <th>方案</th>
+                <th>KV 精度</th>
+                <th>量化策略</th>
+                <th>核心创新</th>
+                <th>质量</th>
+                <th>压缩比</th>
+            </tr>
+            <tr>
+                <td><strong>KIVI</strong></td>
+                <td>INT2</td>
+                <td>Per-Channel K + Per-Token V</td>
+                <td>K/V 不同粒度 + 最近 token 不量化</td>
+                <td><span class="cmp cmp-mid">好</span></td>
+                <td>8×</td>
+            </tr>
+            <tr>
+                <td><strong>KVQuant</strong></td>
+                <td>INT3/INT4</td>
+                <td>Per-Channel K + Per-Token V</td>
+                <td>Pre-RoPE 量化 + Norm 吸收</td>
+                <td><span class="cmp cmp-good">很好</span></td>
+                <td>4-5×</td>
+            </tr>
+            <tr>
+                <td><strong>Gear</strong></td>
+                <td>Low-rank + INT4</td>
+                <td>混合方案</td>
+                <td>低秩近似 + 量化残差</td>
+                <td><span class="cmp cmp-good">很好</span></td>
+                <td>3-4×</td>
+            </tr>
+            <tr>
+                <td><strong>QServe</strong></td>
+                <td>INT4</td>
+                <td>W4A8KV4 统一</td>
+                <td>端到端 kernel 优化</td>
+                <td><span class="cmp cmp-good">好</span></td>
+                <td>4×</td>
+            </tr>
+            <tr>
+                <td><strong>FP8 KV</strong></td>
+                <td>FP8 E4M3</td>
+                <td>Per-Tensor</td>
+                <td>硬件原生支持</td>
+                <td><span class="cmp cmp-good">几乎无损</span></td>
+                <td>2×</td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+<!-- ==================== SEC 4 ==================== -->
+<div class="section" id="sec4">
+    <h2>4. Per-Token vs Per-Channel 量化</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>Per-Token量化像按“每页书”压缩（每页有独立压缩参数），Per-Channel像按“每行字”压缩。选择取决于哪种方式能让压缩误差更均匀。</div>
+<div class="warn"><strong>常见误区：</strong>Per-Channel量化可能忽略不同token间特征分布差异，对KV Cache效果通常不佳。KV Cache更适用Per-Token量化，因为每个token的K/V向量应独立处理。</div>
+<div class="deep"><strong>深入探讨：</strong>Per-Token: 每个token的整个d维向量共享一组`scale`和`zero_point`。公式：`scale_t = max(abs(K_t)) / 127`。Per-Channel: 每个特征维度（channel）在所有token上共享参数。对于KV Cache，Per-Token量化能更好地保留单个token的注意力模式。</div>
+<div class="ascii"><pre>Per-Token (推荐):  [t1_scale, t1_zp]用于整个K[t1,:]
+Per-Channel:      [d1_scale]用于所有K[:,d1]列</pre></div>
+<table><tr><th>粒度</th><th>参数数量</th><th>适用数据</th><th>KV Cache效果</th></tr><tr><td>Per-Token</td><td>O(b*s)</td><td>序列差异大</td><td>优秀</td></tr><tr><td>Per-Channel</td><td>O(d)</td><td>特征差异大</td><td>较差</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>4.1 为什么 Key 和 Value 应该用不同粒度</h3>
+
+    <div class="highlight-box highlight-blue">
+        <strong>📊 实验观察：</strong>Key 矩阵在 channel 维度（特征维度）存在显著的 outlier channels，某些 channel 的值比其他 channel 大 10-100×。而 Value 矩阵在 token 维度存在 outlier tokens，某些 token 的 V 向量范数远大于平均值。这决定了最优的量化粒度选择。
+    </div>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 800 320" xmlns="http://www.w3.org/2000/svg">
+            <text x="400" y="25" fill="#e6edf3" font-size="15" text-anchor="middle" font-weight="bold">Key 和 Value 的 Outlier 分布对比</text>
+
+            <!-- Key heatmap-like -->
+            <text x="200" y="60" fill="#58a6ff" font-size="13" text-anchor="middle">Key 矩阵 (Head × Token)</text>
+            <rect x="50" y="70" width="300" height="120" fill="var(--bg-primary)" stroke="#30363d" stroke-width="1"/>
+            <!-- columns (channels) with outlier -->
+            <g fill="rgba(88,166,255,0.15)">
+                <rect x="55" y="75" width="25" height="110" rx="2"/>
+                <rect x="85" y="75" width="25" height="110" rx="2"/>
+                <rect x="115" y="75" width="25" height="110" rx="2"/>
+                <rect x="145" y="75" width="25" height="110" rx="2"/>
+                <rect x="175" y="75" width="25" height="110" rx="2"/>
+                <rect x="205" y="75" width="25" height="110" rx="2"/>
+                <rect x="235" y="75" width="25" height="110" rx="2"/>
+                <rect x="265" y="75" width="25" height="110" rx="2"/>
+                <rect x="295" y="75" width="25" height="110" rx="2"/>
+                <rect x="325" y="75" width="25" height="110" rx="2"/>
+            </g>
+            <!-- outlier column -->
+            <rect x="175" y="75" width="25" height="110" rx="2" fill="rgba(248,81,73,0.35)" stroke="#f85149" stroke-width="1.5"/>
+            <text x="187" y="210" fill="#f85149" font-size="10" text-anchor="middle">Outlier Channel</text>
+            <text x="200" y="235" fill="#8b949e" font-size="11" text-anchor="middle">→ Per-Channel 量化更优</text>
+
+            <!-- Value heatmap-like -->
+            <text x="600" y="60" fill="#d29922" font-size="13" text-anchor="middle">Value 矩阵 (Channel × Token)</text>
+            <rect x="450" y="70" width="300" height="120" fill="var(--bg-primary)" stroke="#30363d" stroke-width="1"/>
+            <!-- rows (tokens) with outlier -->
+            <g fill="rgba(210,153,34,0.15)">
+                <rect x="455" y="75" width="290" height="15" rx="2"/>
+                <rect x="455" y="95" width="290" height="15" rx="2"/>
+                <rect x="455" y="115" width="290" height="15" rx="2"/>
+                <rect x="455" y="135" width="290" height="15" rx="2"/>
+                <rect x="455" y="155" width="290" height="15" rx="2"/>
+            </g>
+            <!-- outlier row -->
+            <rect x="455" y="115" width="290" height="15" rx="2" fill="rgba(248,81,73,0.35)" stroke="#f85149" stroke-width="1.5"/>
+            <text x="600" y="210" fill="#f85149" font-size="10" text-anchor="middle">Outlier Token</text>
+            <text x="600" y="235" fill="#8b949e" font-size="11" text-anchor="middle">→ Per-Token 量化更优</text>
+
+            <text x="400" y="280" fill="#6e7681" font-size="12" text-anchor="middle">
+                这一观察是 KIVI 和 KVQuant 采用混合策略的核心依据
+            </text>
+        </svg>
+        <div class="diagram-caption">图 4.1: Key 的 outlier 在 channel 维度，Value 的 outlier 在 token 维度</div>
+    </div>
+
+    <h3>4.2 Per-Token 量化实现</h3>
+
+    <pre><code><span class="kw">def</span> <span class="fn">per_token_quantize_int8</span>(kv_cache, <span class="cmt"># [num_heads, seq_len, head_dim]</span>
+                               axis=<span class="num">1</span>):
+    <span class="cmt"># axis=1 表示 per-token 量化 (对每个 token 独立量化)</span>
+    <span class="cmt"># 计算每个 token 的 absmax 作为 scale</span>
+    abs_max = kv_cache.<span class="fn">abs</span>().<span class="fn">amax</span>(dim=axis, keepdim=<span class="kw">True</span>)
+    scale = abs_max / <span class="num">127.0</span>
+
+    <span class="cmt"># 量化到 INT8</span>
+    kv_int8 = (kv_cache / scale).<span class="fn">round</span>().<span class="fn">clamp</span>(-<span class="num">128</span>, <span class="num">127</span>).<span class="fn">to</span>(torch.int8)
+
+    <span class="cmt"># 反量化</span>
+    kv_dequant = kv_int8.<span class="fn">float</span>() * scale
+
+    <span class="kw">return</span> kv_int8, scale, kv_dequant</code></pre>
+
+    <h3>4.3 Per-Channel 量化实现</h3>
+
+    <pre><code><span class="kw">def</span> <span class="fn">per_channel_quantize_int4</span>(kv_cache, <span class="cmt"># [num_heads, seq_len, head_dim]</span>
+                                axis=<span class="num">2</span>,  <span class="cmt"># 对 head_dim 维度</span>
+                                group_size=<span class="num">128</span>):
+    <span class="cmt"># Per-group 量化：每 group_size 个 channel 共享一个 scale</span>
+    H, S, D = kv_cache.<span class="fn">shape</span>
+    <span class="kw">assert</span> D % group_size == <span class="num">0</span>
+
+    <span class="cmt"># reshape 为 [H, S, D//G, G]</span>
+    kv_grouped = kv_cache.<span class="fn">reshape</span>(H, S, D // group_size, group_size)
+
+    <span class="cmt"># 每组的 absmax</span>
+    abs_max = kv_grouped.<span class="fn">abs</span>().<span class="fn">amax</span>(dim=-<span class="num">1</span>, keepdim=<span class="kw">True</span>)
+    scale = abs_max / <span class="num">7.0</span>  <span class="cmt"># INT4: [-8, 7] → /7 对称</span>
+
+    <span class="cmt"># 量化到 INT4</span>
+    kv_int4 = (kv_grouped / scale).<span class="fn">round</span>().<span class="fn">clamp</span>(-<span class="num">8</span>, <span class="num">7</span>).<span class="fn">to</span>(torch.int8)
+
+    <span class="kw">return</span> kv_int4, scale</code></pre>
+
+    <h3>4.4 Activation-Aware 量化</h3>
+
+    <div class="card">
+        <p><strong>核心思想：</strong>不仅考虑 KV Cache 自身的分布，还考虑与 Query 的注意力交互。某些 KV 向量虽然自身值小，但在与特定 Query 交互时贡献大（即 attention score 高），这些 KV 应该用更高精度。</p>
+
+        <div class="formula-box">
+            <div class="label">// Activation-Aware KV 量化</div>
+            <span class="cmt">// 1. 计算每个 KV token 的 "重要性分数"</span><br>
+            importance[j] = Σ_i |Q_i · K_j| / √d    <span class="cmt">// 累积 attention score</span><br><br>
+            <span class="cmt">// 2. 根据重要性分配精度</span><br>
+            <span class="kw">if</span> importance[j] > threshold:<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;store KV[:, j] as FP16  <span class="cmt">// 高重要性 → 高精度</span><br>
+            <span class="kw">else</span>:<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;store KV[:, j] as INT4   <span class="cmt">// 低重要性 → 低精度</span><br><br>
+            <div class="comment">// KIVI 的 "recent tokens stay FP16" 是此思想的特例</div>
+        </div>
+    </div>
+</div>
+
+<!-- ==================== SEC 5 ==================== -->
+<div class="section" id="sec5">
+    <h2>5. 量化 Kernel 实现</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>量化Kernel就像厨房的“高效解压机”：硬件上需要专门设计（CUDA内核），才能快速将压缩的KV数据解压（反量化）并计算，避免成为新瓶颈。</div>
+<div class="warn"><strong>常见误区：</strong>切勿只优化量化过程而忽略反量化开销。反量化常与注意力计算融合，若实现不当，计算延迟可能抵消显存节省带来的收益。</div>
+<div class="deep"><strong>深入探讨：</strong>高效Kernel设计关键：1) 融合反量化与注意力计算，减少中间数据搬运；2) 使用向量化指令（如CUDA的`__ldg`）提升访存效率；3) 针对INT4/INT8设计专用矩阵乘（GEMM）内核。例如，FlashAttention-2已集成INT8 KV Cache支持。</div>
+<div class="ascii"><pre>  量化KV (INT4/INT8)
+        │
+  ┌─────▼─────┐
+  │ 融合计算核 │ -> 输出注意力分数 (FP16)
+  │ (Fused Kernel)│
+  └───────────┘</pre></div>
+<table><tr><th>实现方式</th><th>操作步骤</th><th>性能影响</th></tr><tr><td>朴素实现</td><td>反量化 -> FP16 GEMM</td><td>开销大，不推荐</td></tr><tr><td>融合实现</td><td>量化值直接GEMM -> 结果调整</td><td>高效，主流方案</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>5.1 INT8 KV Cache Dequant 融入 Attention Kernel</h3>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 850 280" xmlns="http://www.w3.org/2000/svg">
+            <text x="425" y="25" fill="#e6edf3" font-size="15" text-anchor="middle" font-weight="bold">量化 KV Cache Attention Kernel 流程</text>
+
+            <!-- Q -->
+            <rect x="30" y="50" width="80" height="50" rx="6" fill="rgba(88,166,255,0.15)" stroke="#58a6ff" stroke-width="1.5"/>
+            <text x="70" y="80" fill="#58a6ff" font-size="13" text-anchor="middle" font-weight="bold">Q (FP16)</text>
+
+            <!-- Arrow -->
+            <line x1="120" y1="75" x2="180" y2="75" stroke="#6e7681" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+            <!-- Quantized K -->
+            <rect x="190" y="40" width="120" height="70" rx="6" fill="rgba(248,81,73,0.12)" stroke="#f85149" stroke-width="1.5"/>
+            <text x="250" y="65" fill="#f85149" font-size="11" text-anchor="middle" font-weight="bold">K_int4 + scale_k</text>
+            <text x="250" y="85" fill="#6e7681" font-size="10" text-anchor="middle">Dequant in register</text>
+
+            <!-- Score = Q*K^T -->
+            <rect x="340" y="50" width="100" height="50" rx="6" fill="rgba(210,153,34,0.15)" stroke="#d29922" stroke-width="1.5"/>
+            <text x="390" y="72" fill="#d29922" font-size="12" text-anchor="middle" font-weight="bold">Scores</text>
+            <text x="390" y="88" fill="#6e7681" font-size="10" text-anchor="middle">Q × K^T</text>
+
+            <!-- Softmax -->
+            <rect x="470" y="50" width="80" height="50" rx="6" fill="rgba(188,140,255,0.15)" stroke="#bc8cff" stroke-width="1.5"/>
+            <text x="510" y="80" fill="#bc8cff" font-size="12" text-anchor="middle" font-weight="bold">Softmax</text>
+
+            <!-- Quantized V -->
+            <rect x="580" y="40" width="120" height="70" rx="6" fill="rgba(63,185,80,0.12)" stroke="#3fb950" stroke-width="1.5"/>
+            <text x="640" y="65" fill="#3fb950" font-size="11" text-anchor="middle" font-weight="bold">V_int4 + scale_v</text>
+            <text x="640" y="85" fill="#6e7681" font-size="10" text-anchor="middle">Dequant in register</text>
+
+            <!-- Output -->
+            <rect x="740" y="50" width="80" height="50" rx="6" fill="rgba(57,210,192,0.15)" stroke="#39d2c0" stroke-width="1.5"/>
+            <text x="780" y="80" fill="#39d2c0" font-size="12" text-anchor="middle" font-weight="bold">Output</text>
+
+            <!-- Arrows -->
+            <line x1="310" y1="75" x2="335" y2="75" stroke="#6e7681" stroke-width="1.5" marker-end="url(#arrow)"/>
+            <line x1="440" y1="75" x2="465" y2="75" stroke="#6e7681" stroke-width="1.5" marker-end="url(#arrow)"/>
+            <line x1="550" y1="75" x2="575" y2="75" stroke="#6e7681" stroke-width="1.5" marker-end="url(#arrow)"/>
+            <line x1="700" y1="75" x2="735" y2="75" stroke="#6e7681" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+            <!-- HBM vs SRAM bar -->
+            <rect x="30" y="140" width="790" height="30" fill="rgba(88,166,255,0.06)" stroke="#30363d" stroke-width="1"/>
+            <text x="425" y="160" fill="#58a6ff" font-size="12" text-anchor="middle" font-weight="bold">HBM: 存储 INT4 KV Cache + Scales (带宽节省 4×)</text>
+
+            <rect x="30" y="180" width="790" height="30" fill="rgba(63,185,80,0.06)" stroke="#30363d" stroke-width="1"/>
+            <text x="425" y="200" fill="#3fb950" font-size="12" text-anchor="middle" font-weight="bold">SRAM/Registers: Dequant → FP16 计算 (on-the-fly)</text>
+
+            <text x="425" y="245" fill="#d29922" font-size="12" text-anchor="middle">
+                🔑 关键: Dequant 操作与 Matrix Multiply 融合，避免额外 memory round-trip
+            </text>
+
+            <defs>
+                <marker id="arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+                    <polygon points="0 0, 10 3.5, 0 7" fill="#6e7681"/>
+                </marker>
+            </defs>
+        </svg>
+        <div class="diagram-caption">图 5.1: 量化 KV Cache 的 Attention Kernel —— HBM 读取量化数据，SRAM 中反量化后计算</div>
+    </div>
+
+    <h3>5.2 Fused Dequant + MatMul Kernel</h3>
+
+    <pre><code><span class="cmt">// CUDA kernel 伪代码: INT4 KV Cache 的 fused dequant + attention</span>
+__global__ <span class="kw">void</span> <span class="fn">fused_dequant_attention_kernel</span>(
+    half* Q,              <span class="cmt">// [H, S_q, D] FP16</span>
+    int4_packed* K_int4,  <span class="cmt">// [H, S_kv, D/2] INT4 packed</span>
+    int4_packed* V_int4,
+    half* scale_k,        <span class="cmt">// [H, S_kv, D/G] 量化参数</span>
+    half* scale_v,
+    half* output,         <span class="cmt">// [H, S_q, D]</span>
+    <span class="type">int</span> S_q, S_kv, D, group_size
+) {
+    <span class="cmt">// 1. 从 HBM 加载 K_int4 (带宽仅为 FP16 的 1/4)</span>
+    int4_packed k_packed = K_int4[head * S_kv * D/2 + tok * D/2 + tid];
+    half k_scale = scale_k[head * S_kv * G + tok * G + tid / group_size];
+
+    <span class="cmt">// 2. 在 registers 中反量化</span>
+    half2 k_vals = <span class="fn">dequant_int4</span>(k_packed);
+    k_vals.x *= k_scale;
+    k_vals.y *= k_scale;
+
+    <span class="cmt">// 3. 计算 dot product (仍使用 Tensor Core 的 FP16 计算能力)</span>
+    half score = <span class="fn">dot_product</span>(q_vec, k_vals);
+
+    <span class="cmt">// 4. 同理处理 V 的 dequant + weighted sum</span>
+    ...
+}</code></pre>
+
+    <h3>5.3 Tensor Core 利用率</h3>
+
+    <div class="table-wrap">
+        <table>
+            <tr>
+                <th>操作</th>
+                <th>精度</th>
+                <th>Tensor Core 支持</th>
+                <th>Throughput (A100)</th>
+                <th>说明</th>
+            </tr>
+            <tr>
+                <td>FP16 × FP16</td>
+                <td>FP16</td>
+                <td>✅ 原生</td>
+                <td>312 TFLOPS</td>
+                <td>基线</td>
+            </tr>
+            <tr>
+                <td>INT8 × INT8 (DP4A)</td>
+                <td>INT8</td>
+                <td>✅ SM80+</td>
+                <td>624 TOPS</td>
+                <td>2× throughput，需反量化后用 FP16 TC</td>
+            </tr>
+            <tr>
+                <td>FP8 × FP8</td>
+                <td>FP8</td>
+                <td>✅ SM89+ (H100)</td>
+                <td>989 TFLOPS (H100)</td>
+                <td>原生 FP8 Tensor Core</td>
+            </tr>
+            <tr>
+                <td>INT4 dequant → FP16 mul</td>
+                <td>INT4→FP16</td>
+                <td>间接</td>
+                <td>取决于 dequant 开销</td>
+                <td>Dequant 在 INT/FP unit，mul 在 TC</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="highlight-box highlight-green">
+        <strong>⚡ 性能关键：</strong>量化 KV Cache 的 attention kernel 性能取决于：<br>
+        1. <strong>HBM 带宽节省</strong>：INT4 读取量为 FP16 的 1/4 → 理论 4× 带宽节省<br>
+        2. <strong>Dequant 开销</strong>：需在 registers 中完成反量化，占用计算资源<br>
+        3. <strong>Scale 读取</strong>：额外的 scale/zp 数据需要从 HBM 读取<br>
+        4. <strong>Net 加速</strong>：通常 INT4 KV 可获 1.5-2.5× decode 加速（带宽节省 vs dequant 开销的折中）
+    </div>
+
+    <h3>5.4 INT8 Tensor Core 方案 (H100)</h3>
+
+    <pre><code><span class="cmt">// H100 FP8 Tensor Core: 最佳的 KV Cache 量化硬件方案</span>
+<span class="cmt">// FP8 E4M3 格式: 4-bit exponent + 3-bit mantissa</span>
+<span class="cmt">// 动态范围: ±448, 精度: ~0.06 (at 1.0)</span>
+
+<span class="cmt">// TensorRT-LLM 中的 FP8 KV Cache attention</span>
+<span class="cmt">// cuBLAS FP8 GEMM → 无需反量化，直接 FP8 计算</span>
+<span class="fn">cublasGemmEx</span>(
+    CUBLAS_OP_N, CUBLAS_OP_T,
+    M, N, K,
+    &amp;alpha,
+    Q_fp8,   <span class="cmt">// FP8 E4M3</span>
+    CUDA_FP8_E4M3, lda,
+    K_fp8,   <span class="cmt">// FP8 E4M3</span>
+    CUDA_FP8_E4M3, ldb,
+    &amp;beta,
+    out_fp16, <span class="cmt">// FP16 输出</span>
+    CUDA_FP16, ldc,
+    CUBLAS_COMPUTE_32F,
+    CUBLAS_GEMM_DEFAULT_TENSOR_OP
+);</code></pre>
+</div>
+
+<!-- ==================== SEC 6 ==================== -->
+<div class="section" id="sec6">
+    <h2>6. 与其他压缩方法的组合</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>技术组合像餐厅的“组合套餐”：量化（压缩打包）可搭配稀疏化（去除空盘）、低秩分解（简化食谱），多重组合拳效果更佳。</div>
+<div class="warn"><strong>常见误区：</strong>避免不同压缩技术产生精度损失的“叠加效应”。例如，激进的量化+稀疏化可能导致精度崩溃，需谨慎权衡总压缩率。</div>
+<div class="deep"><strong>深入探讨：</strong>经典组合方案：1) **量化+稀疏**：先对KV Cache进行INT8量化，再对Value按重要性（如注意力分数）进行块稀疏化，跳过不重要的token。2) **量化+低秩**：对KV向量先做低秩投影（如降到r维），再进行INT4量化。总压缩率可达原显存的5-10%。</div>
+<div class="ascii"><pre>  原始KV Cache
+       │
+  ┌────┼────┐
+  ▼    ▼    ▼
+ 量化 稀疏 低秩
+  └────┬────┘
+       ▼
+  混合压缩KV Cache</pre></div>
+<table><tr><th>组合方式</th><th>压缩原理</th><th>显存节省潜力</th></tr><tr><td>量化 + 稀疏</td><td>压缩数值+跳过部分数据</td><td>4x ~ 8x</td></tr><tr><td>量化 + 低秩</td><td>压缩数值+降维</td><td>3x ~ 6x</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>6.1 组合策略概览</h3>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 800 400" xmlns="http://www.w3.org/2000/svg">
+            <text x="400" y="30" fill="#e6edf3" font-size="16" text-anchor="middle" font-weight="bold">KV Cache 压缩方法组合</text>
+
+            <!-- Center: Quantization -->
+            <circle cx="400" cy="200" r="60" fill="rgba(88,166,255,0.1)" stroke="#58a6ff" stroke-width="2"/>
+            <text x="400" y="195" fill="#58a6ff" font-size="14" text-anchor="middle" font-weight="bold">量化</text>
+            <text x="400" y="215" fill="#58a6ff" font-size="11" text-anchor="middle">INT4/INT8/FP8</text>
+
+            <!-- GQA -->
+            <rect x="80" y="70" width="140" height="60" rx="8" fill="rgba(63,185,80,0.1)" stroke="#3fb950" stroke-width="1.5"/>
+            <text x="150" y="97" fill="#3fb950" font-size="13" text-anchor="middle" font-weight="bold">GQA / MQA</text>
+            <text x="150" y="115" fill="#6e7681" font-size="10" text-anchor="middle">减少 KV Head 数</text>
+            <line x1="210" y1="110" x2="345" y2="180" stroke="#3fb950" stroke-width="1.5" marker-end="url(#arrowG)"/>
+
+            <!-- Eviction -->
+            <rect x="580" y="70" width="140" height="60" rx="8" fill="rgba(210,153,34,0.1)" stroke="#d29922" stroke-width="1.5"/>
+            <text x="650" y="97" fill="#d29922" font-size="13" text-anchor="middle" font-weight="bold">Eviction</text>
+            <text x="650" y="115" fill="#6e7681" font-size="10" text-anchor="middle">驱逐不重要的 KV</text>
+            <line x1="590" y1="110" x2="455" y2="180" stroke="#d29922" stroke-width="1.5" marker-end="url(#arrowO)"/>
+
+            <!-- Sparsity -->
+            <rect x="80" y="280" width="140" height="60" rx="8" fill="rgba(188,140,255,0.1)" stroke="#bc8cff" stroke-width="1.5"/>
+            <text x="150" y="307" fill="#bc8cff" font-size="13" text-anchor="middle" font-weight="bold">Sparsity</text>
+            <text x="150" y="325" fill="#6e7681" font-size="10" text-anchor="middle">稀疏注意力</text>
+            <line x1="210" y1="300" x2="345" y2="220" stroke="#bc8cff" stroke-width="1.5" marker-end="url(#arrowP)"/>
+
+            <!-- Low-rank -->
+            <rect x="580" y="280" width="140" height="60" rx="8" fill="rgba(248,81,73,0.1)" stroke="#f85149" stroke-width="1.5"/>
+            <text x="650" y="307" fill="#f85149" font-size="13" text-anchor="middle" font-weight="bold">Low-Rank</text>
+            <text x="650" y="325" fill="#6e7681" font-size="10" text-anchor="middle">SVD 近似</text>
+            <line x1="590" y1="300" x2="455" y2="220" stroke="#f85149" stroke-width="1.5" marker-end="url(#arrowR)"/>
+
+            <!-- Combined result -->
+            <rect x="310" y="310" width="180" height="50" rx="8" fill="rgba(57,210,192,0.12)" stroke="#39d2c0" stroke-width="2"/>
+            <text x="400" y="340" fill="#39d2c0" font-size="13" text-anchor="middle" font-weight="bold">组合压缩</text>
+            <text x="400" y="355" fill="#6e7681" font-size="10" text-anchor="middle">8-32× 总压缩比</text>
+            <line x1="400" y1="260" x2="400" y2="308" stroke="#39d2c0" stroke-width="2" stroke-dasharray="6" marker-end="url(#arrowC)"/>
+
+            <defs>
+                <marker id="arrowG" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#3fb950"/></marker>
+                <marker id="arrowO" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#d29922"/></marker>
+                <marker id="arrowP" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#bc8cff"/></marker>
+                <marker id="arrowR" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#f85149"/></marker>
+                <marker id="arrowC" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#39d2c0"/></marker>
+            </defs>
+        </svg>
+        <div class="diagram-caption">图 6.1: 量化可与其他四种 KV Cache 压缩方法组合，实现乘法级压缩比</div>
+    </div>
+
+    <h3>6.2 GQA + 量化</h3>
+    <div class="card">
+        <p><strong>GQA (Grouped Query Attention)</strong> 将多个 Query Head 共享一组 KV Head。LLaMA-2-70B 使用 8 个 KV Head（vs 64 个 Q Head）。</p>
+        <div class="formula-box">
+            <div class="label">// GQA + INT4 量化的压缩比</div>
+            <span class="cmt">// 假设: MHA 有 H 个 KV head, GQA 有 G 个 KV head</span><br>
+            <span class="cmt">// 原始 MHA FP16: 2 × 2 × L × H × d × S bytes</span><br>
+            <span class="cmt">// GQA INT4:       2 × 0.5 × L × G × d × S bytes</span><br><br>
+            compression_ratio = (H / G) × (16 / 4) = (H/G) × 4<br><br>
+            <span class="cmt">// LLaMA-2-70B: H=64, G=8 → (64/8) × 4 = 32×</span><br>
+            <span class="cmt">// 7.5 GB → 0.23 GB (从 ~7.5GB 降到 ~234MB)</span>
+        </div>
+    </div>
+
+    <h3>6.3 Eviction + 量化</h3>
+    <div class="card">
+        <p>将 H2O (Heavy Hitter Oracle) 或 StreamingLLM 的 token 驱逐与量化结合：</p>
+        <ul>
+            <li><strong>重要 token（attention sink + heavy hitters）：</strong>保留 FP16 精度</li>
+            <li><strong>一般 token：</strong>INT4 量化</li>
+            <li><strong>即将被驱逐的 token：</strong>INT2 量化（反正快被丢弃了）</li>
+        </ul>
+        <div class="formula-box">
+            <div class="label">// 分级量化策略</div>
+            <span class="kw">for</span> token j <span class="kw">in</span> cache:<br>
+            &nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">if</span> j <span class="kw">in</span> attention_sinks:    precision = FP16  <span class="cmt">// ~4 tokens</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">elif</span> j <span class="kw">in</span> heavy_hitters:   precision = INT8  <span class="cmt">// ~top 20%</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">elif</span> j <span class="kw">in</span> recent_window:   precision = FP16  <span class="cmt">// 最近 w tokens</span><br>
+            &nbsp;&nbsp;&nbsp;&nbsp;<span class="kw">else</span>:                      precision = INT4  <span class="cmt">// 其余</span>
+        </div>
+    </div>
+
+    <h3>6.4 组合压缩比汇总</h3>
+    <div class="table-wrap">
+        <table>
+            <tr>
+                <th>组合方式</th>
+                <th>各项压缩比</th>
+                <th>总压缩比</th>
+                <th>质量</th>
+                <th>复杂度</th>
+            </tr>
+            <tr>
+                <td>仅 INT8 量化</td>
+                <td>2×</td>
+                <td>2×</td>
+                <td><span class="cmp cmp-good">几乎无损</span></td>
+                <td><span class="cmp cmp-good">低</span></td>
+            </tr>
+            <tr>
+                <td>仅 INT4 量化</td>
+                <td>4×</td>
+                <td>4×</td>
+                <td><span class="cmp cmp-good">好</span></td>
+                <td><span class="cmp cmp-good">低</span></td>
+            </tr>
+            <tr>
+                <td>GQA (8:64) + INT4</td>
+                <td>8× × 4×</td>
+                <td>32×</td>
+                <td><span class="cmp cmp-good">好</span></td>
+                <td><span class="cmp cmp-good">低</span></td>
+            </tr>
+            <tr>
+                <td>Eviction (50%) + INT4</td>
+                <td>2× × 4×</td>
+                <td>8×</td>
+                <td><span class="cmp cmp-mid">中等</span></td>
+                <td><span class="cmp cmp-mid">中</span></td>
+            </tr>
+            <tr>
+                <td>GQA + Eviction + INT4</td>
+                <td>8× × 2× × 4×</td>
+                <td>64×</td>
+                <td><span class="cmp cmp-mid">中等</span></td>
+                <td><span class="cmp cmp-bad">高</span></td>
+            </tr>
+            <tr>
+                <td>Gear (Low-rank + INT4)</td>
+                <td>~2× × 4×</td>
+                <td>~8×</td>
+                <td><span class="cmp cmp-good">好</span></td>
+                <td><span class="cmp cmp-mid">中</span></td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+<!-- ==================== SEC 7 ==================== -->
+<div class="section" id="sec7">
+    <h2>7. 工程实践</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>工程实践就像厨房的“标准操作流程（SOP）”：从调试精度到部署监控，每一步都需要严谨，确保服务稳定、菜品（输出）质量达标。</div>
+<div class="warn"><strong>常见误区：</strong>切勿在未经充分基准测试的情况下上线量化方案。必须在实际业务数据上验证困惑度（PPL）和端到端任务指标（如F1），避免线上效果劣化。</div>
+<div class="deep"><strong>深入探讨：</strong>实践四步法：1) **基准测试**：在目标数据集上测FP16基准PPL。2) **精度验证**：逐步测试INT8、INT4方案，确认PPL增幅<0.5。3) **性能剖析**：使用Nsight等工具，确保Kernel计算占比>70%，无显存瓶颈。4) **灰度上线**：先在小流量验证，监控延迟、吞吐和业务指标。</div>
+<div class="ascii"><pre>  实践流程:
+  基准 -> 验证精度 -> 性能剖析 -> 灰度发布
+   │         │           │           │
+   ▼         ▼           ▼           ▼
+  FP16 PPL  INT4 PPL   计算瓶颈?   业务影响?</pre></div>
+<table><tr><th>阶段</th><th>关键动作</th><th>产出物/标准</th></tr><tr><td>精度验证</td><td>在验证集上测PPL</td><td>PPL增幅<0.5</td></tr><tr><td>性能剖析</td><td>GPU Profiling</td><td>计算利用率>70%</td></tr><tr><td>上线监控</td><td>A/B测试</td><td>业务指标无下降</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>7.1 vLLM KV Cache 量化支持</h3>
+
+    <div class="card">
+        <h4 style="color: var(--accent-blue);">vLLM 中启用 KV Cache 量化</h4>
+        <pre><code><span class="cmt"># vLLM 启动时配置 KV Cache 量化</span>
+<span class="cmt"># 支持 FP8 E4M3 和 INT8 量化</span>
+
+<span class="cmt"># 方法1: FP8 KV Cache (H100/H200 GPU)</span>
+python -m vllm.entrypoints.openai.api_server \
+    --model meta-llama/Llama-3-70B-Instruct \
+    --kv-cache-dtype fp8 \
+    --max-model-len 32768
+
+<span class="cmt"># 方法2: FP8 E5M2 KV Cache (更宽动态范围)</span>
+python -m vllm.entrypoints.openai.api_server \
+    --model meta-llama/Llama-3-70B-Instruct \
+    --kv-cache-dtype fp8_e5m2
+
+<span class="cmt"># 方法3: INT8 KV Cache (A100/L40S)</span>
+python -m vllm.entrypoints.openai.api_server \
+    --model meta-llama/Llama-3-70B-Instruct \
+    --kv-cache-dtype int8</code></pre>
+    </div>
+
+    <div class="card">
+        <h4 style="color: var(--accent-green);">vLLM 量化配置参数</h4>
+        <pre><code><span class="cmt"># vLLM 配置示例 (engine 参数)</span>
+llm = LLM(
+    model=<span class="str">"meta-llama/Llama-3-70B-Instruct"</span>,
+    kv_cache_dtype=<span class="str">"fp8"</span>,          <span class="cmt"># "auto"(FP16), "fp8", "int8"</span>
+    max_model_len=<span class="num">32768</span>,            <span class="cmt"># 利用省下的内存增大上下文</span>
+    gpu_memory_utilization=<span class="num">0.92</span>,   <span class="cmt"># GPU 内存利用率</span>
+    tensor_parallel_size=<span class="num">1</span>,        <span class="cmt"># 单卡即可跑更长序列</span>
+)
+
+<span class="cmt"># KV Cache 量化后，同样内存可容纳的 tokens 数翻倍</span>
+<span class="cmt"># FP16: ~16K tokens → FP8: ~32K tokens (70B on 1×A100-80GB)</span></code></pre>
+    </div>
+
+    <h3>7.2 TensorRT-LLM FP8 KV Cache</h3>
+
+    <div class="card">
+        <h4 style="color: var(--accent-orange);">TensorRT-LLM 配置</h4>
+        <pre><code><span class="cmt"># TensorRT-LLM 构建 FP8 KV Cache engine</span>
+<span class="cmt"># 在 build.py 中配置:</span>
+
+python build.py \
+    --model_dir ./llama-3-70b-instruct \
+    --dtype float16 \
+    --use_fp8_kv_cache \           <span class="cmt"># 启用 FP8 KV Cache</span>
+    --use_gemm_plugin fp8 \        <span class="cmt"># FP8 GEMM 插件</span>
+    --max_batch_size <span class="num">32</span> \
+    --max_input_len <span class="num">4096</span> \
+    --max_seq_len <span class="num">32768</span> \
+    --output_dir ./engine_fp8kv
+
+<span class="cmt"># 运行推理:</span>
+python run.py \
+    --engine_dir ./engine_fp8kv \
+    --max_output_len <span class="num">512</span> \
+    --kv_cache_free_gpu_memory_fraction <span class="num">0.85</span></code></pre>
+    </div>
+
+    <h3>7.3 配置调优指南</h3>
+
+    <div class="table-wrap">
+        <table>
+            <tr>
+                <th>场景</th>
+                <th>推荐方案</th>
+                <th>KV Cache 精度</th>
+                <th>预期效果</th>
+            </tr>
+            <tr>
+                <td>质量优先 (对话/写作)</td>
+                <td>FP8 E4M3</td>
+                <td>FP8</td>
+                <td>几乎无损 + 2× 内存节省</td>
+            </tr>
+            <tr>
+                <td>平衡 (通用推理)</td>
+                <td>INT4 per-token</td>
+                <td>INT4</td>
+                <td>轻微质量损失 + 4× 内存节省</td>
+            </tr>
+            <tr>
+                <td>吞吐优先 (大批量)</td>
+                <td>INT4 per-channel</td>
+                <td>INT4</td>
+                <td>最大 batch size + 4× 省内存</td>
+            </tr>
+            <tr>
+                <td>超长上下文 (>100K)</td>
+                <td>KIVI INT2 + 近窗口 FP16</td>
+                <td>INT2 混合</td>
+                <td>8× 内存 → 支持超长序列</td>
+            </tr>
+            <tr>
+                <td>H100 硬件</td>
+                <td>FP8 原生</td>
+                <td>FP8</td>
+                <td>Tensor Core 原生加速 + 2× 省内存</td>
+            </tr>
+            <tr>
+                <td>A100 硬件</td>
+                <td>INT8/INT4</td>
+                <td>INT8/INT4</td>
+                <td>需 kernel 层面 dequant 支持</td>
+            </tr>
+        </table>
+    </div>
+
+    <h3>7.4 Quality vs Memory vs Latency 权衡曲线</h3>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 800 350" xmlns="http://www.w3.org/2000/svg">
+            <text x="400" y="25" fill="#e6edf3" font-size="15" text-anchor="middle" font-weight="bold">KV Cache 量化权衡曲线</text>
+
+            <!-- Axes -->
+            <line x1="80" y1="300" x2="750" y2="300" stroke="#30363d" stroke-width="2"/>
+            <line x1="80" y1="50" x2="80" y2="300" stroke="#30363d" stroke-width="2"/>
+            <text x="415" y="340" fill="#8b949e" font-size="13" text-anchor="middle">内存节省倍数 →</text>
+            <text x="30" y="175" fill="#8b949e" font-size="13" text-anchor="middle" transform="rotate(-90 30 175)">质量 (PPL) ↑</text>
+
+            <!-- Quality curve (PPL vs compression) -->
+            <path d="M120,80 Q200,82 280,90 Q400,100 500,130 Q600,170 680,250"
+                  fill="none" stroke="#58a6ff" stroke-width="2.5"/>
+            <text x="130" y="75" fill="#58a6ff" font-size="11">Quality Curve</text>
+
+            <!-- Latency curve -->
+            <path d="M120,250 Q200,200 350,160 Q500,140 620,135 Q680,132 720,130"
+                  fill="none" stroke="#3fb950" stroke-width="2.5" stroke-dasharray="6"/>
+            <text x="680" y="125" fill="#3fb950" font-size="11">Latency ↓</text>
+
+            <!-- Optimal zone -->
+            <ellipse cx="380" cy="140" rx="80" ry="50" fill="rgba(57,210,192,0.08)" stroke="#39d2c0" stroke-width="1.5" stroke-dasharray="4"/>
+            <text x="380" y="135" fill="#39d2c0" font-size="12" text-anchor="middle" font-weight="bold">最佳权衡区</text>
+            <text x="380" y="152" fill="#6e7681" font-size="10" text-anchor="middle">INT4/FP8 KV Cache</text>
+
+            <!-- Points -->
+            <circle cx="120" cy="80" r="6" fill="#f85149"/>
+            <text x="125" y="95" fill="#f85149" font-size="10">FP16 (1×)</text>
+
+            <circle cx="260" cy="88" r="6" fill="#d29922"/>
+            <text x="265" y="103" fill="#d29922" font-size="10">FP8 (2×)</text>
+
+            <circle cx="400" cy="105" r="6" fill="#3fb950"/>
+            <text x="405" y="120" fill="#3fb950" font-size="10">INT4 (4×)</text>
+
+            <circle cx="530" cy="140" r="6" fill="#bc8cff"/>
+            <text x="535" y="155" fill="#bc8cff" font-size="10">INT2 (8×)</text>
+
+            <circle cx="660" cy="230" r="6" fill="#f85149"/>
+            <text x="665" y="245" fill="#f85149" font-size="10">INT2 无保护</text>
+
+            <!-- Grid -->
+            <g stroke="#30363d" stroke-width="0.5" stroke-dasharray="3">
+                <line x1="80" y1="200" x2="750" y2="200"/>
+                <line x1="80" y1="150" x2="750" y2="150"/>
+                <line x1="80" y1="100" x2="750" y2="100"/>
+                <line x1="300" y1="50" x2="300" y2="300"/>
+                <line x1="500" y1="50" x2="500" y2="300"/>
+                <line x1="700" y1="50" x2="700" y2="300"/>
+            </g>
+        </svg>
+        <div class="diagram-caption">图 7.1: 质量-内存-延迟权衡曲线。FP8 和 INT4 是工程实践中的甜蜜点</div>
+    </div>
+
+    <h3>7.5 实际部署 Checklist</h3>
+
+    <div class="highlight-box highlight-purple">
+        <strong>✅ KV Cache 量化部署检查清单：</strong>
+        <ul>
+            <li><strong>硬件确认：</strong>GPU 是否支持 FP8 (SM89+)? 是否支持 INT8 Tensor Core (SM80+)?</li>
+            <li><strong>框架支持：</strong>vLLM 支持 FP8/INT8 KV；TensorRT-LLM 支持 FP8 KV；TGI 支持有限</li>
+            <li><strong>精度验证：</strong>在目标 benchmark 上对比 FP16 baseline，PPL 增加应 < 0.5</li>
+            <li><strong>内存测量：</strong>确认实际内存节省符合预期（scale/zp 有额外开销）</li>
+            <li><strong>延迟基准：</strong>量化后 decode 延迟应降低（非增加，否则方案有问题）</li>
+            <li><strong>长序列测试：</strong>在接近最大上下文长度时质量是否仍可接受</li>
+            <li><strong>边界情况：</strong>短序列 (< 128 tokens) 时量化 overhead 可能 > 收益</li>
+        </ul>
+    </div>
+
+    <h3>7.6 常见问题与排错</h3>
+
+    <div class="card-grid">
+        <div class="card">
+            <h4 style="color: var(--accent-red);">❌ NaN / 乱码输出</h4>
+            <p><strong>原因：</strong>INT4 量化溢出，scale 计算不正确</p>
+            <p><strong>解决：</strong>增大 group_size；使用 per-token 代替 per-tensor；检查 outlier</p>
+        </div>
+        <div class="card">
+            <h4 style="color: var(--accent-orange);">⚠️ PPL 突然升高</h4>
+            <p><strong>原因：</strong>某些层的 KV 分布极端 outlier</p>
+            <p><strong>解决：</strong>混合精度：前几层 FP16，后面层 INT4；或增大保护窗口</p>
+        </div>
+        <div class="card">
+            <h4 style="color: var(--accent-blue);">ℹ️ 内存未按预期减少</h4>
+            <p><strong>原因：</strong>Scale/zp 元数据开销；或框架未完全优化</p>
+            <p><strong>解决：</strong>检查 scale 存储格式；使用 per-group 量化减少元数据</p>
+        </div>
+        <div class="card">
+            <h4 style="color: var(--accent-purple);">ℹ️ 量化后速度没提升</h4>
+            <p><strong>原因：</strong>Batch size 太小，计算而非带宽是瓶颈</p>
+            <p><strong>解决：</strong>量化 KV 主要在大 batch / 长序列时提升明显；单请求短序列几乎无提升</p>
+        </div>
+    </div>
+
+    <h3>7.7 完整量化实验代码示例</h3>
+
+    <pre><code><span class="kw">import</span> torch
+<span class="kw">import</span> time
+
+<span class="kw">def</span> <span class="fn">benchmark_kv_quantization</span>(model, tokenizer, prompts, dtype_list):
+    <span class="str">"""对比不同 KV Cache 量化方案的质量和性能"""</span>
+    results = {}
+
+    <span class="kw">for</span> dtype <span class="kw">in</span> dtype_list:
+        <span class="cmt"># 构造输入</span>
+        inputs = tokenizer(prompts, return_tensors=<span class="str">"pt"</span>, padding=<span class="kw">True</span>).to(<span class="str">"cuda"</span>)
+
+        <span class="cmt"># 设置 KV Cache 数据类型</span>
+        <span class="cmt"># vLLM 方式: kv_cache_dtype=dtype</span>
+        <span class="cmt"># 手动方式: 在生成时对 KV Cache 做量化</span>
+
+        torch.cuda.synchronize()
+        start = time.perf_counter()
+
+        <span class="cmt"># 生成</span>
+        outputs = model.generate(
+            **inputs,
+            max_new_tokens=<span class="num">256</span>,
+            do_sample=<span class="kw">False</span>,
+        )
+
+        torch.cuda.synchronize()
+        elapsed = time.perf_counter() - start
+
+        <span class="cmt"># 统计</span>
+        mem_used = torch.cuda.max_memory_allocated() / <span class="num">1e9</span>  <span class="cmt"># GB</span>
+        tokens_generated = outputs.shape[<span class="num">1</span>] - inputs.input_ids.shape[<span class="num">1</span>]
+        throughput = tokens_generated / elapsed
+
+        results[dtype] = {
+            <span class="str">"memory_gb"</span>: mem_used,
+            <span class="str">"time_s"</span>: elapsed,
+            <span class="str">"tokens_per_sec"</span>: throughput,
+        }
+        <span class="fn">print</span>(f<span class="str">"[{dtype}] Mem={mem_used:.2f}GB | "</span>
+              f<span class="str">"Time={elapsed:.2f}s | "</span>
+              f<span class="str">"Throughput={throughput:.1f} tok/s"</span>)
+
+    <span class="kw">return</span> results
+
+<span class="cmt"># 运行对比</span>
+results = benchmark_kv_quantization(
+    model, tokenizer,
+    prompts=[<span class="str">"Explain quantum computing in detail..."</span>],
+    dtype_list=[<span class="str">"float16"</span>, <span class="str">"fp8"</span>, <span class="str">"int8"</span>]
+)</code></pre>
+</div>
+
+<!-- ==================== FOOTER ==================== -->
+<div class="footer">
+    <p>Module 05: KV Cache 量化技术 — AI-LLM推理优化系列</p>
+    <p>KV Cache 量化是长序列推理的基础设施级优化。FP8 是硬件原生方案的最佳选择，INT4 是内存受限场景的利器。</p>
+    <p style="margin-top: 8px;">关键论文: KIVI (2024) · KVQuant (2024) · Gear (2024) · QServe (2024) · Atom (2024)</p>
+</div>
+
+</div>
+
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+  <li>请用自己的话解释<strong>📑 目录</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>为什么量化 KV Cache</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>量化基础回顾</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>KV Cache 特定量化方案</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>Per-Token vs Per-Channel 量化</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+📑 目录的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+</body>
+</html>

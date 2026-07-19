@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02 Prefix Caching 原理 | Context Caching</title>
+<style>:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--heading:#f0f6fc;--blue:#58a6ff;--green:#3fb950;--yellow:#d29922;--red:#f85149;--purple:#a371f7;--cyan:#39d2c0}*{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.8;font-size:16px}.container{max-width:900px;margin:0 auto;padding:2rem 1.5rem}h1{color:var(--blue);font-size:2rem;margin:1rem 0 .5rem}h2{color:var(--heading);font-size:1.5rem;margin:2rem 0 .8rem;padding-left:.8rem;border-left:4px solid var(--blue)}h3{color:var(--cyan);font-size:1.2rem;margin:1.5rem 0 .5rem}p{margin:.6rem 0}a{color:var(--blue);text-decoration:none}code{background:#21262d;color:#79c0ff;padding:.15em .4em;border-radius:4px;font-size:.9em}pre{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;overflow-x:auto;margin:1rem 0;font-size:.9em;line-height:1.6}pre code{background:none;padding:0}table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9em}th,td{border:1px solid var(--border);padding:.5rem .8rem;text-align:left}th{background:#161b22;color:var(--blue);font-weight:600}tr:nth-child(even){background:rgba(22,27,34,.5)}.nav{background:var(--card);border-bottom:1px solid var(--border);padding:.6rem 1.5rem;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.nav a{color:var(--blue);font-size:.9rem}.nav span{color:var(--heading);font-weight:600;font-size:.95rem}.footer{text-align:center;margin-top:3rem;padding:1.5rem;border-top:1px solid var(--border);color:#8b949e;font-size:.85rem}.tip,.warn,.exercise,.deep{border-radius:8px;padding:1rem 1.2rem;margin:1rem 0}.tip{background:#0d1d30;border-left:4px solid var(--blue)}.warn{background:#2d1b00;border-left:4px solid var(--yellow)}.exercise{background:#0d2818;border-left:4px solid var(--green)}.deep{background:#1a1024;border-left:4px solid var(--purple)}.ascii{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;font-family:monospace;font-size:.85em;line-height:1.5;overflow-x:auto;white-space:pre}.svg-diagram{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;margin:1rem 0;overflow-x:auto;text-align:center}.svg-diagram svg{max-width:100%;height:auto}.badge{display:inline-block;padding:.15em .6em;border-radius:12px;font-size:.75em;font-weight:600;margin:0 .3em}.badge-blue{background:rgba(88,166,255,.15);color:var(--blue)}.badge-green{background:rgba(63,185,80,.15);color:var(--green)}.badge-yellow{background:rgba(210,153,34,.15);color:var(--yellow)}.badge-purple{background:rgba(163,113,247,.15);color:var(--purple)}.badge-red{background:rgba(248,81,73,.15);color:var(--red)}.badge-cyan{background:rgba(57,210,192,.15);color:var(--cyan)}.formula{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1.2rem;margin:1rem 0;text-align:center;font-size:1.1em;color:var(--cyan);font-family:monospace}.next-prev{display:flex;justify-content:space-between;margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border)}ul,ol{margin:.5rem 0 .5rem 1.5rem}li{margin:.3rem 0}</style>
+</head>
+<body>
+<div class="nav"><a href="01-Context-Caching总览.html">&larr; 01</a><span>模块 02 · Prefix Caching</span><a href="03-Prompt-Caching成本优化.html">03 &rarr;</a></div>
+<div class="container">
+
+<h1>🌳 02 · Prefix Caching 原理</h1>
+<p><span class="badge badge-blue">中级</span> <span class="badge badge-cyan">核心</span></p>
+
+<h2>1. 核心思想</h2>
+<h3>核心思想</h3>s="tip"><strong>通俗类比：</strong>把前缀缓存想象成餐厅的“招牌菜单”。客人点相同的开胃菜（系统提示+历史对话），厨房不用从头备料，直接把准备好的半成品端上，节省了宝贵的备餐时间。</div>
+<div class="warn"><strong>常见误区：</strong>常见的误解是认为整个请求都能被缓存。实际上，只有请求序列最前面相同的“前缀”部分可以复用，动态变化的用户查询部分无法被缓存。</div>
+<div class="deep"><strong>深入探讨：</strong>原理基于Transformer的注意力机制。计算一次前缀的KV缓存后，将其存储在GPU显存中。后续请求以相同前缀开始时，可直接复用这些KV值，避免了重复计算。假设单次前缀计算耗时为T，则N个请求的缓存命中可节省(N-1)*T的计算时间。</div>
+<div class="ascii"><pre>Request1: [Prefix A] + [Query1]
+         ↓ Cache KV
+Request2: [Prefix A] + [Query2]
+         ↓ Reuse KV
+节省计算：Prefix A 只需计算一次</pre></div>
+<table><tr><th>状态</th><th>前缀计算</th><th>延迟影响</th></tr><tr><td>缓存未命中</td><td>完整计算</td><td>高延迟 (T_prefix)</td></tr><tr><td>缓存命中</td><td>跳过计算，加载KV</td><td>低延迟 (T_load << T_prefix)</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>Prefix Caching 的核心：<strong>相同 token 前缀的 KV Cache 是相同的，可以复用</strong>。</p>
+<div class="formula">相同 token 前缀 → 相同 KV Cache → 避免重复计算</div>
+
+<h2>2. vLLM Automatic Prefix Caching (APC)</h2>
+
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>vLLM的APC就像一位智能前台。当两位客人点了相同的套餐前菜（前缀）时，前台会默默记住第二位客人的要求，并悄悄通知厨房直接上第一份的半成品，无需再次询问。</div>
+<div class="warn"><strong>常见误区：</strong>启用APC需在引擎初始化时设置`enable_prefix_caching=True`。若未启用，即使请求完全相同，vLLM也不会自动利用缓存，可能导致不必要的重复计算。</div>
+<div class="deep"><strong>深入探讨：</strong>APC的核心是维护一个全局的“块映射表”。它将前缀序列切分为固定大小的块（如16个token），为每个块计算哈希值作为标识。新请求到来时，vLLM会前向扫描其前缀的哈希，若在映射表中找到匹配项，则直接复用对应块的KV缓存。</div>
+<div class="ascii"><pre>vLLM APC 工作流程:
+1. 扫描前缀 -> 计算哈希
+2. 哈希匹配？ -> 复用KV块
+3. 哈希不匹配 -> 计算新KV块
+4. 存储新KV块到缓存池</pre></div>
+<table><tr><th>配置项</th><th>作用</th><th>默认值</th></tr><tr><td>enable_prefix_caching</td><td>启用/禁用自动前缀缓存</td><td>False</td></tr><tr><td>block_size</td><td>缓存块的大小（token数）</td><td>16</td></tr><tr><td>num_prefix_blocks</td><td>系统预留的缓存块数量</td><td>自动调整</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>2.1 Hash-based 匹配</h3>
+<pre><code># vLLM 的 KV Cache Block 结构
+class KVCacheBlock:
+    block_id: int           # Block 编号
+    block_hash: int         # 内容哈希 (tokens + 前缀)
+    ref_cnt: int            # 引用计数
+    prev: KVCacheBlock      # LRU 双向链表
+    next: KVCacheBlock
+
+# Hash 计算方式
+def compute_block_hash(block_tokens, prefix_tokens):
+    """每个 block 的 hash 唯一标识其内容和位置"""
+    # 包含所有前缀 token，确保相同内容在相同位置有相同 hash
+    return sha256(block_tokens + prefix_tokens)
+
+# 示例:
+# Block 1: tokens=["Hello", " world"] + prefix=[] → hash_1
+# Block 2: tokens=["!"] + prefix=["Hello", " world"] → hash_2
+# 如果另一个请求也有相同的 ["Hello", " world"] 前缀
+# → Block 1 的 hash 匹配 → 复用 KV Cache</code></pre>
+
+<h3>2.2 Block 管理</h3>
+<div class="svg-diagram"><svg viewBox="0 0 720 400" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<marker id="ah1" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#fbbf24"/></marker>
+</defs>
+<!-- Title -->
+<text x="360" y="24" fill="#f0f6fc" font-family="'Cascadia Code','Fira Code',monospace" font-size="14" font-weight="bold" text-anchor="middle">vLLM Block Pool</text>
+
+<!-- Block Pool (GPU Memory) -->
+<rect x="30" y="40" width="400" height="160" rx="8" fill="none" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="230" y="60" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="12" font-weight="bold" text-anchor="middle">Block Pool (GPU HBM)</text>
+<rect x="45" y="72" width="60" height="32" rx="4" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1"/>
+<text x="75" y="92" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">Block 0</text>
+<rect x="115" y="72" width="60" height="32" rx="4" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1"/>
+<text x="145" y="92" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">Block 1</text>
+<rect x="185" y="72" width="60" height="32" rx="4" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1"/>
+<text x="215" y="92" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">Block 2</text>
+<rect x="255" y="72" width="60" height="32" rx="4" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1"/>
+<text x="285" y="92" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">Block 3</text>
+<rect x="45" y="114" width="60" height="32" rx="4" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1"/>
+<text x="75" y="134" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">Block 4</text>
+<rect x="115" y="114" width="60" height="32" rx="4" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1"/>
+<text x="145" y="134" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">Block 5</text>
+<rect x="185" y="114" width="60" height="32" rx="4" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1"/>
+<text x="215" y="134" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">Block 6</text>
+<rect x="255" y="114" width="60" height="32" rx="4" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1"/>
+<text x="285" y="134" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">Block 7</text>
+<text x="360" y="100" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">...</text>
+<rect x="325" y="114" width="80" height="32" rx="4" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1" stroke-dasharray="4,3"/>
+<text x="365" y="134" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">Block N-1</text>
+<text x="230" y="178" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">预分配 · 避免 Python 对象开销</text>
+
+<!-- Free Queue (LRU) -->
+<text x="480" y="56" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="12" font-weight="bold">Free Queue (LRU)</text>
+<rect x="460" y="66" width="64" height="28" rx="4" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1"/>
+<text x="492" y="84" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">Blk 7</text>
+<rect x="534" y="66" width="64" height="28" rx="4" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1"/>
+<text x="566" y="84" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">Blk 6</text>
+<rect x="608" y="66" width="64" height="28" rx="4" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1"/>
+<text x="640" y="84" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">Blk 5</text>
+<line x1="524" y1="80" x2="534" y2="80" stroke="#a78bfa" stroke-width="1.2" marker-end="url(#ah1)"/>
+<line x1="598" y1="80" x2="608" y2="80" stroke="#a78bfa" stroke-width="1.2" marker-end="url(#ah1)"/>
+<text x="580" y="108" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" text-anchor="middle">→ ··· → Blk 0</text>
+<text x="580" y="124" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="9" text-anchor="middle">(尾部优先驱逐)</text>
+
+<!-- Hash Table -->
+<text x="480" y="152" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="12" font-weight="bold">Hash Table</text>
+<rect x="460" y="162" width="220" height="30" rx="4" fill="rgba(52,211,153,0.1)" stroke="#34d399" stroke-width="1"/>
+<text x="470" y="182" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">hash_1 → Block 3</text>
+<text x="630" y="182" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">✓ 命中</text>
+<rect x="460" y="196" width="220" height="30" rx="4" fill="rgba(52,211,153,0.1)" stroke="#34d399" stroke-width="1"/>
+<text x="470" y="216" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">hash_2 → Block 5</text>
+<text x="630" y="216" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">✓ 命中</text>
+<rect x="460" y="230" width="220" height="30" rx="4" fill="rgba(139,148,158,0.08)" stroke="#30363d" stroke-width="1"/>
+<text x="470" y="250" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">hash_3 → (未缓存)</text>
+
+<!-- Connection arrows -->
+<line x1="365" y1="145" x2="455" y2="80" stroke="#fbbf24" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#ah1)" opacity="0.6"/>
+<line x1="455" y1="177" x2="430" y2="140" stroke="#fbbf24" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#ah1)" opacity="0.6"/>
+<text x="410" y="155" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="9" transform="rotate(-20,410,155)">分配/驱逐</text>
+
+<!-- Legend -->
+<rect x="30" y="240" width="660" height="36" rx="6" fill="rgba(139,148,158,0.05)" stroke="#30363d" stroke-width="0.5"/>
+<circle cx="55" cy="258" r="5" fill="none" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="66" y="262" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">GPU HBM</text>
+<circle cx="155" cy="258" r="5" fill="none" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="166" y="262" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">Free Queue (LRU)</text>
+<circle cx="305" cy="258" r="5" fill="none" stroke="#34d399" stroke-width="1.5"/>
+<text x="316" y="262" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">Hash Table</text>
+<line x1="420" y1="258" x2="450" y2="258" stroke="#fbbf24" stroke-width="1.2" stroke-dasharray="4,3"/>
+<text x="456" y="262" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">分配/驱逐流</text>
+</svg></div>
+
+<h3>2.3 LRU Eviction 策略</h3>
+<pre><code># vLLM 的 LRU 驱逐
+class BlockPool:
+    def __init__(self, num_blocks):
+        self.blocks = [KVCacheBlock(i) for i in range(num_blocks)]
+        self.free_queue = DoublyLinkedList()
+        self.hash_table = {}  # hash → block
+
+    def allocate(self, block_hash):
+        """分配一个 block，优先复用缓存"""
+        # 1. 检查缓存命中
+        if block_hash in self.hash_table:
+            block = self.hash_table[block_hash]
+            block.ref_cnt += 1
+            return block
+
+        # 2. 从 free_queue 获取空闲 block
+        block = self.free_queue.pop_tail()
+        block.block_hash = block_hash
+        block.ref_cnt = 1
+        self.hash_table[block_hash] = block
+        return block
+
+    def free(self, block):
+        """释放一个 block"""
+        block.ref_cnt -= 1
+        if block.ref_cnt == 0:
+            self.free_queue.push_head(block)
+
+    def evict(self):
+        """驱逐最久未使用的 block"""
+        block = self.free_queue.pop_tail()
+        if block.block_hash in self.hash_table:
+            del self.hash_table[block.block_hash]
+        return block</code></pre>
+
+<h2>3. SGLang RadixAttention</h2>
+
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>RadixAttention像一个基于“订单树”的厨房管理法。所有订单（请求序列）按共同的前缀被组织成一棵树。结点共享前菜（KV缓存），新订单只需从树上“生长”出自己的枝叶。</div>
+<div class="warn"><strong>常见误区：</strong>RadixAttention的树结构会引入额外的内存管理开销。对于请求前缀高度不一致、共享度很低的场景，其维护树结构的开销可能超过缓存带来的收益。</div>
+<div class="deep"><strong>深入探讨：</strong>它使用Radix Tree（基数树）来管理缓存。每个树节点对应一个序列片段（token子串）及其KV缓存。匹配前缀时，沿树进行最长前缀匹配（LPM）。例如，两个请求`[A,B,C,D]`和`[A,B,X,Y]`会共享树路径`[A,B]`的KV，然后在`B`节点分叉。</div>
+<div class="ascii"><pre>Radix树示例 (Root: 空)
+        [A,B]
+        /    \
+    [C,D]   [X,Y]
+     ↑         ↑
+请求1的缓存  请求2的缓存</pre></div>
+<table><tr><th>特性</th><th>vLLM APC (Hash)</th><th>SGLang Radix (Tree)</th></tr><tr><td>数据结构</td><td>哈希表</td><td>基数树</td></tr><tr><td>前缀匹配</td><td>精确哈希匹配</td><td>最长前缀匹配</td></tr><tr><td>优势</td><td>实现简单，匹配快</td><td>更灵活，支持部分前缀共享</td></tr><tr><td>开销</td><td>低内存管理开销</td><td>树维护开销相对较高</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>3.2 Radix Tree 操作</h3>
+<pre><code># Radix Tree 的核心操作
+
+class RadixNode:
+    def __init__(self):
+        self.children = {}  # token → RadixNode
+        self.kv_cache = None  # 缓存的 KV Cache
+        self.ref_cnt = 0
+
+class RadixTree:
+    def __init__(self):
+        self.root = RadixNode()
+
+    def insert(self, tokens, kv_cache):
+        """插入 token 序列和对应的 KV Cache"""
+        node = self.root
+        for token in tokens:
+            if token not in node.children:
+                node.children[token] = RadixNode()
+            node = node.children[token]
+        node.kv_cache = kv_cache
+        node.ref_cnt += 1
+
+    def longest_prefix_match(self, tokens):
+        """查找最长公共前缀"""
+        node = self.root
+        match_len = 0
+        cached_kv = None
+
+        for i, token in enumerate(tokens):
+            if token in node.children:
+                node = node.children[token]
+                match_len = i + 1
+                if node.kv_cache is not None:
+                    cached_kv = node.kv_cache
+            else:
+                break
+
+        return match_len, cached_kv
+
+    def evict_lru(self):
+        """驱逐最久未使用的叶节点"""
+        # 递归查找引用计数为 0 的叶节点
+        # 释放其 KV Cache
+        pass</code></pre>
+
+<h3>3.3 Radix Tree vs Hash Table</h3>
+<table>
+<tr><th>特性</th><th>Hash Table (vLLM)</th><th>Radix Tree (SGLang)</th></tr>
+<tr><td>匹配方式</td><td>精确匹配（整个 block）</td><td>最长前缀匹配</td></tr>
+<tr><td>部分命中</td><td>❌ 不支持</td><td>✅ 支持</td></tr>
+<tr><td>查找复杂度</td><td>O(1)</td><td>O(L)，L=前缀长度</td></tr>
+<tr><td>空间开销</td><td>低（hash 表）</td><td>中（树结构）</td></tr>
+<tr><td>实现复杂度</td><td>低</td><td>中</td></tr>
+<tr><td>适用场景</td><td>固定长度 block</td><td>可变长度前缀</td></tr>
+</table>
+
+<h2>4. Cache-aware Scheduling</h2>
+<h3>Cache-aware Scheduling</h3>
+<div class="tip"><strong>通俗类比：</strong>这就像一位经验丰富的餐厅领班，不仅按客人到来顺序排号，还会看哪批客人点了相似的套餐（共享前缀），把他们安排在同一时段让厨房集中处理，提升整体出餐速度。</div>
+<div class="warn"><strong>常见误区：</strong>Cache-aware Scheduling可能让个别请求的等待时间（排队延迟）增加。因为它为了最大化缓存命中率，可能会让一个拥有“热门前缀”的请求稍微等待，凑齐一批相似请求一起处理。</div>
+<div class="deep"><strong>深入探讨：</strong>调度器在为新批次（batch）选择请求时，会优先考虑那些能与当前批次中已有请求共享前缀的待处理请求。这需要调度器维护待处理请求队列的“前缀特征索引”。例如，批次中已有前缀`P1`，则拥有`P1`的请求`R2`比拥有完全不同前缀`P2`的请求`R3`有更高优先级。</div>
+<div class="ascii"><pre>传统FIFO调度：[R1, R2, R3, R4] -> 依次处理
+Cache-aware调度：
+队列: [R1(P1), R2(P2), R3(P1)]
+当前批次: [R1(P1)]
+-> 优先选择 R3(P1) 加入批次，提高缓存复用</pre></div>
+<table><tr><th>调度目标</th><th>FIFO (先进先出)</th><th>Cache-aware</th></tr><tr><td>主要依据</td><td>请求到达时间</td><td>到达时间 + 前缀匹配度</td></tr><tr><td>优化目标</td><td>公平性</td><td>系统吞吐量（吞吐量）</td></tr><tr><td>对延迟影响</td><td>可预测</td><td>可能增加部分请求的排队延迟</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>SGLang 的调度器会<strong>优先调度能命中缓存的请求</strong>：</p>
+
+
+<h2>5. Eviction 策略对比<viction 策略对比的工作原理，有助于在实际工程中做出更合理的技术选择和优化决策。</p>
+
+<h3>Eviction 策略对比</h3>
+<div class="tip"><strong>通俗类比：</strong>缓存淘汰策略就像厨房备料区的管理。空间有限时，是优先清理最久没用的食材（LRU），还是用量最少的食材（LFU），或是考虑食材贵重程度（成本）？这直接关系到能否快速应对新订单。</div>
+<div class="warn"><strong>常见误区：</strong>在LLM服务中，简单的LRU策略可能不够用。因为一次长对话可能产生一个很长的缓存，它可能很久没被访问（LRU中优先级高），但它占据的内存空间巨大，不清理会严重影响新请求的缓存能力。</div>
+<div class="deep"><strong>深入探讨：</strong>常见策略：1. **LRU (Least Recently Used)**：淘汰最久未被访问的缓存块。2. **LFU (Least Frequently Used)**：淘汰被访问频率最低的缓存块。3. **Cost-aware**：结合缓存块大小（token数）和生成成本，淘汰`大小 * 计算成本`最高的块。vLLM默认使用基于块的LRU。</div>
+<div class="ascii"><pre>内存缓存池 (容量=3块): [A, B, C]
+新请求需要缓存 D，但池满。
+LRU: A最久未用 -> 淘汰A，放入D -> [B, C, D]
+LFU: B被访问最少 -> 淘汰B，放入D -> [A, C, D]</pre></div>
+<table><tr><th>策略</th><th>淘汰依据</th><th>优点</th><th>缺点</th></tr><tr><td>LRU</td><td>最久未使用的时间</td><td>简单，对时间局部性友好</td><td>可能淘汰大而有价值的缓存</td></tr><tr><td>LFU</td><td>历史访问频率</td><td>对访问模式稳定的应用好</td><td>历史数据可能过时，新缓存易被淘汰</td></tr><tr><td>Cost-aware</td><td>大小与计算成本</td><td>最大化缓存价值</td><td>计算和评估开销较大</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+<tr><th>策略</th><th>原理</th><th>优势</th><th>劣势</th><th>使用</th></tr>
+<tr><td>LRU</td><td>最近最少使用先驱逐</td><td>简单、通用</td><td>可能驱逐热点</td><td>vLLM、SGLang</td></tr>
+<tr><td>LFU</td><td>最不常用先驱逐</td><td>保留热点</td><td>需要计数器</td><td>研究中</td></tr>
+<tr><td>基于大小</td><td>驱逐最大的缓存</td><td>释放最多内存</td><td>可能驱逐重要缓存</td><td>紧急情况</td></tr>
+<tr><td>TTL</td><td>过期自动失效</td><td>确定性</td><td>可能浪费</td><td>API 级缓存</td></tr>
+<tr><td>优先级</td><td>根据请求优先级</td><td>服务质量保障</td><td>实现复杂</td><td>生产环境</td></tr>
+</table>
+
+<h2>6. 前缀匹配的边界情况</h2>
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>处理前缀匹配就像处理客人的“特殊要求备注”。客人说“套餐A，但酱料换成上次那种”，系统不仅要匹配套餐A（前缀），还要正确关联“上次那种”这个上下文（历史），否则缓存可能失效或用错。</div>
+<div class="warn"><strong>常见误区：</strong>最容易出错的是`从句前缀`和`时间敏感前缀`。例如，两个请求的系统提示词完全相同，但一个要求以JSON格式输出，另一个则无要求。若不将格式指令严格包含在前缀中，会导致缓存污染。</div>
+<div class="deep"><strong>深入探讨：</strong>1. **严格前缀**：两个序列必须从第一个token开始就完全一致。2. **从句前缀**：系统可能支持在序列中间进行匹配，但需要复杂的逻辑。3. **带时间戳的前缀**：若前缀中包含动态生成的时间，每次都会变化，导致缓存完全失效。应将其从缓存的前缀中剥离。</div>
+<div class="ascii"><pre>有效缓存：
+前缀 = [System, Context, ...]
+请求A: [P, Q1]
+请求B: [P, Q2] -> 命中P
+无效缓存（污染）：
+前缀 = [System] + [格式指令]
+若[格式指令]未被正确纳入前缀，则缓存的是不完整的前缀。</pre></div>
+<table><tr><th>边界情况</th><th>示例</th><th>处理建议</th></tr><tr><td>动态前缀</td><td>前缀包含当前时间戳</td><td>将其从缓存键中排除，或生成静态前缀</td></tr><tr><td>条件分支</td><td>前缀末尾有可选内容</td><td>确保所有分支都计算缓存，或使用Radix树管理</td></tr><tr><td>嵌入式变量</td><td>系统提示中含{{用户名}}</td><td>将用户名视为前缀的一部分，为不同用户分别缓存</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>6.1 Token 边界问题</h3>
+<pre><code># 问题: 相同文本可能有不同的 token 分割
+text = "Hello world"
+
+# 可能的 tokenization:
+tokenization_1: ["Hello", " world"]     # 2 tokens
+tokenization_2: ["Hello", " ", "world"] # 3 tokens
+
+# 即使文本相同，token 序列不同 → hash 不同 → 无法复用！
+
+# 解决: vLLM 使用确定性 tokenizer (同一文本总是相同分割)</code></pre>
+
+<h3>6.2 多租户隔离</h3>
+<pre><code># vLLM 支持 cache_salt 实现多租户隔离
+# 不同租户的缓存互不干扰
+
+# 请求 1 (租户 A):
+{
+    "prompt": "Hello",
+    "cache_salt": "tenant_A"
+}
+
+# 请求 2 (租户 B):
+{
+    "prompt": "Hello",  # 相同 prompt
+    "cache_salt": "tenant_B"  # 不同 salt → 不同 hash → 不复用
+}</code></pre>
+
+<h2>7. 性能数据</h2>
+<h3>性能数据</h3>
+<div class="tip"><strong>通俗类比：</strong>衡量缓存效果就像看餐厅的“翻台率”和“上菜速度”。通过对比有无缓存时的“吞吐量”（每小时接待客人）和“首字延迟”（从点单到上第一道菜），就能知道这项优化有多“香”。</div>
+<div class="warn"><strong>常见误区：</strong>不要只看吞吐量提升。缓存会消耗GPU显存用于存储KV，这可能挤压可用于服务更大模型或更长上下文的空间。需要在“速度提升”和“内存消耗”之间做出权衡。</div>
+<div class="deep"><strong>深入探讨：</strong>根据公开基准测试（如vLLM论文），在共享长系统提示（如聊天助手）的场景下，APC可将吞吐量（吞吐量，tokens/s）提升**2-4倍**，并将首字延迟降低**50%-70%**。具体收益高度依赖前缀长度、共享程度和请求到达模式。</div>
+<div class="ascii"><pre>典型性能提升曲线:
+吞吐量 ↑↑↑ (2x-4x)
+|       ___----
+|    __/
+| __/
+|/
+|___________________
+   高共享度 -> 低共享度
+
+首字延迟 ↓↓ (降低50%-70%)</pre></div>
+<table><tr><th>指标</th><th>无前缀缓存</th><th>有前缀缓存 (APC)</th><th>提升倍数</th></tr><tr><td>吞吐量 (tok/s)</td><td>1,000</td><td>3,000</td><td>~3x</td></tr><tr><td>平均首字延迟 (ms)</td><td>1,200</td><td>400</td><td>~3x 降低</td></tr><tr><td>显存占用 (基础)</td><td>固定</td><td>+缓存池开销</td><td>增加10%-30%</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+<tr><th>场景</th><th>无缓存 TTFT</th><th>有缓存 TTFT</th><th>改善</th></tr>
+<tr><td>系统 prompt (2K tokens)</td><td>200ms</td><td>20ms</td><td>10x</td></tr>
+<tr><td>多轮对话 (第 5 轮)</td><td>500ms</td><td>80ms</td><td>6x</td></tr>
+<tr><td>RAG (5 个文档)</td><td>300ms</td><td>50ms</td><td>6x</td></tr>
+<tr><td>Few-shot (10 示例)</td><td>400ms</td><td>40ms</td><td>10x</td></tr>
+</table>
+
+<div class="exercise">
+<p><strong>🧪 练习 1</strong>：用 Python 实现一个简单的 Radix Tree，支持插入 token 序列和最长前缀匹配。</p>
+<p><strong>🧪 练习 2</strong>：模拟 vLLM 的 LRU 驱逐：给定 10 个 block 和 15 个请求，计算缓存命中率。</p>
+</div>
+
+<div class="next-prev"><a href="01-Context-Caching总览.html">&larr; 上一模块</a><a href="03-Prompt-Caching成本优化.html">下一模块 &rarr;</a></div>
+</div>
+<div class="footer"><p><a href="index.html">返回总览</a></p></div>
+
+<div class="tip"><strong>向前串联：</strong>
+核心思想的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习核心思想建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

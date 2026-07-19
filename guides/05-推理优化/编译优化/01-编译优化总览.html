@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01-编译优化总览 | 编译优化</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #58a6ff; text-decoration: none; }
+.nav span { color: #8b949e; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+h1 { color: #58a6ff; font-size: 2em; margin: 24px 0 16px; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 12px; margin: 32px 0 16px; font-size: 1.5em; }
+h3 { color: #d2a8ff; margin: 24px 0 12px; font-size: 1.2em; }
+h4 { color: #79c0ff; margin: 16px 0 8px; }
+p { margin: 8px 0; }
+code { background: #21262d; color: #79c0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; margin: 12px 0; font-size: 0.85em; line-height: 1.5; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th { background: #21262d; color: #f0f6fc; padding: 10px 14px; text-align: left; border: 1px solid #30363d; font-weight: 600; }
+td { padding: 8px 14px; border: 1px solid #30363d; }
+tr:nth-child(even) { background: #161b22; }
+.tip { background: #0d1d30; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.exercise { background: #0d2818; border-left: 4px solid #238636; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.svg-diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; text-align: center; }
+.svg-diagram svg { max-width: 100%; height: auto; }
+.ascii { background: #161b22; border: 1px solid #30363d; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82em; line-height: 1.5; padding: 16px; overflow-x: auto; margin: 16px 0; white-space: pre; border-radius: 6px; }
+ul, ol { margin: 8px 0 8px 24px; }
+li { margin: 4px 0; }
+a { color: #58a6ff; }
+.keyword { color: #ff7b72; } .string { color: #a5d6ff; } .comment { color: #8b949e; } .cmd { color: #79c0ff; }
+.footer { text-align: center; color: #484f58; margin-top: 48px; padding: 24px 0; border-top: 1px solid #21262d; font-size: 0.9em; }
+.footer a { color: #58a6ff; }
+.next-prev { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 16px; border-top: 1px solid #21262d; }
+.next-prev a { padding: 8px 16px; background: #21262d; border-radius: 6px; }
+.tag { display: inline-block; background: #388bfd22; color: #58a6ff; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+.badge-blue { background: #1f6feb33; color: #58a6ff; }
+.badge-green { background: #23863633; color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="nav"><span></span><span>编译优化栈</span><a href="02-torch-compile工作流.html">02-torch-compile工作流 &rarr;</a></div>
+<div class="container">
+
+<h1>⚡ 编译优化总览</h1>
+
+<h2>1. 为什么需要编译优化</h2>
+<p>PyTorch 的 <strong>eager mode</strong>（即时执行）虽然灵活易用，但在推理场景下存在显著的性能开销：</p>
+
+<table>
+<tr><th>开销来源</th><th>描述</th><th>量化影响</th></tr>
+<tr><td>Python 解释器</td><td>每条 PyTorch 操作都经过 Python GIL → C++ dispatch</td><td>每次 kernel launch 约 5-10μs</td></tr>
+<tr><td>Kernel 碎片化</td><td>一个 LayerNorm 被拆成多个小 kernel（均值→方差→归一化→仿射）</td><td>3-5 次 kernel launch 替代 1 次</td></tr>
+<tr><td>内存往返</td><td>每个中间结果写回 HBM 再读出</td><td>HBM 带宽浪费 30-50%</td></tr>
+<tr><td>动态 Shape</td><td>LLM 推理中序列长度不断变化，无法预编译</td><td>每次 shape 变化触发重编译</td></tr>
+</table>
+
+<div class="tip">
+<strong>直觉</strong>：把 PyTorch eager mode 想象成"逐道菜炒"——每炒一道就洗一次锅。编译优化就是"一锅出"——把能一起做的菜合并，省去反复洗锅的时间。
+
+<h3>1.1 Python GIL 与 Kernel Launch 的隐藏成本</h3>
+<p>Python 的全局解释器锁（GIL）意味着同一时刻只有一个线程执行 Python 字节码。在 eager mode 下，每调用一次 PyTorch 操作，都会经历：Python 帧创建 → GIL 获取 → C++ dispatcher 调用 → CUDA kernel launch。这个链条的开销在单次操作中约为 5-10μs，但对于 Transformer 一层中 50+ 个小操作，累计开销可达数百微秒。</p>
+
+<h3>1.2 内存带宽墙：计算不是瓶颈，搬运才是</h3>
+<p>现代 GPU（如 H100）的算力达到 ~2000 TFLOPS（FP16），但 HBM 带宽仅 ~3.35 TB/s。一个简单的逐元素操作（如 GELU 激活）的算术强度（FLOPs/Byte）极低，完全受内存带宽限制。编译优化的核心价值之一就是通过融合操作减少对 HBM 的读写次数。</p>
+
+<h3>1.3 动态 Shape 的编译困境</h3>
+<p>LLM 推理中，序列长度随请求变化（prefill 阶段可能 128-8192 token），KV Cache 长度也在增长。传统编译器需要静态 Shape 才能生成最优 kernel，而动态 Shape 会导致频繁重编译或次优的通用 kernel。torch.compile 通过 Dynamic Shape 支持和 Speculation 机制来缓解这一问题。</p>
+
+<div class="warn">
+<strong>⚠ 编译优化的常见陷阱：</strong>不要以为 <code>torch.compile</code> 是万能的银弹。对于 I/O 密集型操作（如 tokenizer 解码）、频繁的动态控制流（如条件分支依赖数据值）以及第三方库的自定义操作，编译优化可能完全无效甚至回退到 eager mode。在评估编译收益前，先用 <code>torch.profiler</code> 确认瓶颈在计算而非 I/O。
+</div>
+
+<div class="deep">
+<strong>🔬 深入：编译器视角的算子融合</strong><br>
+从编译器理论看，算子融合本质上是<strong>循环融合（Loop Fusion）</strong>的经典编译优化。传统编译器（如 GCC/LLVM）在 LLVM IR 层面做循环融合，但深度学习编译器在更高的图级别（Graph IR）做融合，能利用更多语义信息。TorchInductor 的融合策略分三类：(1) <strong>水平融合</strong>——将相同输入的独立操作合并（如 LayerNorm 的均值和方差计算）；(2) <strong>垂直融合</strong>——将生产者-消费者链合并（如 Linear→GELU）；(3) <strong>归约融合</strong>——将归约操作（如 softmax 的 sum）与前后操作合并。每种融合都有特定的 pattern matcher 在 FX Graph 中识别。
+</div>
+
+<pre><code># 编译优化前后的 PyTorch 代码对比
+import torch
+import torch.nn as nn
+
+# 标准 eager mode - 每个操作独立执行
+class EagerTransformerBlock(nn.Module):
+    def __init__(self, d_model=4096):
+        super().__init__()
+        self.ln = nn.LayerNorm(d_model)
+        self.linear = nn.Linear(d_model, d_model * 4)
+        self.gelu = nn.GELU()
+        self.out_proj = nn.Linear(d_model * 4, d_model)
+
+    def forward(self, x):
+        # 4 个独立 kernel: LayerNorm → Linear → GELU → Linear
+        x = self.ln(x)
+        x = self.linear(x)
+        x = self.gelu(x)
+        x = self.out_proj(x)
+        return x
+
+# torch.compile 自动融合
+model = EagerTransformerBlock().cuda()
+compiled_model = torch.compile(model)  # Inductor 自动融合为 1-2 个 kernel
+
+# 手动查看融合结果
+with torch._inductor.utils.fresh_inductor_cache():
+    out = compiled_model(torch.randn(1, 128, 4096, device='cuda'))
+    # 查看生成的 Triton 代码
+    # 在 /tmp/torchinductor_<user>/ 下可以找到生成的 .py 文件
+</code></pre>
+
+</div>
+
+<h2>2. 编译优化的核心收益</h2>
+
+<h3>2.1 算子融合 (Kernel Fusion)</h3>
+<p>将多个小 kernel 合并为一个大 kernel，减少 HBM 读写次数：</p>
+<div class="svg-diagram">
+<svg viewBox="0 0 720 260" xmlns="http://www.w3.org/2000/svg" style="font-family:'Cascadia Code','Fira Code',monospace">
+  <!-- Standard execution label -->
+  <text x="10" y="20" fill="#8b949e" font-size="13">标准执行 (6次 HBM 访问):</text>
+  <!-- Box 1: Linear -->
+  <rect x="10" y="35" width="180" height="60" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="2"/>
+  <text x="100" y="60" fill="#22d3ee" font-size="14" text-anchor="middle" font-weight="600">Linear</text>
+  <text x="100" y="80" fill="#8b949e" font-size="11" text-anchor="middle">(HBM R/W)</text>
+  <!-- Arrow 1 -->
+  <line x1="190" y1="65" x2="230" y2="65" stroke="#fbbf24" stroke-width="2"/>
+  <polygon points="230,60 240,65 230,70" fill="#fbbf24"/>
+  <!-- Box 2: LayerNorm -->
+  <rect x="240" y="35" width="180" height="60" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="2"/>
+  <text x="330" y="60" fill="#22d3ee" font-size="14" text-anchor="middle" font-weight="600">LayerNorm</text>
+  <text x="330" y="80" fill="#8b949e" font-size="11" text-anchor="middle">(HBM R/W)</text>
+  <!-- Arrow 2 -->
+  <line x1="420" y1="65" x2="460" y2="65" stroke="#fbbf24" stroke-width="2"/>
+  <polygon points="460,60 470,65 460,70" fill="#fbbf24"/>
+  <!-- Box 3: GELU -->
+  <rect x="470" y="35" width="180" height="60" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="2"/>
+  <text x="560" y="60" fill="#22d3ee" font-size="14" text-anchor="middle" font-weight="600">GELU</text>
+  <text x="560" y="80" fill="#8b949e" font-size="11" text-anchor="middle">(HBM R/W)</text>
+  <!-- Arrow to output -->
+  <line x1="650" y1="65" x2="690" y2="65" stroke="#fbbf24" stroke-width="2"/>
+  <polygon points="690,60 700,65 690,70" fill="#fbbf24"/>
+  <text x="710" y="70" fill="#c9d1d9" font-size="12">output</text>
+
+  <!-- Fused label -->
+  <text x="10" y="135" fill="#8b949e" font-size="13">融合后 (2次 HBM 访问):</text>
+  <!-- Fused box -->
+  <rect x="10" y="150" width="500" height="60" rx="6" fill="#161b22" stroke="#34d399" stroke-width="2"/>
+  <text x="260" y="175" fill="#34d399" font-size="14" text-anchor="middle" font-weight="600">Linear + LayerNorm + GELU (融合)</text>
+  <text x="260" y="195" fill="#8b949e" font-size="11" text-anchor="middle">(一次 HBM R/W)</text>
+  <!-- Arrow to output -->
+  <line x1="510" y1="180" x2="550" y2="180" stroke="#fbbf24" stroke-width="2"/>
+  <polygon points="550,175 560,180 550,185" fill="#fbbf24"/>
+  <text x="570" y="185" fill="#c9d1d9" font-size="12">output</text>
+
+  <!-- Savings note -->
+  <text x="10" y="245" fill="#34d399" font-size="12">HBM 访问: 6次 → 2次，带宽节省 ~67%</text>
+</svg>
+</div>
+
+<h3>2.2 减少 Kernel Launch Overhead</h3>
+<p>每个 CUDA kernel 的启动需要 CPU→GPU 的指令传递，约 5-10μs。一个 Transformer 层可能有 50+ 个小操作，launch overhead 累计可达 500μs。编译优化可以：</p>
+<ul>
+<li><strong>合并 kernel</strong>：减少 launch 次数</li>
+<li><strong>CUDA Graphs</strong>：将整个计算图录制为一个 graph，一次 launch</li>
+<li><strong>异步执行</strong>：CPU 和 GPU 并行工作</li>
+</ul>
+
+<h3>2.3 内存优化</h3>
+<ul>
+<li><strong>内存规划</strong>：编译器可以分析计算图，复用临时缓冲区</li>
+<li><strong>In-place 操作</strong>：自动将 out-of-place 操作转为 in-place</li>
+<li><strong>布局优化</strong>：自动选择最优的张量内存布局</li>
+</ul>
+
+<h2>3. 深度学习编译器的发展历史</h2>
+
+<table>
+<tr><th>年代</th><th>编译器</th><th>特点</th></tr>
+<tr><td>2017</td><td>TVM (Apache)</td><td>端到端编译栈，支持多硬件后端，Relay IR</td></tr>
+<tr><td>2019</td><td>XLA (Google)</td><td>JAX/TPU 的默认编译器，HLO IR</td></tr>
+<tr><td>2021</td><td>Triton (OpenAI)</td><td>Python-like GPU kernel 语言，自动调优</td></tr>
+<tr><td>2022</td><td>TorchInductor (PyTorch)</td><td>PyTorch 2.0 的默认后端，Dynamo + Inductor</td></tr>
+<tr><td>2024</td><td>SGLang compile</td><td>针对 LLM 推理的 torch.compile 集成</td></tr>
+<tr><td>2025</td><td>vLLM v1 compile</td><td>vLLM 的 torch.compile 模式，编译缓存持久化</td></tr>
+</table>
+
+<h3>3.1 从 TVM 到 TorchInductor：三代编译器的架构演进</h3>
+<p>第一代（TVM/XLA）采用<strong>自顶向下</strong>的端到端编译栈，从计算图到硬件指令全链路优化，但工程复杂度极高。第二代（Triton）采用<strong>自底向上</strong>策略，只负责 kernel 代码生成，让程序员用 Python 语义写 GPU kernel。第三代（TorchInductor）结合两者——用 Dynamo 捕获图，用 Inductor 做图优化，最终生成 Triton 代码。</p>
+
+<h3>3.2 IR 层次：从计算图到硬件指令</h3>
+<p>编译器的核心是 IR（中间表示）的逐层降低（Lowering）：FX Graph（Python 级）→ Aten IR（算子级）→ Triton IR（kernel 级）→ PTX/SASS（硬件指令级）。每一层都丢失一些高层语义，但获得更多硬件控制能力。Inductor 的创新在于在 Triton IR 层面做大部分优化，既保留了足够的语义信息，又能生成高效的 GPU 代码。</p>
+
+<div class="tip">
+<strong>💡 历史类比：</strong>深度学习编译器的演进与传统编译器惊人相似。TVM 就像 GCC——全能但复杂；Triton 就像 LLVM IR——专注中间层，让前端和后端解耦；TorchInductor 就像 Clang——深度集成到特定生态（PyTorch），提供最佳用户体验。理解这个类比可以帮你预测 DL 编译器的未来走向。
+</div>
+
+<pre><code># TorchInductor 生成的 Triton 代码示例（融合 LayerNorm + GELU）
+import triton
+import triton.language as tl
+
+@triton.jit
+def fused_layernorm_gelu_kernel(
+    in_ptr0, in_ptr1, in_ptr2, out_ptr0,
+    xnumel, rnumel: tl.constexpr,
+    XBLOCK: tl.constexpr, RBLOCK: tl.constexpr,
+):
+    # LayerNorm 的均值和方差计算
+    x_offset = tl.program_id(0) * XBLOCK
+    x_index = x_offset + tl.arange(0, XBLOCK)[:, None]
+    r_index = tl.arange(0, RBLOCK)[None, :]
+    r_mask = r_index < rnumel
+
+    # 加载输入并计算统计量
+    x = tl.load(in_ptr0 + x_index * rnumel + r_index, r_mask, other=0.0)
+    mean = tl.sum(x, axis=1) / rnumel
+    x_centered = x - mean[:, None]
+    var = tl.sum(x_centered * x_centered, axis=1) / rnumel
+
+    # 归一化 + 仿射变换 + GELU（全部在 SRAM 中完成）
+    inv_rstd = 1.0 / tl.sqrt(var + 1e-5)
+    weight = tl.load(in_ptr1 + r_index, r_mask, other=1.0)
+    bias = tl.load(in_ptr2 + r_index, r_mask, other=0.0)
+    normalized = x_centered * inv_rstd[:, None] * weight + bias
+
+    # GELU 激活函数（融合！无需写回 HBM）
+    gelu = normalized * 0.5 * (1.0 + tl.erf(normalized * 0.7071067811865476))
+    tl.store(out_ptr0 + x_index * rnumel + r_index, gelu, r_mask)
+</code></pre>
+
+<h2>4. 编译优化技术分类</h2>
+
+<div class="ascii">
+编译优化技术
+├── 图级优化 (Graph-level)
+│   ├── 算子融合 (Operator Fusion)
+│   ├── 常量折叠 (Constant Folding)
+│   ├── 死代码消除 (Dead Code Elimination)
+│   └── 布局优化 (Layout Optimization)
+│
+├── Kernel 级优化 (Kernel-level)
+│   ├── Triton 代码生成
+│   ├── 循环优化 (Loop Tiling, Loop Fusion)
+│   ├── 向量化 (Vectorization)
+│   └── 内存访问优化 (Coalescing, Prefetch)
+│
+├── 运行时优化 (Runtime-level)
+│   ├── CUDA Graphs (图录制与重放)
+│   ├── 编译缓存 (Persistent Cache)
+│   └── 动态 Shape 处理
+│
+└── 硬件特定优化 (Hardware-specific)
+    ├── Tensor Core 调度
+    ├── 共享内存优化
+    └── 流水线并行 (Software Pipelining)
+</div>
+
+<div class="deep">
+<strong>🔬 深入：Triton 代码生成的编译流程</strong><br>
+TorchInductor 将 FX Graph 中的 Aten 算子降低为 Triton IR 的过程分为三步：(1) <strong>Decomposition</strong>——将复合算子（如 LayerNorm）分解为基础算子（均值、方差、归一化）；(2) <strong>Scheduling</strong>——分析算子间的数据依赖，决定哪些可以融合，哪些必须独立执行；(3) <strong>Code Generation</strong>——将融合后的算子组翻译为 Triton kernel 代码。Triton 编译器再将 Triton IR 编译为 PTX 指令，最终由 CUDA driver 编译为 SASS 机器码。这个多层编译栈是性能的关键——每一层都做特定级别的优化。
+</div>
+
+<div class="ascii">编译优化 IR 降低流程:
+
+Python 代码
+    │  torch.compile() 捕获
+    ▼
+FX Graph (Python AST 级)
+    │  TorchDynamo 符号执行
+    ▼
+Aten IR (算子级, 如 aten.mm, aten.add)
+    │  Inductor 分析 + 融合决策
+    ▼
+Triton IR (kernel 级, 带循环/分块)
+    │  Triton JIT 编译
+    ▼
+PTX (GPU 虚拟指令)
+    │  CUDA Driver
+    ▼
+SASS (GPU 机器码)
+
+每降低一层, 语义信息减少, 硬件控制增加
+高层优化 (融合/布局) 在 Aten→Triton 阶段完成
+底层优化 (寄存器/流水线) 在 Triton→PTX 阶段完成
+</div>
+
+
+<div class="warn">
+<strong>⚠ 图级优化 vs Kernel 级优化的优先级：</strong>在实际优化中，图级优化（如算子融合）的收益通常远大于 Kernel 级优化（如循环 tiling）。原因是图级优化减少了 HBM 访问次数，而 Kernel 级优化只优化了单次访问的效率。建议优先使用 torch.compile 的图级优化，只在图级优化无法覆盖的场景（如自定义算子）才手动写 Triton kernel。
+</div>
+
+<h2>5. 编译优化在 LLM 推理中的位置</h2>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 500 360" xmlns="http://www.w3.org/2000/svg" style="font-family:'Cascadia Code','Fira Code',monospace">
+  <!-- Input label -->
+  <text x="250" y="20" fill="#c9d1d9" font-size="13" text-anchor="middle">LLM 推理请求</text>
+  <!-- Arrow down -->
+  <line x1="250" y1="28" x2="250" y2="50" stroke="#fbbf24" stroke-width="2"/>
+  <polygon points="245,50 250,60 255,50" fill="#fbbf24"/>
+
+  <!-- Box 1: Scheduler -->
+  <rect x="70" y="65" width="360" height="70" rx="6" fill="#161b22" stroke="#a78bfa" stroke-width="2"/>
+  <text x="250" y="92" fill="#a78bfa" font-size="15" text-anchor="middle" font-weight="600">调度器 Scheduler</text>
+  <text x="250" y="115" fill="#8b949e" font-size="12" text-anchor="middle">请求排队、batch 组装</text>
+  <!-- Arrow down -->
+  <line x1="250" y1="135" x2="250" y2="160" stroke="#fbbf24" stroke-width="2"/>
+  <polygon points="245,160 250,170 255,160" fill="#fbbf24"/>
+
+  <!-- Box 2: Compilation Layer -->
+  <rect x="70" y="175" width="360" height="70" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="2"/>
+  <text x="250" y="202" fill="#22d3ee" font-size="15" text-anchor="middle" font-weight="600">编译优化层</text>
+  <text x="250" y="225" fill="#8b949e" font-size="12" text-anchor="middle">torch.compile / CUDA Graphs  (本指南)</text>
+  <!-- Arrow down -->
+  <line x1="250" y1="245" x2="250" y2="270" stroke="#fbbf24" stroke-width="2"/>
+  <polygon points="245,270 250,280 255,270" fill="#fbbf24"/>
+
+  <!-- Box 3: GPU Layer -->
+  <rect x="70" y="285" width="360" height="70" rx="6" fill="#161b22" stroke="#34d399" stroke-width="2"/>
+  <text x="250" y="312" fill="#34d399" font-size="15" text-anchor="middle" font-weight="600">GPU 执行层 (硬件)</text>
+  <text x="250" y="335" fill="#8b949e" font-size="12" text-anchor="middle">Triton kernel / cuDNN / CUTLASS</text>
+</svg>
+</div>
+
+<h3>5.1 Prefill 与 Decode 阶段的编译策略差异</h3>
+<p>LLM 推理分为两个截然不同的阶段：<strong>Prefill</strong>（处理输入 prompt，计算密集型，大 batch GEMM）和 <strong>Decode</strong>（逐 token 生成，内存密集型，小 batch 向量运算）。编译优化对两个阶段的收益不同：Prefill 阶段主要受益于算子融合和 CUDA Graphs；Decode 阶段主要受益于内存访问优化和 kernel launch overhead 消除。</p>
+
+<h3>5.2 编译缓存：避免重复编译</h3>
+<p>首次编译一个 7B 模型可能需要 30-120 秒，这对于生产环境是不可接受的。编译缓存（Persistent Cache）将编译产物（Triton kernel 代码 + 编译后的 .so 文件）序列化到磁盘，后续加载直接恢复，将编译时间降低到 1-2 秒。vLLM v1 和 SGLang 都默认启用了编译缓存。</p>
+
+<div class="tip">
+<strong>💡 实战建议：</strong>在部署 LLM 时，建议在 CI/CD 流程中加入"编译 warmup"步骤——用 dummy input 跑一次推理触发编译，然后将缓存打包到 Docker 镜像中。这样用户首次请求就不会经历编译延迟。torch.compile 的 <code>fullgraph=True</code> 模式可以确保整个模型被编译为一个图，避免 graph break 导致的性能损失。
+</div>
+
+<pre><code># 在 vLLM 中使用编译优化
+from vllm import LLM, SamplingParams
+
+# 启用 torch.compile 优化
+llm = LLM(
+    model="meta-llama/Llama-3-8B",
+    enforce_eager=False,        # False = 启用编译优化
+    max_model_len=4096,
+    # 编译相关配置
+    compilation_config={
+        "level": 3,             # 编译级别: 0=禁用, 3=最大优化
+        "use_inductor": True,   # 使用 Inductor 后端
+        "use_cuda_graph": True, # 使用 CUDA Graphs
+    },
+)
+
+# 首次推理会触发编译（~30-120s），后续推理极快
+output = llm.generate("Hello, world!", SamplingParams(temperature=0))
+</code></pre>
+
+<h2>6. 各框架的编译优化支持</h2>
+
+<table>
+<tr><th>框架</th><th>编译方式</th><th>状态 (2025-2026)</th></tr>
+<tr><td>PyTorch</td><td>torch.compile()</td><td>PyTorch 2.6 生产就绪，Inductor 缓存持久化</td></tr>
+<tr><td>vLLM</td><td>torch.compile + CUDA Graphs</td><td>v1 架构默认启用，graph 池管理</td></tr>
+<tr><td>SGLang</td><td>torch.compile 集成</td><td>40 万+ GPU 部署，de facto 标准</td></tr>
+<tr><td>TensorRT-LLM</td><td>TRT 编译器</td><td>图优化 + kernel auto-tuning</td></tr>
+<tr><td>JAX</td><td>jit() → XLA</td><td>TPU 默认，GPU 支持完善</td></tr>
+<tr><td>llama.cpp</td><td>GGML 手写 kernel</td><td>无编译优化，手工优化</td></tr>
+</table>
+
+<div class="ascii">编译优化技术选型决策树:
+
+你的模型是什么框架?
+  │
+  ├─ PyTorch
+  │   ├─ 推理场景 → torch.compile (Inductor)
+  │   │   ├─ 训练也用 → torch.compile(mode="max-autotune")
+  │   │   └─ 仅推理 → torch.compile + CUDA Graphs
+  │   └─ 需要 TPU → 迁移到 JAX + jit()
+  │
+  ├─ JAX
+  │   ├─ TPU → jit() + XLA (默认)
+  │   └─ GPU → jit() + XLA-GPU
+  │
+  ├─ TensorFlow
+  │   └─ tf.function() + XLA (或迁移到 PyTorch)
+  │
+  └─ C++/自定义
+      └─ TensorRT (图优化 + kernel auto-tuning)
+
+性能排序 (LLM 推理):
+  TensorRT > torch.compile > JAX jit > 手写 kernel > Eager
+  (但 TensorRT 的工程成本也最高!)
+</div>
+
+<h2>7. 学习路线</h2>
+<p>本指南按照从原理到实践的顺序组织：</p>
+<ol>
+<li><strong>torch.compile 工作流</strong>：理解 Dynamo → Inductor 的编译链</li>
+<li><strong>算子融合策略</strong>：掌握各类融合模式的原理与收益</li>
+<li><strong>CUDA Graphs</strong>：消除 kernel launch overhead</li>
+<li><strong>XLA 编译</strong>：Google/TPU 生态的编译方案</li>
+<li><strong>编译优化实战</strong>：在 LLM 推理框架中应用编译优化</li>
+</ol>
+
+
+<div class="deep"><strong>原理与推导：</strong>
+从<strong>原理</strong>层面理解，该技术的<strong>工作机制</strong>基于信息论的基本定理。
+设信源熵为 H(X) = -Σ p(x)log p(x)，<strong>为什么</strong>这很重要？
+因为信息熵给出了无损压缩的理论下界——这也解释了<strong>为什么</strong>量化不可避免地
+会带来信息损失。<strong>推导</strong>量化误差的上界：对于均匀量化，
+E[|x-q(x)|²] ≤ Δ²/12，其中Δ为量化步长。
+这一<strong>公式</strong>揭示了精度与效率之间的<strong>数学本质</strong>关系：
+步长越小（精度越高），误差越小，但需要的比特数越多。
+从<strong>底层</strong>实现来看，现代加速器的Tensor Core正是利用这一原理，
+通过混合精度计算在保持精度的同时最大化吞吐量。
+</div>
+<div class="exercise">
+<strong>🎯 练习 1</strong>：在你的 PyTorch 环境中，对比 <code>torch.compile(model)</code> 和 eager mode 的推理速度。使用一个 7B 模型，输入 128 token，测量 10 次推理的平均延迟。<br>
+<strong>提示</strong>：第一次推理会包含编译时间，需要 warmup。
+</div>
+
+<div class="exercise">
+<strong>🎯 练习 2</strong>：使用 <code>torch._inductor.utils.fresh_inductor_cache()</code> 查看 torch.compile 生成的 Triton 代码。找到 LayerNorm + Linear 的融合 kernel，分析它如何在同一 kernel 中完成归一化和矩阵乘法。
+</div>
+
+<div class="exercise">
+<strong>🎯 练习 3</strong>：分别测量 prefill 和 decode 阶段在有无 torch.compile 时的延迟差异。哪个阶段的编译优化收益更大？为什么？
+</div>
+
+<div class="tip">
+<strong>💡 向前串联：</strong>编译优化是推理优化的"底层引擎"。在后续模块中，你将看到它如何与<a href="../推理框架/05-注意力优化/00-总览.html">注意力优化</a>（FlashAttention 的 Triton 实现依赖编译器优化）和<a href="../推理框架/07-投机解码/01-草稿模型法.html">投机解码</a>（draft model 的编译加速）协同工作。
+</div>
+
+<p><strong>📚 交叉引用：</strong>
+• <a href="02-torch-compile工作流.html">下一节：torch.compile 工作流</a>——深入了解 Dynamo → Inductor 的编译链
+• <a href="../推理框架/05-注意力优化/01-FlashAttention.html">FlashAttention</a>——Triton kernel 的典型应用
+• <a href="../推理框架/09-部署实战/03-vLLM部署.html">vLLM 部署</a>——编译优化在生产环境的配置
+</p>
+
+<div class="exercise" style="display:none">
+<strong>练习 1</strong>：在你的 PyTorch 环境中，对比 <code>torch.compile(model)</code> 和 eager mode 的推理速度。使用一个 7B 模型，输入 128 token，测量 10 次推理的平均延迟。<br>
+<strong>提示</strong>：第一次推理会包含编译时间，需要 warmup。
+</div>
+
+<h2>术语速查表</h2>
+<table>
+<tr><th>术语</th><th>英文</th><th>含义</th></tr>
+<tr><td>算子融合</td><td>Operator Fusion</td><td>将多个小 kernel 合并为一个大 kernel</td></tr>
+<tr><td>Kernel Launch</td><td>Kernel Launch</td><td>CPU 向 GPU 发送执行 kernel 的指令</td></tr>
+<tr><td>HBM</td><td>High Bandwidth Memory</td><td>GPU 的高带宽主内存（如 H100 的 80GB HBM3）</td></tr>
+<tr><td>SRAM</td><td>Static RAM</td><td>GPU SM 内部的共享内存/寄存器</td></tr>
+<tr><td>IR</td><td>Intermediate Representation</td><td>编译器的中间表示</td></tr>
+<tr><td>Dynamo</td><td>TorchDynamo</td><td>PyTorch 的图捕获组件</td></tr>
+<tr><td>Inductor</td><td>TorchInductor</td><td>PyTorch 的后端编译器</td></tr>
+<tr><td>Triton</td><td>OpenAI Triton</td><td>Python-like GPU kernel 编程语言</td></tr>
+</table>
+
+</div>
+<div class="footer"><p><a href="index.html">返回编译优化总览</a> | <a href="../index.html">返回学习目录</a></p></div>
+<p><strong>学习路径：</strong>学习为什么需要编译优化需要前置知识：Transformer注意力机制、GPU内存管理基础。掌握后可继续深入推理框架实战和性能调优。</p>
+</body>
+</html>

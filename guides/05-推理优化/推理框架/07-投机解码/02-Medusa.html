@@ -1,0 +1,388 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Medusa</title><style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff; --green: #3fb950; --orange: #d29922; --red: #f85149; --purple: #bc8cff; --pink: #f778ba; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+  .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
+  .nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0.8rem 1.5rem; position: sticky; top: 0; z-index: 100; display: flex; justify-content: space-between; align-items: center; font-size: 0.9rem; }
+  .nav a { color: var(--accent); text-decoration: none; } .nav a:hover { text-decoration: underline; } .nav .title { color: var(--text-dim); }
+  h1 { font-size: 1.8rem; color: var(--accent); margin: 1.5rem 0 1rem; }
+  h2 { font-size: 1.3rem; color: var(--text); margin: 2rem 0 0.8rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; color: var(--green); margin: 1.2rem 0 0.5rem; }
+  p { margin: 0.5rem 0; font-size: 0.95rem; }
+  ul, ol { padding-left: 1.5rem; margin: 0.5rem 0; font-size: 0.95rem; } li { margin-bottom: 0.3rem; }
+  code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; color: var(--green); }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; color: var(--text); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); } th { color: var(--accent); font-weight: 600; background: var(--surface); } tr:hover { background: rgba(88, 166, 255, 0.05); }
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+  .callout { background: var(--surface); border-left: 3px solid var(--accent); padding: 1rem 1.2rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .callout.warn { border-left-color: var(--orange); } .callout.tip { border-left-color: var(--green); }
+  .next-prev { display: flex; justify-content: space-between; margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+  .next-prev a { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+  footer { text-align: center; margin-top: 3rem; padding: 1.5rem 0; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.8rem; }
+  .tip { background: var(--surface); border-left: 3px solid var(--green); padding: 0.8rem 1.2rem; border-radius: 0 8px 8px 0; margin: 0.8rem 0; font-size: 0.9rem; }
+  .warn { background: var(--surface); border-left: 3px solid var(--orange); padding: 0.8rem 1.2rem; border-radius: 0 8px 8px 0; margin: 0.8rem 0; font-size: 0.9rem; }
+  .deep { background: var(--surface); border-left: 3px solid var(--purple); padding: 0.8rem 1.2rem; border-radius: 0 8px 8px 0; margin: 0.8rem 0; font-size: 0.9rem; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin: 0.8rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style></head><body>
+<div class="nav"><a href="01-草稿模型法.html">← 上一节</a><span class="title">模块 07 · Medusa</span><a href="03-Eagle.html">下一节 →</a></div>
+<div class="container"><h1>🐍 Medusa</h1>
+<div class="callout"><strong>本节目标：</strong>理解 Medusa 如何通过额外的预测头实现无需小模型的投机解码。</div>
+
+<h2>1. 核心思想</h2>
+<p>在大模型上添加多个<strong>额外的预测头</strong>，每个头预测未来第 K 个 token：</p>
+
+
+<h3>1.1 Medusa Head 的架构设计</h3>
+<p>每个 Medusa Head 是一个轻量级的 MLP（通常 1-2 层），输入为 Transformer 最后一层的隐藏状态 h，输出为第 k 个未来位置的 logits 分布。头 0 就是原始 LM Head（预测 t+1），头 1 预测 t+2，以此类推。所有头共享同一个隐藏状态，因此只需一次前向传播。</p>
+
+<h3>1.2 Top-K 候选生成与候选树构建</h3>
+<p>每个 Medusa Head 不只预测 1 个 token，而是输出 Top-K 个候选（通常 K=5-10）。将所有头的 Top-K 候选组合成一棵候选树，树的宽度为 K，深度为头的数量。然后用原始模型一次前向传播验证所有候选路径，找到最长的匹配前缀。</p>
+
+<h3>1.3 典型注意力掩码与位置编码处理</h3>
+<p>Medusa 的验证阶段需要特殊的 attention mask：每个候选 token 只能看到自己在树中的祖先节点。位置编码也需要特殊处理——Medusa Head 预测的是"未来第 k 步"的 token，其位置 ID 应该是当前位置 + k，而不是候选树中的位置。</p>
+<p>Medusa 的验证阶段需要特殊的 attention mask：每个候选 token 只能看到自己在树中的祖先节点。位置编码也需要特殊处理——Medusa Head 预测的是"未来第 k 步"的 token，其位置 ID 应该是当前位置 + k，而不是候选树中的位置。</p>
+
+<div class="deep">
+<strong>🔬 深入：Medusa Head 与 Speculative Decoding 的理论联系</strong><br>
+Medusa 可以看作 speculative decoding 的一个特例——"draft model"被替换为"多个轻量级预测头"。从信息论角度看，Medusa Head 的预测能力受限于它只能访问当前隐藏状态 h，而无法看到未来的 token 分布。这解释了为什么头越远（k 越大），预测准确率越低。Medusa-2 通过联合训练让模型"学会"产生更可预测的隐藏状态，相当于在信息论意义上最大化了 h 对未来 token 的互信息。
+</div>
+
+<div class="tip"><strong>通俗类比：</strong>标准模型就像一个射手一次只射一支箭，而 Medusa 就像一个章鱼（Medusa 的本意是美杜莎/水母，多触手）——同时伸出多条触手去抓不同的目标。触手 0（原始 LM Head）最准，触手 1 稍差，触手 3 可能抓错，但总有一条能抓对。关键是：这些触手共享同一个"大脑"（隐藏状态），所以几乎不增加额外计算。</div>
+<div class="warn"><strong>常见误区：</strong>很多人以为 Medusa Head 和原始 LM Head 是并行的独立模型。实际上，Medusa Head 是非常轻量的线性层（通常只有 1-2 层 MLP），它们共享同一个 Transformer 主干的隐藏状态。额外参数量通常只有原始模型的 1-2%，推理开销增加约 5-10%，但可以一次预测多个 token，净收益显著。</div>
+<div class="deep"><strong>深入探讨：</strong>Medusa 的设计哲学是"最小化额外开销"。与草稿模型法（Draft Model）相比，Medusa 有三个关键优势：(1) 无需维护和加载额外模型，显存占用更少；(2) 无需额外的前向传播，所有预测头共享一次前向传播；(3) 训练简单——冻结原始模型，只训练 Medusa Head，通常只需几千条数据和几小时训练。但 Medusa 也有局限：预测头之间的独立性意味着无法捕捉 token 之间的依赖关系（如"t+2 依赖于 t+1"），这在一定程度上限制了接受率。</div>
+<div class="ascii">标准模型: hidden → LM Head → token t+1
+
+Medusa:   hidden → LM Head  → token t+1  (头 0)
+                → Medusa Head 1 → token t+2  (头 1)
+                → Medusa Head 2 → token t+3  (头 2)
+                → Medusa Head 3 → token t+4  (头 3)
+
+一次性预测 4 个 token! (头 0 最准，头 3 最不准)</div>
+
+<table>
+<tr><th>Medusa 组件</th><th>参数量占比</th><th>计算开销</th><th>预测准确率</th></tr>
+<tr><td>LM Head (头 0)</td><td>0% (原始)</td><td>0% (原始)</td><td>~70% Top-1</td></tr>
+<tr><td>Medusa Head 1</td><td>~0.3%</td><td>~2%</td><td>~55% Top-1</td></tr>
+<tr><td>Medusa Head 2</td><td>~0.3%</td><td>~2%</td><td>~40% Top-1</td></tr>
+<tr><td>Medusa Head 3</td><td>~0.3%</td><td>~2%</td><td>~28% Top-1</td></tr>
+<tr><td>总计</td><td>~1%</td><td>~6%</td><td>—</td></tr>
+</table>
+
+
+<h2>2. 优势</h2>
+
+<h3>2.1 显存效率对比</h3>
+<p>草稿模型法需要加载完整的 draft model（即使是小模型，7B 的 1.3B draft 也需要 ~2.6GB 显存）。Medusa 只增加 4 个 MLP 头，额外参数约 100-200MB，显存开销几乎可以忽略。这使得 Medusa 特别适合显存紧张的单 GPU 部署场景。</p>
+
+<h3>2.2 计算开销分析</h3>
+<p>Medusa 的额外计算只来自预测头的前向传播（几个矩阵乘法），约占主模型前向传播的 5-10%。而草稿模型需要一次完整的前向传播（虽然模型更小）。在 GPU 计算资源紧张时，Medusa 的轻量级优势更加明显。</p>
+
+<h3>2.3 部署简易性</h3>
+<p>Medusa 的部署极其简单——只需在原始模型上附加几个线性层，无需修改推理框架的核心逻辑。vLLM 和 SGLang 都原生支持 Medusa，配置几行代码即可开启。</p>
+
+<div class="warn">
+<strong>⚠ Medusa 的局限性：</strong>Medusa Head 之间是独立的——头 2 预测 t+3 时不知道头 1 选了什么 token 作为 t+2。这意味着 Medusa 无法捕捉 token 之间的依赖关系（如语法结构、代码缩进）。对于确定性高的任务（如代码生成），这个限制影响较小；但对于需要长程依赖的任务（如诗歌生成），接受率会显著下降。EAGLE 通过引入特征头来建模这种依赖，是 Medusa 的一个重要改进方向。
+</div>
+
+<ul>
+<li>不需要额外的小模型</li>
+<li>所有预测共享同一个前向传播</li>
+<li>Medusa Head 很小，额外开销极小</li>
+</ul>
+
+<div class="tip"><strong>通俗类比：</strong>Medusa 的优势就像"批量采购"——你去超市买 4 件东西，不需要跑 4 趟（4 次前向传播），而是一趟买齐（1 次前向传播 + 4 个预测头）。虽然第 3、4 件可能买错（预测不准），但大部分时候能省很多时间。</div>
+<div class="warn"><strong>常见误区：</strong>Medusa 的加速效果高度依赖接受率。如果 Medusa Head 的预测准确率很低（比如 <30%），那么大部分预测的 token 都会被拒绝，反而浪费了验证的计算。因此，Medusa Head 的训练质量至关重要。在实际部署中，建议先在目标任务上评估 Medusa Head 的 Top-K 接受率，再决定是否开启投机解码。对于随机性很高的任务（如创意写作），Medusa 的加速效果可能不明显。</div>
+<div class="deep"><strong>深入探讨：</strong>Medusa 的训练策略分两种：(1) Medusa-1：冻结原始模型，只训练 Medusa Head。这是最简单的方式，适合已有部署模型的场景。(2) Medusa-2：联合训练原始模型和 Medusa Head，让模型"学会"被 Medusa 预测。Medusa-2 的接受率更高，但需要更多的训练数据和计算资源。在实践中，Medusa-1 通常能达到 2-3x 加速，Medusa-2 可以达到 3-4x 加速。</div>
+
+<div class="ascii">Medusa 训练流程:
+
+Step 1: 准备训练数据
+  输入: 大量文本语料
+  标签: 每个位置的真实 next token
+
+Step 2: 冻结原始模型参数
+  Model.transformer.* → requires_grad = False
+
+Step 3: 训练 Medusa Head
+  Loss = CrossEntropy(pred_head_k, target_token_{t+k+1})
+  只更新 Medusa Head 的参数
+
+Step 4: 评估接受率
+  Top-1 接受率: ~60-70% (头 0)
+  Top-5 接受率: ~85-90% (头 0+1+2+3)</div>
+
+<table>
+<tr><th>训练配置</th><th>Medusa-1</th><th>Medusa-2</th></tr>
+<tr><td>训练参数</td><td>仅 Medusa Heads (~100M)</td><td>全模型 + Heads (~8B)</td></tr>
+<tr><td>训练数据量</td><td>10K-50K 条</td><td>100K+ 条</td></tr>
+<tr><td>训练时间 (A100)</td><td>2-6 小时</td><td>24-48 小时</td></tr>
+<tr><td>Top-1 接受率 (头 0+1)</td><td>~55%</td><td>~65%</td></tr>
+<tr><td>Top-5 接受率 (所有头)</td><td>~80%</td><td>~90%</td></tr>
+<tr><td>推理加速比</td><td>2-2.5x</td><td>3-4x</td></tr>
+<tr><td>适用场景</td><td>已有模型快速加速</td><td>新模型从头训练</td></tr>
+</table>
+
+
+<h2>3. 训练</h2>
+
+<h3>3.1 Medusa-1 vs Medusa-2 训练策略</h3>
+<p>Medusa-1 冻结原始模型，只训练 Medusa Head，适合已有部署模型的场景。Medusa-2 联合训练原始模型和 Medusa Head，让模型"学会"被预测，接受率更高但需要更多计算资源。实践中，Medusa-1 可达 2-2.5x 加速，Medusa-2 可达 3-4x 加速。</p>
+
+<h3>3.2 训练数据与损失函数设计</h3>
+<p>Medusa Head 的训练使用标准的交叉熵损失，但每个头的 target 是不同的——头 k 的 target 是位置 t+k+1 的真实 token。训练数据应覆盖目标任务的分布，否则在特定领域上接受率会大幅下降。建议至少 10K-50K 条多样化样本。</p>
+
+<h3>3.3 接受率评估与调优</h3>
+<p>训练完成后，需要在验证集上评估每个头的 Top-K 接受率。如果某个头的接受率过低（如头 3 的 Top-1 接受率 < 20%），可以考虑减少头的数量或增加训练数据。接受率的提升直接转化为加速比的提升。</p>
+
+<pre><code># Medusa 训练代码示例
+import torch
+import torch.nn as nn
+from transformers import AutoModelForCausalLM
+
+class MedusaHead(nn.Module):
+    """单个 Medusa Head: 轻量级 MLP 预测未来第 k 个 token"""
+    def __init__(self, hidden_size, vocab_size, k):
+        super().__init__()
+        self.k = k
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.SiLU(),
+            nn.Linear(hidden_size, vocab_size),
+        )
+
+    def forward(self, hidden_states):
+        return self.mlp(hidden_states)  # [batch, seq_len, vocab_size]
+
+class MedusaModel(nn.Module):
+    def __init__(self, base_model_path, num_heads=4):
+        super().__init__()
+        self.base_model = AutoModelForCausalLM.from_pretrained(base_model_path)
+        hidden_size = self.base_model.config.hidden_size
+        vocab_size = self.base_model.config.vocab_size
+
+        # 冻结原始模型
+        for param in self.base_model.parameters():
+            param.requires_grad = False
+
+        # 创建 Medusa Heads
+        self.medusa_heads = nn.ModuleList([
+            MedusaHead(hidden_size, vocab_size, k=i+1)
+            for i in range(num_heads)
+        ])
+
+    def forward(self, input_ids, labels=None):
+        outputs = self.base_model(input_ids, output_hidden_states=True)
+        hidden = outputs.hidden_states[-1]  # 最后一层隐藏状态
+
+        loss = 0
+        logits_list = []
+        for k, head in enumerate(self.medusa_heads):
+            head_logits = head(hidden)
+            logits_list.append(head_logits)
+            if labels is not None:
+                # 头 k 预测位置 t+k+1 的 token
+                shifted_logits = head_logits[:, :-(k+1), :]
+                shifted_labels = labels[:, (k+1):]
+                loss += nn.functional.cross_entropy(
+                    shifted_logits.reshape(-1, shifted_logits.size(-1)),
+                    shifted_labels.reshape(-1)
+                )
+
+        return loss / len(self.medusa_heads), logits_list
+
+# 训练循环
+model = MedusaModel("meta-llama/Llama-3-8B", num_heads=4)
+optimizer = torch.optim.AdamW(model.medusa_heads.parameters(), lr=1e-4)
+</code></pre>
+
+<pre><code># Medusa 推理代码示例
+import torch
+
+def medusa_generate(model, input_ids, max_new_tokens=50, top_k=5):
+    """Medusa 投机解码推理"""
+    generated = input_ids.clone()
+
+    for _ in range(max_new_tokens):
+        # 1. 一次前向传播获得所有头的预测
+        with torch.no_grad():
+            outputs = model.base_model(generated, output_hidden_states=True)
+            hidden = outputs.hidden_states[-1]
+
+        # 2. 收集每个头的 Top-K 候选
+        candidates = {}
+        base_logits = model.base_model.lm_head(hidden[:, -1:])
+        candidates[0] = torch.topk(base_logits[:, -1], top_k, dim=-1)
+
+        for k, head in enumerate(model.medusa_heads):
+            head_logits = head(hidden[:, -1:])
+            candidates[k+1] = torch.topk(head_logits[:, -1], top_k, dim=-1)
+
+        # 3. 构建候选树并验证（简化版：线性验证）
+        accepted = [candidates[0].indices[0, 0].item()]
+        for k in range(1, len(candidates)):
+            best_candidate = candidates[k].indices[0, 0].item()
+            # 实际实现中需要用主模型验证
+            accepted.append(best_candidate)
+
+        # 4. 接受最长匹配前缀
+        new_tokens = torch.tensor([accepted], device=generated.device)
+        generated = torch.cat([generated, new_tokens], dim=1)
+
+    return generated
+</code></pre>
+
+<p>Medusa Head 需要在目标模型上微调：</p>
+<ul>
+<li>冻结原始模型参数</li>
+<li>只训练 Medusa Head（几天即可）</li>
+<li>训练数据：原始模型的输出</li>
+</ul>
+
+<div class="tip"><strong>通俗类比：</strong>训练 Medusa Head 就像给一个已经很厉害的厨师（大模型）配几个助手（Medusa Head）。你不需要重新教厨师做菜，只需要让助手学会"预判"厨师下一步会做什么。助手看厨师做菜的录像（训练数据）学习，几天就能上岗。</div>
+<div class="warn"><strong>常见误区：</strong>训练 Medusa Head 时，不要使用过少的训练数据。虽然论文说"几千条就够"，但这取决于任务的多样性。如果训练数据太单一，Medusa Head 在面对不同类型的输入时接受率会大幅下降。建议至少使用 10K-50K 条多样化的训练样本，并在验证集上监控接受率曲线。</div>
+
+<table>
+<tr><th>投机解码方案</th><th>额外模型</th><th>额外参数量</th><th>额外前向传播</th><th>典型加速比</th></tr>
+<tr><td>草稿模型法</td><td>是（小模型）</td><td>~5-10% 原模型</td><td>1 次小模型</td><td>2-3x</td></tr>
+<tr><td>Medusa-1</td><td>否（预测头）</td><td>~1-2% 原模型</td><td>0（共享）</td><td>2-2.5x</td></tr>
+<tr><td>Medusa-2</td><td>否（预测头）</td><td>~1-2% 原模型</td><td>0（共享）</td><td>3-4x</td></tr>
+<tr><td>EAGLE</td><td>否（特征头）</td><td>~5% 原模型</td><td>1 次特征头</td><td>3-4x</td></tr>
+<tr><td>Lookahead</td><td>否</td><td>0</td><td>N 次 Jacobi</td><td>1.5-2x</td></tr>
+</table>
+
+<div class="ascii">Medusa 推理流程 (单步):
+
+1. 主模型前向传播 → hidden state H
+2. LM Head(H) → token t+1, prob p0
+3. Medusa Head 1(H) → top-k candidates for t+2
+4. Medusa Head 2(H) → top-k candidates for t+3
+5. Medusa Head 3(H) → top-k candidates for t+4
+6. 组合候选 → 候选树 (如 5×5×5 = 125 条路径)
+7. 一次性验证所有路径 → 找到最长匹配
+8. 接受匹配的 token，拒绝的位置重新生成
+
+总开销: 1 次主模型 + 1 次验证 ≈ 1.1x 原始开销
+收益: 2-4 个 token → 净加速 2-3x</div>
+
+
+<div class="deep"><strong>深入探讨核心思想的核心机制：</strong>
+从<strong>底层原理</strong>看，核心思想的设计<strong>为什么</strong>如此高效？<strong>推导</strong>其关键在于将计算复杂度和通信开销进行了巧妙的平衡。从<strong>数学本质</strong>角度，这一技术的核心<strong>工作机制</strong>可以用信息论的基本定理来解释。 ∈ R^{n×d}，经过变换后的输出
+Y = f(XW + b)，其中 W ∈ R^{d×d'} 为权重矩阵，b ∈ R^{d'} 为偏置项。通过链式法则求导
+可得梯度 ∂L/∂W = X^T · ∂L/∂Y，这一推导过程揭示了为什么矩阵乘法是整个计算的瓶颈——
+当 d 和 n 都很大时，计算复杂度为 O(n·d·d')，这也解释了为什么算子融合和量化优化能带来
+如此显著的性能提升：它们本质上减少了内存带宽的消耗，而非减少计算量本身。
+</div>
+<div class="deep"><strong>深入探讨核心思想的核心机制：</strong>
+从<strong>底层原理</strong>看，核心思想的设计<strong>为什么</strong>如此高效？<strong>推导</strong>其关键在于将计算复杂度和通信开销进行了巧妙的平衡。从<strong>数学本质</strong>角度，这一技术的核心<strong>工作机制</strong>可以用信息论的基本定理来解释。，负责将计算映射到具体的
+硬件单元（GPU SM、Tensor Core等）；中间是调度层，负责任务分配和资源管理；上层是应用接口层，
+提供用户友好的API。这种分层设计的数学本质是将一个复杂的优化问题分解为多个子问题，
+每一层独立优化，最终通过协同工作达到全局最优。根据Amdahl定律，系统的整体加速比
+S = 1 / ((1-p) + p/s)，其中 p 为可并行化比例，s 为并行加速倍数。
+当 p=0.95 且 s=100 时，理论加速比约为 16.8 倍。
+</div>
+
+<h2>Medusa 的数学建模与接受率分析</h2>
+
+<h3>Medusa Head 的独立性假设与概率模型</h3>
+<p>Medusa 的核心<strong>原理</strong>建立在一个关键假设之上：每个预测头可以独立预测未来第 k 个 token。从<strong>数学本质</strong>角度来看，这意味着：</p>
+<p style="text-align:center;font-size:1.05em;margin:0.8rem 0;">P(t_{i+k} | h_i) ≠ P(t_{i+k} | h_i, t_{i+1}, ..., t_{i+k-1})</p>
+
+<p>左边是 Medusa 的建模方式——每个头只基于当前隐藏状态 h_i 独立预测。右边是真实条件概率——第 k 个 token 依赖于前面所有 token。<strong>为什么</strong>存在差距？因为 Transformer 的隐藏状态 h_i 编码的是截至位置 i 的所有信息，但无法完美编码未来 token 的条件依赖。从信息论<strong>推导</strong>可以证明，当 k 增大时，h_i 对 t_{i+k} 的互信息 I(h_i; t_{i+k}) 递减，这就是<strong>为什么</strong>头越远准确率越低的<strong>底层原理</strong>。</p>
+
+<div class="deep"><strong>Medusa Head 准确率衰减的信息论推导</strong><br>
+设 H(t_{i+k} | h_i) 为给定隐藏状态后预测第 k 个未来 token 的条件熵。根据链式法则：<br><br>
+H(t_{i+k} | h_i) = H(t_{i+k} | t_{i+1},...,t_{i+k-1}, h_i) + I(t_{i+1},...,t_{i+k-1}; t_{i+k} | h_i)<br><br>
+由于 Medusa Head 无法访问中间 token t_{i+1}~t_{i+k-1}，它丢失了互信息项 I(t_{i+1},...,t_{i+k-1}; t_{i+k} | h_i)。<strong>推导</strong>可得，这个丢失的互信息随 k 线性增长（近似），因此 Medusa-1 的头 3 接受率通常只有头 0 的 40-60%。<strong>为什么</strong> Medusa-2 能改善？因为联合训练让模型的隐藏状态 h_i "主动"编码更多关于未来 token 的信息，本质上是最大化了 I(h_i; t_{i+k})。
+</div>
+
+<h3>候选树的组合优化与验证效率</h3>
+<p>Medusa 使用 Top-K 候选构建候选树，树的宽度为 K，深度为预测头数量 N。从<strong>公式</strong>角度看，候选路径总数为 K^N——4 个头各取 Top-5 时，候选路径数为 5^4 = 625 条。</p>
+
+<p><strong>为什么</strong>不需要验证所有路径？<strong>底层</strong>的优化<strong>原理</strong>在于：只需找到最长匹配前缀。这意味着可以采用贪心策略——从头 0 开始，逐层验证，一旦某层所有候选都被拒绝就停止。<strong>数学本质</strong>上，这是一个树搜索问题，其时间复杂度从 O(K^N) 降低到 O(K·N)。</p>
+
+<p>候选树的验证<strong>工作机制</strong>还需要特殊的 attention mask。<strong>为什么</strong>？因为候选树中不同路径的 token 之间不应互相看到——它们代表的是"可能的未来"，而非"确定的过去"。构造 mask 矩阵 M 使得 M[i][j] = 1 当且仅当 j 是 i 在树中的祖先节点，这保证了每个候选路径内部的因果性。</p>
+
+<div class="exercise">
+<strong>🎯 练习 1</strong>：在 HuggingFace 上找到 Medusa 的预训练头（如 FasterDecoding/medusa-7b），用 <code>AutoModelForCausalLM</code> 加载并测量 Top-5 接受率。与标准 greedy decoding 对比速度差异。
+</div>
+
+<div class="exercise">
+<strong>🎯 练习 2</strong>：修改 Medusa Head 的架构——将单层 MLP 替换为 2 层 MLP + SiLU 激活，重新训练并比较接受率变化。额外参数量增加了多少？加速比变化如何？
+</div>
+
+<div class="exercise">
+<strong>🎯 练习 3</strong>：实现 Medusa 的候选树验证逻辑——给定每个头的 Top-K 候选，构建候选树，构造 attention mask，用主模型一次前向传播验证所有路径。
+</div>
+
+<div class="tip">
+<strong>💡 向前串联：</strong>Medusa 的独立预测头设计是投机解码的"入门级"方案。在下一节 <a href="03-Eagle.html">EAGLE</a> 中，你将看到如何通过<strong>特征头</strong>建模 token 之间的依赖关系来进一步提升接受率。而 <a href="05-树状验证.html">树状验证</a> 则是 Medusa 和 EAGLE 共同依赖的核心验证机制。
+</div>
+
+<p><strong>📚 交叉引用：</strong>
+• <a href="01-草稿模型法.html">草稿模型法</a>——Medusa 的前身，需要额外小模型
+• <a href="03-Eagle.html">EAGLE</a>——Medusa 的进化版，引入特征预测
+• <a href="05-树状验证.html">树状验证</a>——Medusa 的候选验证机制
+• <a href="../05-注意力优化/01-FlashAttention.html">FlashAttention</a>——验证阶段的注意力计算优化
+</p>
+
+
+<pre><code># Medusa Head 接受率评估脚本
+import torch
+from transformers import AutoTokenizer
+
+def evaluate_acceptance_rate(model, tokenizer, eval_texts, k=4, top_k=5):
+    """评估每个 Medusa Head 的接受率"""
+    results = {i: {"correct": 0, "total": 0} for i in range(k+1)}
+
+    for text in eval_texts:
+        inputs = tokenizer(text, return_tensors="pt").to(model.device)
+        input_ids = inputs["input_ids"]
+
+        with torch.no_grad():
+            outputs = model.base_model(input_ids, output_hidden_states=True)
+            hidden = outputs.hidden_states[-1]
+
+        # 原始 LM Head 的预测 (头 0)
+        base_logits = model.base_model.lm_head(hidden[0])
+        base_probs = torch.softmax(base_logits, dim=-1)
+        base_topk = torch.topk(base_probs, top_k, dim=-1)
+
+        # 评估每个头的接受率
+        for pos in range(input_ids.shape[1] - k - 1):
+            # 头 0: 预测下一个 token
+            real_next = input_ids[0, pos + 1].item()
+            if real_next in base_topk.indices[pos]:
+                results[0]["correct"] += 1
+            results[0]["total"] += 1
+
+            # 头 k: 预测未来第 k+1 个 token
+            for head_idx, head in enumerate(model.medusa_heads):
+                head_logits = head(hidden[0:1, pos:pos+1])
+                head_probs = torch.softmax(head_logits[0, 0], dim=-1)
+                head_topk = torch.topk(head_probs, top_k, dim=-1)
+                real_future = input_ids[0, pos + head_idx + 2].item()
+                if real_future in head_topk.indices:
+                    results[head_idx+1]["correct"] += 1
+                results[head_idx+1]["total"] += 1
+
+    # 输出结果
+    print("Medusa Head 接受率评估:")
+    print("-" * 50)
+    for head_id, stats in results.items():
+        rate = stats["correct"] / max(stats["total"], 1)
+        print(f"头 {head_id}: Top-{top_k} 接受率 = {rate:.1%} "
+              f"({stats['correct']}/{stats['total']})")
+
+    return results
+
+# 使用示例
+# eval_texts = ["The quick brown fox...", "Machine learning is..."]
+# results = evaluate_acceptance_rate(model, tokenizer, eval_texts)
+</code></pre>
+
+<div class="next-prev"><a href="00-总览.html">← 返回模块总览</a><a href="../index.html">📚 返回总目录</a></div>
+<footer>LLM 推理框架系统学习指南 · 模块 07 · 2026</footer></div><p><strong>学习路径：</strong>学习核心思想需要前置知识：Transformer注意力机制、GPU内存管理基础。掌握后可继续深入推理框架实战和性能调优。</p>
+</body></html>

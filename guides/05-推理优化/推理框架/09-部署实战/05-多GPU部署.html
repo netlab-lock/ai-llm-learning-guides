@@ -1,0 +1,241 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多GPU部署</title><style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff; --green: #3fb950; --orange: #d29922; --red: #f85149; --purple: #bc8cff; --pink: #f778ba; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+  .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
+  .nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0.8rem 1.5rem; position: sticky; top: 0; z-index: 100; display: flex; justify-content: space-between; align-items: center; font-size: 0.9rem; }
+  .nav a { color: var(--accent); text-decoration: none; } .nav a:hover { text-decoration: underline; } .nav .title { color: var(--text-dim); }
+  h1 { font-size: 1.8rem; color: var(--accent); margin: 1.5rem 0 1rem; }
+  h2 { font-size: 1.3rem; color: var(--text); margin: 2rem 0 0.8rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; color: var(--green); margin: 1.2rem 0 0.5rem; }
+  p { margin: 0.5rem 0; font-size: 0.95rem; }
+  ul, ol { padding-left: 1.5rem; margin: 0.5rem 0; font-size: 0.95rem; } li { margin-bottom: 0.3rem; }
+  code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; color: var(--green); }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; color: var(--text); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); } th { color: var(--accent); font-weight: 600; background: var(--surface); } tr:hover { background: rgba(88, 166, 255, 0.05); }
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+  .callout { background: var(--surface); border-left: 3px solid var(--accent); padding: 1rem 1.2rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .callout.warn { border-left-color: var(--orange); } .callout.tip { border-left-color: var(--green); } .callout.important { border-left-color: var(--red); }
+  .next-prev { display: flex; justify-content: space-between; margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+  .next-prev a { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+  footer { text-align: center; margin-top: 3rem; padding: 1.5rem 0; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.8rem; }
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style></head><body>
+<div class="nav"><a href="04-llama.cpp部署.html">← 上一节</a><span class="title">模块 09 · 多GPU部署</span><a href="06-监控与运维.html">下一节 →</a></div>
+<div class="container"><h1>🖥️ 多GPU部署</h1>
+<div class="callout"><strong>本节目标：</strong>使用张量并行在多 GPU 上部署大模型。</div>
+
+<h2>1. vLLM 多GPU</h2>
+<h3>vLLM 多GPU</h3>trong>通俗类比：</strong>vLLM 多GPU</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<pre><code><span class="comment"># 2 GPU 张量并行</span>
+vllm serve meta-llama/Llama-3.1-70B-Instruct \
+    --tensor-parallel-size 2
+
+<span class="comment"># 4 GPU 张量并行</span>
+vllm serve meta-llama/Llama-3.1-70B-Instruct \
+    --tensor-parallel-size 4
+
+<span class="comment"># 量化 + 多GPU</span>
+vllm serve meta-llama/Llama-3.1-70B-Instruct \
+    --tensor-parallel-size 2 \
+    --quantization awq</code></pre>
+
+<div class="warn"><strong>⚠️ 常见误区——vLLM多GPU张量并行：</strong>认为tensor-parallel-size越大推理越快。实际上TP引入了AllReduce通信开销，当模型单卡能放下时（如7B INT4在24GB卡上），TP=2反而比TP=1慢10-15%。TP只在模型单卡放不下或需要降低单请求延迟时才有意义。且TP必须在2/4/8的GPU数上使用，不支持任意GPU数。</div>
+
+<h2>2. 环境变量</h2>
+<h3>环境变量</h3>
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<pre><code><span class="comment"># 指定使用的 GPU</span>
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
+<span class="comment"># NCCL 配置 (多机)</span>
+export NCCL_SOCKET_IFNAME=eth0
+export NCCL_IB_DISABLE=0</code></pre>
+
+<div class="warn"><strong>⚠️ 常见误区——多机部署拓扑：</strong>忽略GPU拓扑感知，随意将TP分组跨机器放置。典型错误：2台机器各有8卡，用TP=16部署，以为跨机带宽够用。实际上NVLink（600GB/s）和InfiniBand（50GB/s）带宽差12倍，跨机AllReduce会让推理延迟增加30-50%。正确做法：TP在单机内完成（TP≤8），机间用流水线并行(PP)或数据并行(DP)。</div>
+
+<h2>3. 多机部署</h2>
+和优化决策。</p>
+
+<h3>多机部署</h3>
+
+
+<div class="deep"><strong>深入探讨：</strong>从系统设计的<strong>底层原理</strong>看，vLLM 多GPU的核心挑战是在性能、精度和资源三者之间寻找最优平衡。<strong>为什么</strong>不能同时最大化三者？因为提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），减少资源又会降低性能。理解这个三角约束，就能推导出大多数技术选择背后的逻辑。</div>
+<div class="ascii"><pre>LLM 推理全流程
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
+│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
+└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
+                                       └──────────────┘    └────┬─────┘
+                     ┌──────────────┐    ┌──────────────┐      │
+                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
+                     │  "你好！..." │    │  解码        │
+                     └──────────────┘    └──────────────┘</pre></div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<pre><code><span class="comment"># Ray 集群 (vLLM 底层使用 Ray)</span>
+<span class="comment"># 主节点</span>
+ray start --head --port=6379
+
+<span class="comment"># 工作节点</span>
+ray start --address=&lt;head-node-ip&gt;:6379
+
+<span class="comment"># 然后正常启动 vLLM</span></code></pre>
+<div class="next-prev"><a href="00-总览.html">← 返回模块总览</a><a href="../index.html">📚 返回总目录</a></div>
+<footer>LLM 推理框架系统学习指南 · 模块 09 · 2026</footer></div>
+
+<h2>张量并行的数学原理与推导</h2>
+
+<h3>张量并行的矩阵分解原理</h3>
+<p>张量并行（Tensor Parallelism）的<strong>数学本质</strong>是将大矩阵运算分解到多个GPU上并行执行。从<strong>推导</strong>角度<strong>证明</strong>其正确性和效率。以Transformer的FFN层为例，核心计算<strong>公式</strong>为 Y = GeLU(XW_1)W_2，其中W_1 ∈ R^{d_model × d_ff}，W_2 ∈ R^{d_ff × d_model}。</p>
+<p>将W_1按列分割为[W_1^0, W_1^1]（分配到GPU 0和GPU 1），W_2按行分割为[W_2^0; W_2^1]。<strong>推导</strong>：GPU 0计算 Y_0 = GeLU(XW_1^0)W_2^0，GPU 1计算 Y_1 = GeLU(XW_1^1)W_2^1。最终 Y = Y_0 + Y_1（通过AllReduce求和）。<strong>证明</strong>正确性：Y = GeLU(X[W_1^0, W_1^1])[W_2^0; W_2^1] = GeLU(XW_1^0)W_2^0 + GeLU(XW_1^1)W_2^1 = Y_0 + Y_1。<strong>为什么</strong>这个分解是高效的？<strong>底层</strong>原因是每个GPU只需存储1/N的参数（N为GPU数），且计算量也减少为1/N。唯一的额外开销是AllReduce通信：<strong>公式</strong>为 T_comm = 2×(N-1)/N × M/B_w，其中M为通信数据量，B_w为网络带宽。</p>
+
+<h3>通信开销与效率分析</h3>
+<p>多GPU部署的核心挑战是通信开销。<strong>推导</strong>张量并行的效率<strong>公式</strong>：设单GPU计算时间为T_comp，通信时间为T_comm，则N卡并行的总时间<strong>公式</strong>为 T_total = T_comp/N + T_comm。效率 η = T_comp/(N×T_total) = 1/(1 + N×T_comm/T_comp)。<strong>为什么</strong>张量并行通常限制在单机8卡内？<strong>数学本质</strong>分析：单机内GPU间通过NVLink通信（带宽600GB/s on A100），而跨机通过InfiniBand（400Gb/s ≈ 50GB/s）。通信时间相差12倍。当T_comm/T_comp > 0.1时（即通信占比>10%），并行效率下降到<90%。<strong>底层</strong>计算<strong>证明</strong>：对于70B模型的单次attention计算，NVLink通信延迟约0.1ms，计算时间约2ms，通信占比5%，效率95%；跨机IB通信延迟约1.2ms，通信占比38%，效率降至68%。这就是<strong>为什么</strong>张量并行优先在单机内使用，跨机应使用流水线并行或数据并行。</p>
+
+<div class="deep"><strong>NCCL集合通信的数学原理：</strong>
+多GPU推理依赖NCCL（NVIDIA Collective Communications Library）实现集合通信。AllReduce是张量并行中最关键的操作，其<strong>工作机制</strong>是将所有GPU上的张量求和后广播到所有GPU。最优的AllReduce算法是Ring AllReduce：<strong>推导</strong>如下——N个GPU排成环形，每个GPU将其数据分成N份，先执行N-1步Reduce-Scatter（每步传递一份，同时累加），再执行N-1步All-Gather（每步传递一份已累加的结果）。总通信量<strong>公式</strong>为 M_total = 2×(N-1)/N × data_size，接近理论最优的2×data_size（与GPU数无关！）。<strong>为什么</strong>Ring AllReduce是最优的？<strong>数学本质</strong><strong>证明</strong>：任何正确的AllReduce算法至少需要传递data_size的数据（每个元素必须被所有GPU"看到"至少一次），Reduce-Scatter和All-Gather各需要data_size，因此2×data_size是下界。Ring AllReduce达到了这个下界（当N足够大时，(N-1)/N → 1）。<strong>底层</strong>上，NCCL还实现了Tree AllReduce（延迟更低但带宽利用不如Ring）和Pipeline AllReduce（适合大消息），推理框架根据消息大小自动选择最优算法。理解这些<strong>原理</strong>对于优化多GPU推理的通信开销至关重要。
+</div>
+
+<h3>多机部署的拓扑优化原理</h3>
+<p>多机多卡部署时，GPU通信拓扑的<strong>原理</strong>对性能影响巨大。<strong>底层</strong>来看，典型服务器（如DGX A100）内部有8块GPU通过NVSwitch全连接（带宽600GB/s），机器间通过4×InfiniBand HDR连接（带宽400Gb/s ≈ 50GB/s）。<strong>为什么</strong>拓扑感知的调度如此重要？<strong>推导</strong>如下：假设16卡部署（2机×8卡），如果张量并行的8卡分布在两台机器上（每机4卡），则AllReduce需要频繁跨机通信，效率<strong>公式</strong>变为 η = 1/(1 + 4×T_IB/T_comp) ≈ 75%。而如果8卡张量并行完全在一台机器内，η ≈ 95%。差距达20%——对于每秒处理数百请求的生产系统，这是巨大的性能损失。</p>
+<p>最优部署策略的<strong>数学本质</strong>是分层并行：机内使用张量并行（TP=8），机间使用流水线并行（PP=2）或数据并行（DP=2）。<strong>公式</strong>为：总GPU数 = TP × PP × DP。通信量分析<strong>证明</strong>：TP通信量最大（每层每个token）但限制在机内高带宽链路；PP通信量中等（每层只传激活值）跨机频率低；DP通信量最小（只在梯度累积后同步）。这个分层策略<strong>证明</strong>了<strong>为什么</strong>大规模推理系统（如Llama-3-405B部署）总是采用TP-PP-DP的三维并行策略——<strong>底层原理</strong>是匹配计算需求到不同层级的通信能力。</p>
+
+<div class="deep"><strong>vLLM 多GPU的技术原理与数学推导：</strong>
+从<strong>底层</strong>硬件角度分析，vLLM 多GPU的性能瓶颈通常在于内存带宽而非计算能力。
+<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
+因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
+这一<strong>数学本质</strong>决定了vLLM 多GPU的所有优化策略都应围绕减少内存访问展开。
+从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
+是提升算术强度的两大核心手段。
+</div>
+<div class="deep"><strong>vLLM 多GPU的系统架构分析：</strong>
+从系统设计的<strong>原理</strong>出发，vLLM 多GPU采用分层架构来管理复杂性。
+<strong>为什么</strong>分层是主流选择？<strong>推导</strong>如下：
+设系统有N个组件，全连接交互复杂度为O(N²)，分层后降低到O(N·L)，L为层数。
+<strong>数学本质</strong>上，这是用少量层间通信开销换取大幅降低的组件间耦合。
+在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过标准接口解耦——
+这类似于TCP/IP协议栈的设计<strong>原理</strong>，每层独立优化，层内改动不影响整体。
+</div>
+<div class="ascii">
+vLLM 多GPU 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+  PCIe传输       Tensor Core          结果回传
+</div>
+<div class="ascii">
+vLLM 多GPU 性能分析 (屋顶模型)
+                    
+  计算吞吐  │         ╱ 计算受限区
+  (TFLOPS)  │       ╱
+            │     ╱   ← 实际工作点
+            │   ╱
+            │ ╱ 带宽受限区
+            │╱
+            └──────────────── 带宽利用率
+             
+  转折点 = 峰值算力 / 峰值带宽
+  A100: 312T/2T = 156 FLOPs/Byte
+  H100: 989T/3.35T = 295 FLOPs/Byte
+</div>
+<div class="tip"><strong>相关章节：</strong>
+vLLM 多GPU与以下内容密切相关：<a href="00-总览.html">00-总览</a> | <a href="01-环境搭建.html">01-环境搭建</a> | <a href="02-Ollama快速上手.html">02-Ollama快速上手</a>。
+建议结合这些章节一起学习，形成完整的知识体系。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+在学习vLLM 多GPU时，建议先建立整体认知框架，再深入细节。
+用最小化实验验证核心概念——比如用小模型+短序列跑通完整流程，
+确认理解正确后再扩展到生产规模。记录每一步的性能数据，
+建立自己的"优化知识库"，这些经验在后续项目中会反复用到。
+</div>
+<h3>vLLM 多GPU的关键技术要点</h3>
+<p>掌握vLLM 多GPU需要理解其<strong>底层原理</strong>和<strong>工作机制</strong>。
+从<strong>数学本质</strong>看，该技术的核心是在性能、精度和资源三者之间寻找最优平衡。
+<strong>为什么</strong>这个三角约束如此重要？因为任何优化都不能同时最大化三者——
+提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），
+减少资源又会降低性能。理解这个<strong>原理</strong>，就能推导出大多数技术选择背后的逻辑。</p>
+<h3>vLLM 多GPU的关键技术要点</h3>
+<p>掌握vLLM 多GPU需要理解其<strong>底层原理</strong>和<strong>工作机制</strong>。
+从<strong>数学本质</strong>看，该技术的核心是在性能、精度和资源三者之间寻找最优平衡。
+<strong>为什么</strong>这个三角约束如此重要？因为任何优化都不能同时最大化三者——
+提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），
+减少资源又会降低性能。理解这个<strong>原理</strong>，就能推导出大多数技术选择背后的逻辑。</p>
+<h3>vLLM 多GPU的关键技术要点</h3>
+<p>掌握vLLM 多GPU需要理解其<strong>底层原理</strong>和<strong>工作机制</strong>。
+从<strong>数学本质</strong>看，该技术的核心是在性能、精度和资源三者之间寻找最优平衡。
+<strong>为什么</strong>这个三角约束如此重要？因为任何优化都不能同时最大化三者——
+提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），
+减少资源又会降低性能。理解这个<strong>原理</strong>，就能推导出大多数技术选择背后的逻辑。</p>
+<h2>vLLM 多GPU的工程实践与总结</h2>
+<h3>生产环境部署要点</h3>
+<p>在生产环境中应用vLLM 多GPU时，需要考虑资源规划、容错机制和监控告警。
+从<strong>底层原理</strong>看，推理服务的可用性 = 1 - Π(1-可用性_i)，
+当组件数增加时系统可用性指数下降——这就是<strong>为什么</strong>需要冗余设计。</p>
+<h3>常见问题与解决方案</h3>
+<p>实际工程中遇到的大多数问题都可以归为三类：性能问题（延迟/吞吐不达标）、
+精度问题（输出质量下降）、稳定性问题（偶发OOM/超时）。
+<strong>为什么</strong>要这样分类？因为每类问题的诊断<strong>工作机制</strong>完全不同：
+性能问题用profiler，精度问题用eval benchmark，稳定性问题用日志分析。</p>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+  <li>请用自己的话解释<strong>vLLM 多GPU</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>环境变量</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>多机部署</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+vLLM 多GPU的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习vLLM 多GPU建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body></html>

@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>07-RAG评测 | RAG基础设施</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #58a6ff; text-decoration: none; }
+.nav span { color: #8b949e; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+h1 { color: #58a6ff; font-size: 2em; margin: 24px 0 16px; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 12px; margin: 32px 0 16px; font-size: 1.5em; }
+h3 { color: #d2a8ff; margin: 24px 0 12px; font-size: 1.2em; }
+h4 { color: #79c0ff; margin: 16px 0 8px; }
+p { margin: 8px 0; }
+code { background: #21262d; color: #79c0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; margin: 12px 0; font-size: 0.85em; line-height: 1.5; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th { background: #21262d; color: #f0f6fc; padding: 10px 14px; text-align: left; border: 1px solid #30363d; font-weight: 600; }
+td { padding: 8px 14px; border: 1px solid #30363d; }
+tr:nth-child(even) { background: #161b22; }
+.tip { background: #0d1d30; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.exercise { background: #0d2818; border-left: 4px solid #238636; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.svg-diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; text-align: center; }
+.svg-diagram svg { max-width: 100%; height: auto; }
+.ascii { background: #161b22; border: 1px solid #30363d; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82em; line-height: 1.5; padding: 16px; overflow-x: auto; margin: 16px 0; white-space: pre; border-radius: 6px; }
+ul, ol { margin: 8px 0 8px 24px; }
+li { margin: 4px 0; }
+a { color: #58a6ff; }
+.keyword { color: #ff7b72; } .string { color: #a5d6ff; } .comment { color: #8b949e; } .cmd { color: #79c0ff; }
+.footer { text-align: center; color: #484f58; margin-top: 48px; padding: 24px 0; border-top: 1px solid #21262d; font-size: 0.9em; }
+.footer a { color: #58a6ff; }
+.next-prev { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 16px; border-top: 1px solid #21262d; }
+.next-prev a { padding: 8px 16px; background: #21262d; border-radius: 6px; }
+.tag { display: inline-block; background: #388bfd22; color: #58a6ff; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+.badge-blue { background: #1f6feb33; color: #58a6ff; }
+.badge-green { background: #23863633; color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="06-GraphRAG与高级RAG.html">&larr; 06-GraphRAG与高级RAG</a><span>RAG基础设施</span><a href="index.html">index &rarr;</a></div>
+<div class="container">
+
+<h1>📊 RAG 评测</h1>
+
+<h2>1. 为什么需要专门的 RAG 评测</h2>
+<p>RAG 系统的质量取决于两个独立的环节：<strong>检索质量</strong>和<strong>生成质量</strong>。简单的端到端评测无法定位问题所在——是检索不到，还是检索到了但 LLM 没用好？</p>
+<p>RAG评测的核心挑战在于：传统的NLP评测指标（如BLEU、ROUGE）只衡量文本表面的n-gram重叠，无法捕捉"回答是否基于检索结果"这一RAG系统的核心质量维度。RAG系统需要一套专属的评测体系，能够同时评估检索管道和生成管道的质量，并且能够诊断出问题出现在哪个环节。</p>
+
+<div class="tip"><strong>通俗类比：</strong>RAG评测就像"开卷考试的评分标准"——不仅要看"答对了没有"（正确性），还要看"是不是根据参考资料答的"（Faithfulness）、"参考资料找得全不全"（Recall）、"最相关的资料排在第几位"（Ranking）、"整体排序质量如何"（NDCG）。评卷老师不只看答案对不对，还要看引用是否正确、有没有遗漏要点。</div>
+
+<h3>1.1 RAG评测与传统NLP评测的区别</h3>
+<table>
+<tr><th>维度</th><th>传统NLP评测</th><th>RAG评测</th></tr>
+<tr><td>评测对象</td><td>单个模型</td><td>检索+生成联合系统</td></tr>
+<tr><td>核心指标</td><td>BLEU、ROUGE、BERTScore</td><td>Faithfulness、Recall@K、Answer Relevancy</td></tr>
+<tr><td>参考答案</td><td>固定ground truth</td><td>可能有多个正确答案</td></tr>
+<tr><td>诊断能力</td><td>只知最终结果</td><td>可分离检索/生成问题</td></tr>
+<tr><td>成本</td><td>低成本（自动指标）</td><td>中等（LLM-as-Judge）</td></tr>
+</table>
+
+<h2>2. RAGAS 评测框架</h2>
+<p>RAGAS（Retrieval Augmented Generation Assessment）是最主流的RAG自动化评测框架，由 Exploding Gradients 团队于2023年提出。它使用LLM-as-Judge范式，通过GPT-4等强模型自动评分，无需人工标注即可获得可靠的评测结果。</p>
+
+<table>
+<tr><th>指标</th><th>含义</th><th>计算方式</th><th>值域</th></tr>
+<tr><td>Context Relevancy</td><td>检索结果与问题的相关性</td><td>LLM 评判：检索片段中与问题相关的比例</td><td>[0, 1]</td></tr>
+<tr><td>Context Precision</td><td>检索结果中相关文档的比例</td><td>LLM 评判：相关文档在Top-K中的排名</td><td>[0, 1]</td></tr>
+<tr><td>Faithfulness</td><td>回答是否忠实于检索结果</td><td>LLM 评判：回答中可被检索结果支持的声明比例</td><td>[0, 1]</td></tr>
+<tr><td>Answer Relevancy</td><td>回答与问题的相关性</td><td>LLM 生成问题反推 → 与原问题余弦相似度</td><td>[0, 1]</td></tr>
+<tr><td>Answer Correctness</td><td>回答的正确性</td><td>与 ground truth 对比（F1+语义相似度）</td><td>[0, 1]</td></tr>
+</table>
+
+<div class="deep"><strong>深入探讨——RAGAS的评分机制：</strong>RAGAS的核心创新在于用LLM-as-Judge实现自动化评测，无需昂贵的人工标注。具体流程：1）Faithfulness评分：将回答分解为独立声明（claims），逐一检查每个声明是否能被检索结果支持。例如回答"Python是1991年发布的面向对象语言"可拆分为"Python是1991年发布的"和"Python是面向对象语言"两个声明。2）Answer Relevancy评分：对回答让LLM反推生成3个可能的原始问题，计算这些问题与实际问题的平均余弦相似度。这种方法巧妙地避免了需要ground truth答案的问题。论文引用：Es et al., "RAGAS: Automated Evaluation of Retrieval Augmented Generation", NeurIPS 2023 Workshop.</div>
+
+<h3>2.1 RAGAS评测流程详解</h3>
+<div class="ascii">
+RAGAS评测数据流:
+
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│  Question    │────→│  RAG System  │────→│  Answer     │
+│  (问题)      │     │  (待评测系统) │     │  (回答)     │
+└──────┬──────┘     └──────┬───────┘     └──────┬──────┘
+       │                   │                     │
+       │            ┌──────┴───────┐             │
+       │            │  Retrieved   │             │
+       │            │  Contexts    │             │
+       │            │  (检索结果)  │             │
+       │            └──────┬───────┘             │
+       │                   │                     │
+       ▼                   ▼                     ▼
+┌──────────────────────────────────────────────────────┐
+│                    LLM Judge (GPT-4)                  │
+│  ┌──────────────┐ ┌──────────┐ ┌──────────────────┐  │
+│  │ Faithfulness  │ │ Context  │ │ Answer Relevancy │  │
+│  │ (回答忠诚度)  │ │ Precision│ │ (回答相关性)     │  │
+│  └──────────────┘ └──────────┘ └──────────────────┘  │
+└──────────────────────────────────────────────────────┘
+                         │
+                         ▼
+              ┌──────────────────┐
+              │   评测报告        │
+              │   (各维度分数)    │
+              └──────────────────┘
+</div>
+
+<h2>3. 检索质量指标</h2>
+<table>
+<tr><th>指标</th><th>公式</th><th>含义</th><th>敏感点</th></tr>
+<tr><td>Recall@K</td><td>|相关文档∩Top-K| / |全部相关文档|</td><td>K 个结果中有多少相关文档</td><td>K值选择：K越大越宽松</td></tr>
+<tr><td>Precision@K</td><td>|相关文档∩Top-K| / K</td><td>Top-K中相关文档的比例</td><td>结果的"纯度"</td></tr>
+<tr><td>MRR</td><td>(1/n) Σ(1/rank_i)</td><td>第一个相关结果的排名</td><td>只关注第一个相关结果</td></tr>
+<tr><td>NDCG@K</td><td>DCG@K / IDCG@K</td><td>考虑排名位置的检索质量</td><td>排序质量的全面评估</td></tr>
+<tr><td>MAP</td><td>Average Precision across queries</td><td>多查询的平均精确率</td><td>整体检索系统质量</td></tr>
+<tr><td>Hit Rate</td><td>至少一个相关结果被召回的比例</td><td>最基本的检索成功率</td><td>是否能找到相关内容</td></tr>
+</table>
+
+<h3>3.1 指标计算实例</h3>
+<p>假设查询"如何微调大语言模型"，知识库中有3篇相关文档（D1, D2, D3），系统返回Top-5结果为[D4, D1, D5, D2, D6]：</p>
+
+<div class="ascii">
+检索结果分析:
+
+返回结果:  D4(不相关)  D1(相关✓)  D5(不相关)  D2(相关✓)  D6(不相关)
+排名:        1           2           3           4           5
+
+Recall@5 = 2/3 = 0.667  (3篇相关文档召回了2篇)
+Precision@5 = 2/5 = 0.40 (5个结果中2个相关)
+MRR = 1/2 = 0.50         (第一个相关结果排第2)
+Hit Rate = 1.0            (至少找到1个相关结果)
+
+NDCG@5计算:
+  DCG@5 = 0/1 + 1/log₂(3) + 0/log₂(4) + 1/log₂(5) + 0/log₂(6)
+        = 0 + 0.631 + 0 + 0.431 + 0 = 1.062
+  IDCG@5 = 1/1 + 1/log₂(3) + 1/log₂(4) + 0 + 0 = 1 + 0.631 + 0.5 = 2.131
+  NDCG@5 = 1.062 / 2.131 = 0.498
+</div>
+
+<h3>3.2 指标选择指南</h3>
+<table>
+<tr><th>应用场景</th><th>推荐指标</th><th>原因</th></tr>
+<tr><td>RAG系统评测</td><td>Recall@10 + MRR</td><td>保证召回率，同时关注排名</td></tr>
+<tr><td>搜索引擎评测</td><td>NDCG@10</td><td>全面评估排序质量</td></tr>
+<tr><td>快速验证</td><td>Hit Rate</td><td>最简单的二元判断</td></tr>
+<tr><td>学术研究</td><td>MAP + NDCG</td><td>标准基准，便于对比</td></tr>
+<tr><td>生产监控</td><td>Recall@5 + P99延迟</td><td>实时质量+性能监控</td></tr>
+</table>
+
+<div class="tip"><strong>通俗类比：</strong>Recall@K就像"渔网的孔大小"——K越大（网越大），捞到的鱼越多，但可能捞到很多不需要的。Precision@K就像"鱼的质量"——10条鱼里8条是好鱼就很高。MRR像"第一个好结果出现的位置"——排在第1位比排在第10位好得多。NDCG则是"综合评分"——同时考虑捞到了多少好鱼、好鱼排在什么位置。</div>
+
+<h2>4. 评测流程</h2>
+<div class="svg-diagram"><svg viewBox="0 0 700 460" xmlns="http://www.w3.org/2000/svg" style="font-family:'Cascadia Code','Fira Code',monospace">
+<defs><marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#8b949e"/></marker></defs>
+<!-- Step 1: 构建评测集 -->
+<rect x="200" y="10" width="300" height="34" rx="8" fill="#1f6feb33" stroke="#58a6ff" stroke-width="1.5"/>
+<text x="350" y="33" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold">① 构建评测集</text>
+<rect x="150" y="50" width="400" height="30" rx="6" fill="#161b22" stroke="#30363d"/>
+<text x="350" y="70" text-anchor="middle" fill="#c9d1d9" font-size="12">问题 + Ground Truth 答案 + 相关文档</text>
+<line x1="350" y1="80" x2="350" y2="100" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arr2)"/>
+<!-- Step 2: 运行 RAG 管道 -->
+<rect x="200" y="102" width="300" height="34" rx="8" fill="#0d1d30" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="350" y="125" text-anchor="middle" fill="#22d3ee" font-size="14" font-weight="bold">② 运行 RAG 管道</text>
+<rect x="150" y="142" width="400" height="30" rx="6" fill="#161b22" stroke="#30363d"/>
+<text x="350" y="162" text-anchor="middle" fill="#c9d1d9" font-size="12">检索 → 生成 → 收集结果</text>
+<line x1="350" y1="172" x2="350" y2="192" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arr2)"/>
+<!-- Step 3: 计算指标 -->
+<rect x="200" y="194" width="300" height="34" rx="8" fill="#0d2818" stroke="#34d399" stroke-width="1.5"/>
+<text x="350" y="217" text-anchor="middle" fill="#34d399" font-size="14" font-weight="bold">③ 计算指标</text>
+<!-- 检索指标 (blue) -->
+<rect x="60" y="234" width="180" height="54" rx="6" fill="#161b22" stroke="#58a6ff"/>
+<text x="150" y="252" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="bold">检索指标</text>
+<text x="150" y="268" text-anchor="middle" fill="#c9d1d9" font-size="10">Recall@K, MRR</text>
+<text x="150" y="282" text-anchor="middle" fill="#c9d1d9" font-size="10">NDCG, Precision</text>
+<!-- 生成指标 (violet) -->
+<rect x="260" y="234" width="180" height="54" rx="6" fill="#161b22" stroke="#a78bfa"/>
+<text x="350" y="252" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="bold">生成指标</text>
+<text x="350" y="268" text-anchor="middle" fill="#c9d1d9" font-size="10">Faithfulness</text>
+<text x="350" y="282" text-anchor="middle" fill="#c9d1d9" font-size="10">Relevancy</text>
+<!-- 端到端 (amber) -->
+<rect x="460" y="234" width="180" height="54" rx="6" fill="#161b22" stroke="#fbbf24"/>
+<text x="550" y="252" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="bold">端到端</text>
+<text x="550" y="268" text-anchor="middle" fill="#c9d1d9" font-size="10">Answer Correctness</text>
+<line x1="350" y1="288" x2="350" y2="308" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arr2)"/>
+<!-- Step 4: 分析与优化 -->
+<rect x="200" y="310" width="300" height="34" rx="8" fill="#2d1b00" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="350" y="333" text-anchor="middle" fill="#fbbf24" font-size="14" font-weight="bold">④ 分析与优化</text>
+<!-- 检索差 → (cyan) -->
+<rect x="60" y="350" width="180" height="54" rx="6" fill="#161b22" stroke="#22d3ee"/>
+<text x="150" y="368" text-anchor="middle" fill="#22d3ee" font-size="10" font-weight="bold">检索差 →</text>
+<text x="150" y="384" text-anchor="middle" fill="#c9d1d9" font-size="10">优化 Embedding</text>
+<text x="150" y="398" text-anchor="middle" fill="#c9d1d9" font-size="10">/ Chunking</text>
+<!-- 生成差 → (violet) -->
+<rect x="260" y="350" width="180" height="54" rx="6" fill="#161b22" stroke="#a78bfa"/>
+<text x="350" y="368" text-anchor="middle" fill="#a78bfa" font-size="10" font-weight="bold">生成差 →</text>
+<text x="350" y="384" text-anchor="middle" fill="#c9d1d9" font-size="10">优化 Prompt</text>
+<text x="350" y="398" text-anchor="middle" fill="#c9d1d9" font-size="10">/ 换模型</text>
+<!-- 端到端差 → (amber) -->
+<rect x="460" y="350" width="180" height="54" rx="6" fill="#161b22" stroke="#fbbf24"/>
+<text x="550" y="368" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="bold">端到端差 →</text>
+<text x="550" y="384" text-anchor="middle" fill="#c9d1d9" font-size="10">检查数据质量</text>
+</svg></div>
+
+<h2>5. 评测数据集构建</h2>
+<ul>
+<li><strong>自动生成</strong>：用 LLM 从文档生成问题和答案</li>
+<li><strong>人工标注</strong>：领域专家标注相关文档和正确答案</li>
+<li><strong>对抗性样本</strong>：故意构造模糊或误导性问题</li>
+</ul>
+
+<h3>5.1 自动构建评测集的方法</h3>
+<p>使用LLM自动生成评测集是最高效的方法，核心流程如下：</p>
+
+<pre><code><span class="keyword">from</span> langchain.llms <span class="keyword">import</span> OpenAI
+<span class="keyword">from</span> langchain.prompts <span class="keyword">import</span> PromptTemplate
+
+<span class="comment"># 评测集自动构建示例</span>
+template = <span class="string">"""基于以下文档片段，生成3个不同类型的问题和对应答案：
+文档: {context}
+
+要求:
+1. 问题1: 事实性问题（直接从文档中找到答案）
+2. 问题2: 推理性问题（需要综合多个信息点）
+3. 问题3: 比较性问题（对比文档中的不同概念）
+
+输出JSON格式:
+[{{"question": "...", "answer": "...", "type": "fact/inference/comparison"}}]"""</span>
+
+prompt = PromptTemplate(template=template, input_variables=[<span class="string">"context"</span>])
+llm = OpenAI(temperature=0.3)
+
+<span class="comment"># 对每个chunk生成问题</span>
+eval_dataset = []
+<span class="keyword">for</span> chunk <span class="keyword">in</span> document_chunks:
+    result = llm.invoke(prompt.format(context=chunk.text))
+    eval_dataset.extend(parse_json(result))
+
+print(f<span class="string">"生成了 {len(eval_dataset)} 个评测样本"</span>)
+</code></pre>
+
+<div class="ascii">
+自动评测集构建流程:
+
+文档分块                    LLM生成                   人工审核
+┌─────────┐              ┌──────────┐              ┌──────────┐
+│ Chunk 1 │──→ Q1, A1 ──→│ 质量检查 │──→ 保留     │ 抽样验证 │
+│ Chunk 2 │──→ Q2, A2 ──→│ (过滤    │──→ 保留     │ (10%抽样)│
+│ Chunk 3 │──→ Q3, A3 ──→│  低质量) │──→ 丢弃     │          │
+│ ...     │──→ ...     ──→│          │              │          │
+└─────────┘              └──────────┘              └──────────┘
+
+关键参数:
+  - 每个chunk生成1-3个问题
+  - 问题类型覆盖: 事实性、推理性、比较性、多跳问题
+  - 最终评测集: 100-500个问题（95%置信区间，±5%误差）
+</div>
+
+<h3>5.2 评测集质量保证</h3>
+<table>
+<tr><th>质量维度</th><th>检查方法</th><th>通过标准</th></tr>
+<tr><td>问题质量</td><td>LLM判读+人工抽样</td><td>问题清晰、可回答、不模糊</td></tr>
+<tr><td>答案正确性</td><td>多标注者一致性</td><td>Kappa系数 > 0.7</td></tr>
+<tr><td>相关文档标注</td><td>多轮检索+人工确认</td><td>Recall > 0.95</td></tr>
+<tr><td>难度分布</td><td>统计分析</td><td>简单:中等:困难 = 3:5:2</td></tr>
+<tr><td>多样性</td><td>主题聚类</td><td>覆盖所有业务场景</td></tr>
+</table>
+
+<div class="warn"><strong>常见误区：</strong>1) 只看正确性不看Faithfulness——RAG的核心价值是"基于事实回答"，如果LLM不看检索结果就回答（幻觉），检索做得再好也没用；2) 用人工评测代替自动评测——人工评测成本高且不可复现，RAGAS等自动评测框架更高效；3) 忽略检索评测和生成评测的分离——检索质量（Recall@K）和生成质量（Faithfulness）要分开评测，才能定位问题；4) 评测集太小——少于50个问题的评测集方差太大，结果不可信；5) 忽略边界情况——需要专门测试"无答案"问题（正确答案应该是"无法回答"）。</div>
+
+<h2>6. 评测驱动的优化循环</h2>
+<div class="tip">
+<strong>核心理念</strong>：RAG 优化应该是一个 <strong>评测驱动的迭代过程</strong>，而非凭直觉调参。每次改动（换 Embedding、调 Chunk Size、加 Reranker）都应该通过评测指标验证效果。
+</div>
+
+<h3>6.1 优化优先级矩阵</h3>
+<table>
+<tr><th>问题诊断</th><th>症状表现</th><th>优化方向</th><th>预期提升</th></tr>
+<tr><td>检索召回率低</td><td>Recall@10 < 0.6</td><td>换Embedding模型/优化Chunk策略</td><td>+15-30%</td></tr>
+<tr><td>检索精度低</td><td>Precision@5 < 0.4</td><td>加Reranker/优化元数据过滤</td><td>+10-20%</td></tr>
+<tr><td>生成不忠实</td><td>Faithfulness < 0.7</td><td>优化Prompt/换更强LLM</td><td>+10-25%</td></tr>
+<tr><td>回答不相关</td><td>Answer Relevancy < 0.6</td><td>优化Prompt模板/加Query改写</td><td>+10-20%</td></tr>
+<tr><td>延迟过高</td><td>P99 > 3s</td><td>优化索引/加缓存/异步处理</td><td>-50-80%</td></tr>
+</table>
+
+<h3>6.2 A/B测试框架</h3>
+<div class="ascii">
+A/B测试评测流程:
+
+                ┌─ 版本A (当前基线)
+用户查询 ──────┤
+                └─ 版本B (优化后)
+
+评测步骤:
+  1. 准备评测集 (≥100个问题)
+  2. 分别用版本A和版本B运行RAG管道
+  3. 收集两组的: 检索结果 + 生成回答
+  4. 用RAGAS计算各维度分数
+  5. 统计显著性检验 (配对t检验, p<0.05)
+  6. 如果版本B显著优于A → 上线版本B
+
+注意事项:
+  - 控制变量: 每次只改一个因素
+  - 多次测试: 取3次平均值消除随机性
+  - 关注分层: 按问题难度/类型分别统计
+</div>
+
+<pre><code><span class="keyword">from</span> scipy <span class="keyword">import</span> stats
+<span class="keyword">import</span> numpy <span class="keyword">as</span> np
+
+<span class="comment"># RAG A/B测试统计检验示例</span>
+<span class="comment"># scores_A: 版本A的Faithfulness分数列表</span>
+<span class="comment"># scores_B: 版本B的Faithfulness分数列表</span>
+scores_A = np.array([0.78, 0.82, 0.75, 0.80, 0.77])
+scores_B = np.array([0.85, 0.88, 0.82, 0.86, 0.84])
+
+<span class="comment"># 配对t检验</span>
+t_stat, p_value = stats.ttest_rel(scores_A, scores_B)
+print(f<span class="string">"t统计量: {t_stat:.4f}"</span>)
+print(f<span class="string">"p值: {p_value:.4f}"</span>)
+print(f<span class="string">"版本A均值: {scores_A.mean():.4f}"</span>)
+print(f<span class="string">"版本B均值: {scores_B.mean():.4f}"</span>)
+print(f<span class="string">"提升: {(scores_B.mean()-scores_A.mean())/scores_A.mean()*100:.1f}%"</span>)
+
+<span class="keyword">if</span> p_value < 0.05:
+    print(<span class="string">"✓ 版本B显著优于版本A (p<0.05)"</span>)
+<span class="keyword">else</span>:
+    print(<span class="string">"✗ 差异不显著，需要更多样本"</span>)
+</code></pre>
+
+<h2>7. 主流评测工具对比</h2>
+<table>
+<tr><th>工具</th><th>特点</th><th>指标</th><th>成本</th><th>适用场景</th></tr>
+<tr><td>RAGAS</td><td>最主流，LLM-as-Judge</td><td>5个核心指标</td><td>中（调用LLM API）</td><td>RAG系统常规评测</td></tr>
+<tr><td>DeepEval</td><td>功能全面，支持多种评测</td><td>14+指标</td><td>中</td><td>深度评测+回归测试</td></tr>
+<tr><td>LangSmith</td><td>LangChain生态集成</td><td>自定义+内置</td><td>高（订阅制）</td><td>LangChain项目</td></tr>
+<tr><td>TruLens</td><td>关注安全+可解释性</td><td>反馈函数</td><td>低</td><td>安全敏感场景</td></tr>
+<tr><td>自建评测</td><td>完全可控</td><td>自定义</td><td>高（开发成本）</td><td>特殊需求</td></tr>
+</table>
+
+<div class="tip"><strong>通俗类比：</strong>选评测工具就像选考试系统——RAGAS是"标准化考试"（题目和评分标准固定，适合对比），DeepEval是"综合素质测评"（测得多但更复杂），LangSmith是"学校内部考试"（和LangChain绑定），自建评测是"自主命题"（完全灵活但开发成本高）。新手建议从RAGAS开始，因为它最成熟且社区支持最好。</div>
+
+<h2>8. 生产环境评测策略</h2>
+
+<h3>8.1 分层评测体系</h3>
+<div class="ascii">
+生产环境分层评测:
+
+┌──────────────────────────────────────────────┐
+│         Layer 1: 离线评测 (每日/每次发布)       │
+│  • 全量评测集 (200+问题)                       │
+│  • 所有指标: Recall, MRR, Faithfulness, ...    │
+│  • 触发: CI/CD pipeline, 模型更新              │
+├──────────────────────────────────────────────┤
+│         Layer 2: 在线抽检 (每小时)             │
+│  • 随机抽样 1% 查询                            │
+│  • LLM-as-Judge 自动评分                       │
+│  • 监控: Faithfulness, Answer Relevancy        │
+├──────────────────────────────────────────────┤
+│         Layer 3: 用户反馈 (实时)               │
+│  • 点赞/踩, 反馈表单                           │
+│  • 监控: 满意度, 有用性                        │
+│  • 触发: 异常告警                              │
+└──────────────────────────────────────────────┘
+</div>
+
+<h3>8.2 告警阈值设定</h3>
+<table>
+<tr><th>指标</th><th>健康值</th><th>警告阈值</th><th>严重阈值</th><th>处理建议</th></tr>
+<tr><td>Recall@10</td><td>> 0.85</td><td>< 0.80</td><td>< 0.70</td><td>检查Embedding/索引</td></tr>
+<tr><td>Faithfulness</td><td>> 0.80</td><td>< 0.75</td><td>< 0.60</td><td>检查Prompt/模型</td></tr>
+<tr><td>Answer Relevancy</td><td>> 0.75</td><td>< 0.70</td><td>< 0.55</td><td>优化Prompt模板</td></tr>
+<tr><td>延迟 P99</td><td>< 2s</td><td>> 3s</td><td>> 5s</td><td>优化索引/缓存</td></tr>
+<tr><td>用户满意度</td><td>> 80%</td><td>< 70%</td><td>< 60%</td><td>全面排查</td></tr>
+</table>
+
+<div class="deep"><strong>深入探讨——评测指标的数学基础：</strong>NDCG（Normalized Discounted Cumulative Gain）的计算公式为：NDCG@K = DCG@K / IDCG@K，其中DCG@K = Σᵢ(2^relᵢ - 1) / log₂(i+1)，IDCG@K是理想排序下的DCG。relᵢ是第i个结果的相关性等级（通常0/1二元或多级0-3）。NDCG的核心思想是：排在前面的结果权重更大（因为用户更可能看到），一个相关文档排在第1位的贡献远大于排在第100位。与Recall@K不同，NDCG同时考虑了"找到多少"和"排在什么位置"两个维度，是信息检索领域最权威的评测指标。另一个重要指标MRR（Mean Reciprocal Rank）= (1/n)Σ(1/rankᵢ)，它只关注第一个相关结果的排名，适合"只需要一个正确答案"的场景。参考文献：Manning et al., "Introduction to Information Retrieval", Cambridge University Press, 2008.</div>
+
+<h2>术语速查表</h2>
+<table>
+<tr><th>术语</th><th>含义</th><th>典型值</th></tr>
+<tr><td>RAGAS</td><td>RAG Assessment，RAG 评测框架</td><td>—</td></tr>
+<tr><td>Faithfulness</td><td>回答忠实于检索结果的程度</td><td>> 0.8 为优</td></tr>
+<tr><td>Recall@K</td><td>前 K 个结果中的召回率</td><td>> 0.85 为优</td></tr>
+<tr><td>MRR</td><td>Mean Reciprocal Rank</td><td>> 0.5 为良</td></tr>
+<tr><td>NDCG</td><td>Normalized Discounted Cumulative Gain</td><td>> 0.7 为良</td></tr>
+<tr><td>LLM-as-Judge</td><td>用LLM自动评判回答质量</td><td>GPT-4可靠性最高</td></tr>
+<tr><td>Ground Truth</td><td>人工标注的标准答案</td><td>—</td></tr>
+</table>
+
+<h2>练习题</h2>
+<div class="tip"><strong>向前串联：</strong>
+为什么需要专门的 RAG 评测的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<pre><code class="language-python"># 为什么需要专门的 RAG 评测 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="tip"><strong>相关章节：</strong>
+为什么需要专门的 RAG 评测与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+<div class="deep"><strong>📊 RAG 评测的技术原理与深度分析：</strong>
+<strong>核心概念</strong>：📊 RAG 评测是向量数据库与RAG领域的关键技术方向，其理论基础涉及信息论、优化理论和系统工程的交叉。
+<strong>推导</strong>：从信息论角度，任何信息处理系统的吞吐量受限于信道容量——Shannon定理指出C=B×log₂(1+S/N)，
+其中B为带宽、S/N为信噪比。在📊 RAG 评测的语境下，"信道"可以理解为模型的上下文窗口或推理管线，
+"信噪比"对应有用信息与噪声（无关上下文、冗余计算）的比例。
+<strong>为什么</strong>这很重要？因为理解📊 RAG 评测的理论限制，才能在工程实践中做出正确的权衡——
+盲目追求指标上限往往导致过度设计，而理解根本约束才能找到最高效的优化路径。
+从<strong>工程实践</strong>看，📊 RAG 评测的优化通常遵循"先测量、再分析、后优化"的循环：
+首先建立完善的评测基准（覆盖质量、延迟、成本三个维度），然后通过profiling定位瓶颈环节，
+最后针对性地优化——是计算受限就优化算法，是内存受限就优化数据布局，是通信受限就优化网络拓扑。
+这一系统化方法论适用于向量数据库与RAG领域的所有技术问题。</div>
+<div class="tip"><strong>相关章节：</strong>
+为什么需要专门的 RAG 评测与以下内容密切相关：<a href="01-向量检索基础.html">01-向量检索基础</a> | <a href="02-ANN算法详解.html">02-ANN算法详解</a> | <a href="03-向量数据库选型.html">03-向量数据库选型</a>。建议结合学习。
+</div>
+<div class="exercise">
+<strong>练习 1（基础）</strong>：使用 RAGAS 对你的 RAG 系统进行评测，找出最薄弱的环节（检索还是生成）。<br><br>
+<strong>练习 2（进阶）</strong>：构建一个包含 50 个问题的评测集，对比 Dense Retrieval 和 Hybrid Search 的 Recall@5 差异。<br><br>
+<strong>练习 3（高级）</strong>：设计一个A/B测试方案，对比不同Chunk Size（256/512/1024 tokens）对RAG质量的影响。记录每种配置的Recall@10、Faithfulness和延迟P99，分析最优配置。<br><br>
+<strong>练习 4（实战）</strong>：实现一个自动化评测pipeline：输入为RAG系统URL + 评测集JSON，输出为各维度分数+可视化报告。要求支持：1）批量评测 2）分层统计 3）异常结果高亮。
+</div>
+
+<h2>学习路径</h2>
+<div class="ascii">
+RAG评测学习路径:
+
+Week 1-2: 基础概念
+  ├── 理解RAG评测的必要性
+  ├── 掌握核心指标: Recall, MRR, NDCG, Faithfulness
+  └── 实践: 手动计算3个查询的指标
+
+Week 3-4: 工具使用
+  ├── 安装RAGAS, 了解API
+  ├── 构建小型评测集 (50问题)
+  └── 实践: 对自己的RAG系统做首次评测
+
+Week 5-6: 深度优化
+  ├── 诊断检索vs生成问题
+  ├── A/B测试不同配置
+  └── 实践: 将Faithfulness提升10%
+
+Week 7-8: 生产化
+  ├── 搭建分层评测体系
+  ├── 设置告警阈值
+  └── 实践: 实现每日自动评测报告
+</div>
+
+<h2>9. RAG评测常见陷阱与反模式</h2>
+
+<div class="warn"><strong>评测反模式警告：</strong>1) <strong>数据泄露</strong>——用训练Embedding模型的同一批数据做评测，导致虚高的Recall分数。正确做法是严格分离训练集和测试集，时间切分优于随机切分。2) <strong>指标单一化</strong>——只看Recall不看Faithfulness，可能优化出"检索好但幻觉严重"的系统。3) <strong>评测环境不一致</strong>——开发环境用GPT-4评测，生产环境用GPT-3.5，导致评测结果不可复现。4) <strong>忽略成本指标</strong>——Faithfulness从0.8提升到0.85需要从GPT-3.5升级到GPT-4，成本增加10倍但用户可能感知不到差异。5) <strong>评测集过时</strong>——文档更新后不更新评测集，导致评测结果无法反映当前系统质量。</div>
+
+<h3>9.1 评测指标间的权衡</h3>
+<table>
+<tr><th>权衡维度</th><th>场景A</th><th>场景B</th><th>建议</th></tr>
+<tr><td>Recall vs 延迟</td><td>Top-20高召回但慢</td><td>Top-5低召回但快</td><td>Reranker精排Top-20到Top-3</td></tr>
+<tr><td>Faithfulness vs 完整性</td><td>只回答能验证的事实</td><td>综合推理回答</td><td>高风险场景选前者</td></tr>
+<tr><td>自动化 vs 人工评测</td><td>RAGAS自动快但有偏差</td><td>人工准但慢且贵</td><td>自动为主+10%人工校验</td></tr>
+<tr><td>通用 vs 领域评测</td><td>标准评测集可对比</td><td>领域评测集更准确</td><td>两者都做，领域为主</td></tr>
+</table>
+
+<h3>9.2 LLM-as-Judge的最佳实践</h3>
+<p>使用LLM-as-Judge进行自动评测时，需要注意以下关键点以确保评测结果的可靠性：</p>
+<ul>
+<li><strong>模型选择</strong>：Judge模型应强于被评测的生成模型。如果生成用GPT-3.5，Judge至少用GPT-4或Claude-3.5</li>
+<li><strong>温度设置</strong>：Judge的温度应设为0，确保结果的确定性和可复现性</li>
+<li><strong>Prompt设计</strong>：评分标准要明确、可量化。避免模糊表述如"回答质量好"，而是"回答中每个事实声明都能被检索结果支持"</li>
+<li><strong>多次评分取平均</strong>：LLM评分有随机性，建议每个样本评分3次取多数投票或平均值</li>
+<li><strong>人机一致性验证</strong>：随机抽取50-100个样本做人工评测，计算与自动评分的Kappa系数，应>0.6</li>
+</ul>
+
+<div class="tip"><strong>通俗类比：</strong>LLM-as-Judge就像"请专家远程打分"——专家（GPT-4）根据评分标准（Prompt）对答案打分。但专家也有主观性，所以要：1）请比答题者更强的专家（Judge > Generator）；2）打分标准要明确不能模糊（Prompt要精确）；3）同一篇答案让专家打3次分取平均（多次评分）；4）偶尔抽查确认专家打分靠谱（人机一致性验证）。</div>
+
+<h2>10. 评测结果可视化与报告</h2>
+<div class="ascii">
+评测报告模板:
+
+┌──────────────────────────────────────────────────┐
+│           RAG系统评测报告 2026-06-28              │
+├──────────────────────────────────────────────────┤
+│  系统信息:                                        │
+│  - Embedding: text-embedding-3-large (3072维)     │
+│  - LLM: GPT-4o                                    │
+│  - Chunk: 512 tokens, overlap 64                  │
+│  - 向量数据库: Qdrant                              │
+├──────────────────────────────────────────────────┤
+│  检索质量 (Target: Recall@10>0.85)                │
+│  ┌────────────────────────────────────────┐      │
+│  │  Recall@5:   0.78 ████████░░  (⚠ 偏低) │      │
+│  │  Recall@10:  0.86 █████████░  (✓ 达标) │      │
+│  │  MRR:        0.62 ██████░░░░  (✓ 达标) │      │
+│  │  NDCG@10:    0.71 ███████░░░  (✓ 达标) │      │
+│  └────────────────────────────────────────┘      │
+├──────────────────────────────────────────────────┤
+│  生成质量 (Target: Faithfulness>0.80)             │
+│  ┌────────────────────────────────────────┐      │
+│  │  Faithfulness:    0.82 █████████░ (✓)   │      │
+│  │  Answer Relevancy: 0.77 ████████░░ (⚠)  │      │
+│  │  Answer Correctness: 0.74 ███████░░░(⚠) │      │
+│  └────────────────────────────────────────┘      │
+├──────────────────────────────────────────────────┤
+│  优化建议:                                        │
+│  1. Recall@5偏低 → 尝试增大Top-K到15             │
+│  2. Answer Relevancy偏低 → 优化Prompt模板         │
+│  3. Answer Correctness偏低 → 检查知识库覆盖度     │
+└──────────────────────────────────────────────────┘
+</div>
+
+<h2>11. RAG评测进阶：多维度诊断框架</h2>
+
+<h3>11.1 错误分类与根因分析</h3>
+<p>当RAG系统表现不佳时，需要系统性地分类错误类型，找到根因。以下是常见的错误分类体系：</p>
+
+<table>
+<tr><th>错误类型</th><th>表现</th><th>根因</th><th>修复方法</th></tr>
+<tr><td>检索遗漏</td><td>相关文档未被召回</td><td>Embedding质量差/Chunk断裂</td><td>换模型/优化Chunk策略</td></tr>
+<tr><td>检索噪声</td><td>Top-K中大量不相关文档</td><td>查询太模糊/数据质量差</td><td>Query改写/数据清洗</td></tr>
+<tr><td>排序错位</td><td>相关文档在Top-K但排名靠后</td><td>缺乏Reranker</td><td>加Cross-Encoder精排</td></tr>
+<tr><td>忠实性缺失</td><td>回答不基于检索结果</td><td>LLM幻觉/Prompt不当</td><td>优化Prompt/换模型</td></tr>
+<tr><td>完整性不足</td><td>回答遗漏关键信息</td><td>Top-K太小/信息分散</td><td>增大K/多文档聚合</td></tr>
+<tr><td>时效性错误</td><td>回答基于过时信息</td><td>文档未及时更新</td><td>增量更新索引</td></tr>
+</table>
+
+<h3>11.2 评测数据增强策略</h3>
+<p>构建高质量评测集是RAG评测中最具挑战性的环节。以下是几种有效的数据增强策略：</p>
+<ul>
+<li><strong>Query扩展</strong>：对原始问题生成多个语义等价的变体。例如"如何训练大模型"可以扩展为"大模型训练方法"、"LLM微调指南"、"大规模语言模型的训练流程"。使用GPT-4生成，每个问题扩展5-10个变体</li>
+<li><strong>负样本构造</strong>：故意构造"无法回答"的问题，测试系统的拒识能力。例如"2025年诺贝尔文学奖得主是谁？"（假设知识库中无此信息），正确行为是回答"无法找到相关信息"</li>
+<li><strong>多跳问题</strong>：需要综合多个文档才能回答的问题，测试系统的多文档推理能力。例如"A公司和B公司的营收分别是多少？谁增长更快？"需要分别检索两家公司的数据再做比较</li>
+<li><strong>对抗性问题</strong>：容易误导LLM的问题，如"根据你的检索结果，Python是1990年发布的"（错误前提），正确行为是纠正错误前提</li>
+</ul>
+
+<div class="tip"><strong>通俗类比：</strong>构建评测集就像"出考试卷"——好的试卷不仅要考"标准题"（事实性问题），还要考"陷阱题"（对抗性问题）、"综合题"（多跳问题）、"判断题"（无法回答的问题）。一份只考标准题的试卷（只有事实性问题的评测集）无法全面评估学生（RAG系统）的真实水平。</div>
+
+<h2>交叉引用</h2>
+<p>本章内容与以下章节紧密相关：</p>
+<ul>
+<li><a href="01-向量检索基础.html">01-向量检索基础</a> — 理解向量检索原理，才能理解Recall@K等指标</li>
+<li><a href="03-向量数据库选型.html">03-向量数据库选型</a> — 数据库性能影响延迟指标</li>
+<li><a href="04-Embedding模型.html">04-Embedding模型</a> — Embedding质量直接影响检索Recall</li>
+<li><a href="06-GraphRAG与高级RAG.html">06-GraphRAG与高级RAG</a> — 高级RAG技术需要对应的评测方法</li>
+</ul>
+
+</div>
+<div class="footer"><p><a href="index.html">返回RAG基础设施总览</a> | <a href="../index.html">返回学习目录</a></p></div>
+</body>
+</html>

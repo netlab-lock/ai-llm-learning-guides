@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04 MoE架构与国产化 - GLM系列深度学习</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0f;color:#c8d6e5;font-family:'Segoe UI',system-ui,sans-serif;line-height:1.7}
+.container{max-width:1000px;margin:0 auto;padding:30px 20px}
+h1{color:#00d4aa;font-size:1.8em;margin-bottom:5px}
+h2{color:#00d4aa;font-size:1.3em;margin:30px 0 12px;border-bottom:1px solid #1e2030;padding-bottom:6px}
+h3{color:#00bcd4;font-size:1.1em;margin:20px 0 8px}
+.nav{margin-bottom:20px;font-size:.85em}.nav a{color:#00d4aa;text-decoration:none}
+pre{background:#0d0e14;border:1px solid #1e2030;border-radius:8px;padding:15px;overflow-x:auto;font-size:.83em;color:#8899aa;margin:12px 0}
+table{width:100%;border-collapse:collapse;margin:12px 0;font-size:.88em}
+th,td{border:1px solid #1e2030;padding:8px 12px;text-align:left}
+th{background:#12131a;color:#00d4aa}td{background:#0d0e14}
+a{color:#00d4aa;text-decoration:none}
+footer{text-align:center;color:#444;margin-top:40px;font-size:.8em}
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="container">
+<div class="nav"><a href="index.html">← 目录</a> | 04 MoE架构与国产化</div>
+<h1>GLM</h1>
+<p>GLM-5采用<strong>Mixture-of-Experts (MoE)</strong>架构，并首次在华为昇腾910C上完成大规模训练，实现了国产AI芯片的突破。</p>
+
+<h2>4.1 GLM-5 MoE 参数对比</h2><p>MoE架构的核心挑战在于负载均衡和专家利用率。GLM通过精心设计的路由策略和辅助损失函数，确保各专家的激活频率接近均匀分布，避免了"专家坍缩"问题。同时，高效的All-to-All通信机制使得专家并行能够在多GPU环境下实现接近线性的扩展效率。</p>
+<p>GLM的MoE（Mixture of Experts）架构通过条件计算实现了"大参数量、低计算量"的帕累托最优。路由网络根据输入特征动态选择最相关的专家子网络，每个token只激活部分专家进行计算。这种设计使得模型能够拥有更大的知识容量，同时保持与密集模型相当的推理成本。</p>
+
+
+<div class="tip"><strong>通俗类比：</strong>从工程实践看，1 GLM-5 MoE 参数对比就像运动员集训——系统性训练+定期考核+针对性补弱。这也是智谱AIGLM-4/5区别于竞品的关键设计之一。</div>
+<div class="warn"><strong>常见误区：</strong>GLM在4.1 GLM-5 Mo方面的误区是对齐训练只会让模型变安全。实际上对齐同时影响表达风格和创造力。GLM通过精心设计的"安全且有用"对齐数据集避免过度对齐。</div>
+<div class="deep"><strong>深入探讨：</strong>GLM在4.1 GLM-5 Mo方面的技术演进遵循验证-优化-规模化的三阶段路径。第一阶段通过小规模实验验证核心假设的可行性；第二阶段在中等规模上优化性能指标；第三阶段在大规模生产环境中部署并持续监控。每个阶段都有明确的质量门控标准。</div>
+<div class="ascii"><pre>MoE 混合专家架构
+输入 token ──▶ Router (门控网络)
+                    │
+          ┌────┬────┼────┬────┐
+          ▼    ▼    ▼    ▼    ▼
+        Expert Expert Expert Expert Expert
+         #1    #2    #3    #4    #5
+         0.1   0.4   0.05  0.4   0.05  ← 权重
+                │           │
+            w2×E2  +   w4×E4  ← 只计算Top-K</pre></div>
+<table><tr><th>MoE模型</th><th>总参数</th><th>激活参数</th><th>专家数</th><th>Top-K</th></tr>
+<tr><td>Mixtral 8x7B</td><td>46.7B</td><td>12.9B</td><td>8</td><td>2</td></tr>
+<tr><td>DeepSeek-V2</td><td>236B</td><td>21B</td><td>160</td><td>6</td></tr>
+<tr><td>DeepSeek-V3</td><td>671B</td><td>37B</td><td>256</td><td>8</td></tr></table>
+
+<table>
+<tr><th>模型</th><th>总参数</th><th>激活参数</th><th>专家数</th><th>Top-K</th></tr>
+<tr><td>GLM-5</td><td>745B</td><td>44B</td><td>128</td><td>4</td></tr>
+<tr><td>GLM-5.1</td><td>~750B</td><td>~42B</td><td>128</td><td>4</td></tr>
+<tr><td>GLM-5.2</td><td>753B</td><td>40B</td><td>128</td><td>4</td></tr>
+<tr><td>GLM-5-Turbo</td><td>优化</td><td>精简</td><td>减少</td><td>2-3</td></tr>
+<tr><td>DeepSeek-V3</td><td>671B</td><td>37B</td><td>256</td><td>8</td></tr>
+</table>
+
+<h2>4.2 MoE原理</h2>
+<p>4.2 MoE原理是GLM技术体系中的重要组成部分。从系统工程角度看，这一技术的实现需要平衡计算效率、内存占用和输出质量三个维度。GLM通过精心的架构设计和工程优化，在这三个维度上都达到了令人满意的平衡点。这种平衡能力是GLM技术成熟度的重要体现。</p>
+
+<h3>4.2 MoE原理的工程实践与性能优化</h3>
+<p>在实际工程应用中，4.2 MoE原理的实现需要在准确率、推理速度和资源消耗之间找到最优平衡。关键优化策略包括：(1)算子融合(Operator Fusion)将多个小kernel合并为一个大kernel，减少GPU启动开销和中间结果的显存读写；(2)混合精度计算在保持数值稳定性的前提下使用FP16/BF16，将显存占用降低约50%；(3)动态批处理(Dynamic Batching)根据请求的序列长度自适应调整batch大小，最大化GPU利用率。</p>
+
+
+<h3>4.2 MoE原理的最新研究进展与未来方向</h3>
+
+
+<h3>4.2 MoE原理的工程实践与性能优化（GLM视角1）</h3>
+<p>在实际工程应用中，4.2 MoE原理的实现需要在准确率、推理速度和资源消耗之间找到最优平衡。关键优化策略包括：(1)算子融合(Operator Fusion)将多个小kernel合并为一个大kernel，减少GPU启动开销和中间结果的显存读写；(2)混合精度计算在保持数值稳定性的前提下使用FP16/BF16，将显存占用降低约50%；(3)动态批处理(Dynamic Batching)根据请求的序列长度自适应调整batch大小，最大化GPU利用率。</p>
+
+
+<h3>4.2 MoE原理的最新研究进展与未来方向（GLM视角1）</h3>
+
+
+
+<div class="tip"><strong>通俗类比：</strong>理解2 MoE原理可以想象医院分诊台的场景：不是每个病人都看所有科室，导诊台(路由器)分配到对口专家。</div>
+<div class="warn"><strong>常见误区：</strong>GLM在4.1 GLM-5 MoE 参方面的一个重要误区是对齐训练只会让模型"变安全"。实际上对齐同时影响表达风格、详细程度和创造力。过度对齐会导致模型变得模板化。GLM通过精心设计的对齐数据集避免了这个问题。</div>
+<div class=<div class="deep"><strong>深入探讨：</strong>从MoE路由的数学原理看，GLM在4.1 GLM-5 Mo方面的门控函数为G(x)=softmax(W_g·x)。优化路由均衡性是提升MoE效率的关键。GLM通过动态偏置项实现无辅助损失负载均衡。</div>="ascii"><pre>MoE 混合专家架构
+输入 token ──▶ Router (门控网络)
+                    │
+          ┌────┬────┼────┬────┐
+          ▼    ▼    ▼    ▼    ▼
+        Expert Expert Expert Expert Expert
+         #1    #2    #3    #4    #5
+         0.1   0.4   0.05  0.4   0.05  ← 权重
+                │           │
+            w2×E2  +   w4×E4  ← 只计算Top-K</pre></div>
+<table><tr><th>MoE模型</th><th>总参数</th><th>激活参数</th><th>专家数</th><th>Top-K</th></tr>
+<tr><td>Mixtral 8x7B</td><td>46.7B</td><td>12.9B</td><td>8</td><td>2</td></tr>
+<tr><td>DeepSeek-V2</td><td>236B</td><td>21B</td><td>160</td><td>6</td></tr>
+<tr><td>DeepSeek-V3</td><td>671B</td><td>37B</td><td>256</td><td>8</td></tr></table>
+
+<pre>
+  ┌──────────────────────────────────────────────────────────┐
+  │               MoE Layer 结构                             │
+  │                                                          │
+  │  Input x ──→ Router Network ──→ Top-K专家选择            │
+  │                │                                         │
+  │         ┌──────┼──────┬──────┬──────┐                   │
+  │         ▼      ▼      ▼      ▼      ▼                   │
+  │       ┌───┐ ┌───┐ ┌───┐ ┌───┐ ┌───┐                   │
+  │       │E_1│ │E_2│ │E_3│ │E_4│...│E_N│  N=128 experts   │
+  │       └─┬─┘ └─┬─┘ └─┬─┘ └─┬─┘   └─┬─┘                  │
+  │         │     │     │     │       │                    │
+  │         └──┬──┘     └──┬──┘       │                    │
+  │            ▼           ▼          (unused)              │
+  │         g_1·E_1    g_3·E_3                              │
+  │            │           │                                │
+  │            └─────┬─────┘                                │
+  │                  ▼                                      │
+  │            y = Σ g_i · E_i(x)                           │
+  │               i∈TopK                                    │
+  │                                                          │
+  │  g_i = softmax(Router(x))_i  (门控权重)                  │
+  │  每个token只激活 Top-4 个专家 → 44B激活                   │
+  └──────────────────────────────────────────────────────────┘
+</pre>
+
+<div class="tip"><strong>通俗类比：</strong>昇腾910C vs NVIDIA GPU就像"国产电动车 vs 特斯拉"——国产车的电机功率（算力）已经不输特斯拉，但充电桩网络（软件生态）还在建设中。昇腾910C的算力(640 TFLOPS)已经超过A100(312 TFLOPS)，接近H100(990 TFLOPS)，但CUDA生态的成熟度远超CANN。</div>
+<div class="warn"><strong>常见误区：</strong>关于GLM的4.1 GLM-5 Mo，很多人以为分词是无关紧要的预处理。实际上Tokenizer直接影响模型能力——词表太小导致序列太长，太大导致稀有token训练不足。GLM的词表设计经过精心优化。</div>
+<div class="deep"><str<div class="deep"><strong>深入探讨：</strong>从MoE路由的数学原理看，GLM在4.1 GLM-5 Mo方面的门控函数为G(x)=softmax(W_g·x)。优化路由均衡性是提升MoE效率的关键。GLM通过动态偏置项实现无辅助损失负载均衡。</div>re>MoE 混合专家架构
+输入 token ──▶ Router (门控网络)
+                    │
+          ┌────┬────┼────┬────┐
+          ▼    ▼    ▼    ▼    ▼
+        Expert Expert Expert Expert Expert
+         #1    #2    #3    #4    #5
+         0.1   0.4   0.05  0.4   0.05  ← 权重
+                │           │
+            w2×E2  +   w4×E4  ← 只计算Top-K</pre></div>
+<table><tr><th>MoE模型</th><th>总参数</th><th>激活参数</th><th>专家数</th><th>Top-K</th></tr>
+<tr><td>Mixtral 8x7B</td><td>46.7B</td><td>12.9B</td><td>8</td><td>2</td></tr>
+<tr><td>DeepSeek-V2</td><td>236B</td><td>21B</td><td>160</td><td>6</td></tr>
+<tr><td>DeepSeek-V3</td><td>671B</td><td>37B</td><td>256</td><td>8</td></tr></table>
+
+<pre>
+  ┌──────────────────────────────────────────────────────────┐
+  │              华为昇腾 910C vs NVIDIA                       │
+  ├──────────────────────────────────────────────────────────┤
+  │                                                          │
+  │  昇腾910C:                                               │
+  │  ┌────────────────────────────┐                          │
+  │  │  算力: ~640 TFLOPS (FP16)  │                          │
+  │  │  显存: 64GB HBM2e          │                          │
+  │  │  互联: HCCS (华为)          │                          │
+  │  │  软件: CANN + MindSpore    │                          │
+  │  └────────────────────────────┘                          │
+  │                                                          │
+  │  NVIDIA A100:                                            │
+  │  ┌────────────────────────────┐                          │
+  │  │  算力: 312 TFLOPS (FP16)   │                          │
+  │  │  显存: 80GB HBM2e          │                          │
+  │  │  互联: NVLink              │                          │
+  │  │  软件: CUDA + PyTorch      │                          │
+  │  └────────────────────────────┘                          │
+  │                                                          │
+  │  NVIDIA H100:                                            │
+  │  ┌────────────────────────────┐                          │
+  │  │  算力: 990 TFLOPS (FP16)   │                          │
+  │  │  显存: 80GB HBM3           │                          │
+  │  │  互联: NVLink 4.0          │                          │
+  │  │  软件: CUDA + PyTorch      │                          │
+  │  └────────────────────────────┘                          │
+  └──────────────────────────────────────────────────────────┘
+</pre>
+
+<div class="tip"><strong>通俗类比：</strong>CUDA→CANN迁移就像"从Windows换到Linux"——基本功能都能实现（矩阵乘法、通信、内存管理），但每个API的名字、参数、调用方式都不同。而且有些Windows上好用的软件（第三方CUDA库）在Linux上没有替代品，需要自己开发。</div>
+<div class="warn"><strong>常见误区：</strong>GLM在4.1 GLM-5 Mo方面的常见误区是以为MoE计算量等于总参数量。实际上MoE每次只激活部分专家，计算量接近激活参数量。GLM的MoE设计正是利用这一特性实现高参数效率。</div>
+<div class="deep"><strong>深入探讨：</<div class="deep"><strong>深入探讨：</strong>GLM在4.1 GLM-5 Mo方面的技术经济性分析表明，总拥有成本等于固定成本(GPU硬件)加边际成本(推理token数乘以单token成本)。通过模型量化和批处理优化，GLM将单token成本降低3-5倍，在保持利润率的同时提供有竞争力的API价格。</div>架构
+输入 token ──▶ Router (门控网络)
+                    │
+          ┌────┬────┼────┬────┐
+          ▼    ▼    ▼    ▼    ▼
+        Expert Expert Expert Expert Expert
+         #1    #2    #3    #4    #5
+         0.1   0.4   0.05  0.4   0.05  ← 权重
+                │           │
+            w2×E2  +   w4×E4  ← 只计算Top-K</pre></div>
+<table><tr><th>MoE模型</th><th>总参数</th><th>激活参数</th><th>专家数</th><th>Top-K</th></tr>
+<tr><td>Mixtral 8x7B</td><td>46.7B</td><td>12.9B</td><td>8</td><td>2</td></tr>
+<tr><td>DeepSeek-V2</td><td>236B</td><td>21B</td><td>160</td><td>6</td></tr>
+<tr><td>DeepSeek-V3</td><td>671B</td><td>37B</td><td>256</td><td>8</td></tr></table>
+
+<pre>
+  技术栈迁移对照:
+  ┌─────────────────┬──────────────────┐
+  │  NVIDIA (CUDA)  │  华为 (CANN)     │
+  ├─────────────────┼──────────────────┤
+  │  CUDA Runtime   │  CANN Runtime    │
+  │  cuDNN          │  ACLNN (Ascend)  │
+  │  NCCL           │  HCCL            │
+  │  TensorRT       │  MindSpore Lite  │
+  │  PyTorch        │  MindSpore       │
+  │  FlashAttn      │  自研算子         │
+  │  DeepSpeed      │  MindFormers     │
+  └─────────────────┴──────────────────┘
+
+  迁移挑战:
+  ┌──────────────────────────────────────────────────┐
+  │  1. 算子适配:  CUDA kernel → CANN算子重写         │
+  │  2. 通信优化:  NCCL → HCCS 性能调优               │
+  │  3. 混合精度:  BF16/FP16 在昇腾上的精度验证        │
+  │  4. 内存管理:  显存分配策略差异                     │
+  │  5. 调试工具:  NSight → MindSpore Profiler       │
+  └──────────────────────────────────────────────────┘
+</pre>
+
+<div class="tip"><strong>通俗类比：</strong>训练基础设施就像"盖摩天大楼的施工团队"——不是有一台大吊车（GPU）就够了，还需要塔吊调度系统（并行策略）、混凝土搅拌站（数据管道）、安全监测系统（训练监控）。10000张卡的集群管理本身就是一项巨大的系统工程。</div>
+<div clas<div class="warn"><strong>常见误区：</strong>GLM在4.1 GLM-5 Mo方面的常见误区是过度依赖单一评估指标。GLM的实践表明，需要在知识能力(MMLU)、推理能力(GSM8K)、代码能力(HumanEval)和对话质量(Chatbot Arena)之间综合评估。</div>ss="deep"><strong>深入探讨：</strong>从信息论角度看，GLM的核心挑战是"在有限的计算资源下最大化信息处理效率"。模型的每一层都在进行信息压缩和提取——将高维输入压缩为低维表示，同时保留任务相关的关键信息。GLM通过注意力机制实现动态的信息路由。</div>
+<div class="ascii"><pre>MoE 混合专家架构
+输入 token ──▶ Router (门控网络)
+                    │
+          ┌────┬────┼────┬────┐
+          ▼    ▼    ▼    ▼    ▼
+        Expert Expert Expert Expert Expert
+         #1    #2    #3    #4    #5
+         0.1   0.4   0.05  0.4   0.05  ← 权重
+                │           │
+            w2×E2  +   w4×E4  ← 只计算Top-K</pre></div>
+<table><tr><th>MoE模型</th><th>总参数</th><th>激活参数</th><th>专家数</th><th>Top-K</th></tr>
+<tr><td>Mixtral 8x7B</td><td>46.7B</td><td>12.9B</td><td>8</td><td>2</td></tr>
+<tr><td>DeepSeek-V2</td><td>236B</td><td>21B</td><td>160</td><td>6</td></tr>
+<tr><td>DeepSeek-V3</td><td>671B</td><td>37B</td><td>256</td><td>8</td></tr></table>
+
+<pre>
+  GLM-5 训练集群规模 (估算):
+  ┌──────────────────────────────────────────────────┐
+  │  昇腾910C 数量:    ~10,000+ 卡                    │
+  │  总算力:           ~6.4 EFLOPS (FP16)             │
+  │  通信拓扑:         HCCS + 交换机                  │
+  │  训练框架:         MindSpore + MindFormers        │
+  │  训练数据:         ~15T tokens                    │
+  │  训练时长:         ~3-4个月 (估算)                │
+  │                                                   │
+  │  并行策略:                                        │
+  │  ┌─────────────────────────────────────┐         │
+  │  │  TP (张量并行)    │  8路             │         │
+  │  │  PP (流水线并行)  │  8路             │         │
+  │  │  DP (数据并行)    │  64路            │         │
+  │  │  EP (专家并行)    │  128路           │         │
+  │  │  总GPU数:         │  ~10K+           │         │
+  │  └─────────────────────────────────────┘         │
+  └──────────────────────────────────────────────────┘
+</pre>
+
+<div class="tip"><strong>通俗类比：</strong>负载均衡就像"餐厅排队"——如果所有人都去同一家餐厅（专家坍缩），那家餐厅忙死，其他餐厅饿死。好的负载均衡就像"智能叫号系统"：当某家餐厅人太多时，自动推荐你去旁边人少的餐厅。MoE的负载均衡loss就是这个"智能叫号系统"。</div>
+<div class="warn"><strong>常见误区：</strong>对齐训练的效果取决于数据质量和训练策略。高质量的对齐数据应该覆盖"安全但有用"的边界场景。过度对齐会导致模型在灰色地带一律拒绝，降低实用性。实验表明，对齐数据中"安全且有用"的正例占比应不低于30%，否则模型会趋向过度保守。Anthropic的Constitutional AI方法通过将安全原则编码为可执行的规则集，实现了更精细的安全控制。</div>
+<div class="deep"><strong>深入探讨：</strong>从GLM<div class="deep"><strong>深入探讨：</strong>从GLM的技术演进看，GLM的发展经历了三个阶段：概念验证期（验证核心假设的可行性）、工程优化期（解决性能和稳定性问题）和规模化部署期（处理成本和运维挑战）。每个阶段的核心挑战不同。GLM在每个阶段都有针对性的技术选型和架构调整。</div> ──▶ Router (门控网络)
+                    │
+          ┌────┬────┼────┬────┐
+          ▼    ▼    ▼    ▼    ▼
+        Expert Expert Expert Expert Expert
+         #1    #2    #3    #4    #5
+         0.1   0.4   0.05  0.4   0.05  ← 权重
+                │           │
+            w2×E2  +   w4×E4  ← 只计算Top-K</pre></div>
+<table><tr><th>MoE模型</th><th>总参数</th><th>激活参数</th><th>专家数</th><th>Top-K</th></tr>
+<tr><td>Mixtral 8x7B</td><td>46.7B</td><td>12.9B</td><td>8</td><td>2</td></tr>
+<tr><td>DeepSeek-V2</td><td>236B</td><td>21B</td><td>160</td><td>6</td></tr>
+<tr><td>DeepSeek-V3</td><td>671B</td><td>37B</td><td>256</td><td>8</td></tr></table>
+
+<pre>
+  专家负载不均衡问题:
+  ┌──────────────────────────────────────────────────┐
+  │  专家 1:  ████████████████  35%                  │
+  │  专家 2:  ████████          18%                  │
+  │  专家 3:  ██████            14%                  │
+  │  专家 4:  █████             12%                  │
+  │  ...                                             │
+  │  专家128: █                 2%   ← 几乎未使用    │
+  │                                                   │
+  │  GLM-5 解决方案:                                  │
+  │  ▸ Auxiliary Loss (辅助损失)                      │
+  │  ▸ Expert Choice routing                         │
+  │  ▸ Capacity Factor 限制                          │
+  │  ▸ DSA自适应选择与MoE路由协同                     │
+  └──────────────────────────────────────────────────┘
+</pre>
+
+<footer><a href="03-注意力机制创新.html">← 上一章</a> | <a href="index.html">目录</a> | <a href="05-后训练与对齐.html">下一章 →</a></footer>
+</div>
+
+<div class="deep"><strong>思考与练习：</strong>
+<ol>
+<li><strong>概念理解：</strong>请用自己的话解释"1 GLM-5 MoE 参数对比"的核心原理，并说明它在GLM技术体系中的定位。</li>
+<li><strong>对比分析：</strong>对比"1 GLM-5 MoE 参数对比"与"2 MoE原理"的异同点，分析各自的适用场景和优劣势。</li>
+<li><strong>实践思考：</strong>如果要将本章技术应用到实际项目中，你会如何设计方案？请列出关键步骤并说明可能遇到的挑战。</li>
+</ol>
+</div>
+
+
+
+<div class="deep"><strong>深入探讨：</strong>从模型评估的统计学角度看，GLM在4.1 GLM-5 Mo方面的评估需要考虑置信区间。MMLU的14K题目在95%置信度下只有±1%精度。GLM通过多个基准综合评估缓解统计噪声问题。</div>方面的技术实现体现了其对工程质量和创新的追求。从技术原理到工程落地，GLM在每个环节都进行了深入的优化。这些优化不仅提升了模型的性能指标，更重要的是提升了模型在实际应用中的可靠性和用户体验。GLM的技术团队在实践中积累的"隐性知识"是其核心竞争力之一。</p>
+
+<h3>MoE路由与专家系统(3)的核心设计原则</h3>
+
+
+<h3>MoE路由与专家系统(3)的性能评估与优化策略</h3>
+
+
+
+<h2>MoE路由与专家系统(2)与工程实践</h2>
+<p>MoE路由与专家系统(2)与工程实践是GLM技术体系中的重要组成部分。从系统工程角度看，这一技术的实现需要平衡计算效率、内存占用和输出质量三个维度。GLM通过精心的架构设计和工程优化，在这三个维度上都达到了令人满意的平衡点。这种平衡能力是GLM技术成熟度的重要体现。</p>
+
+<h3>MoE路由与专家系统(2)的核心设计原则</h3>
+
+
+<h3>MoE路由与专家系统(2)的性能评估与优化策略</h3>
+
+
+
+<h2>MoE路由与专家系统(1)与工程实践</h2>
+<p>GLM在MoE路由与专家系统(1)与工程实践方面的技术实现体现了其对工程质量和创新的追求。从技术原理到工程落地，GLM在每个环节都进行了深入的优化。这些优化不仅提升了模型的性能指标，更重要的是提升了模型在实际应用中的可靠性和用户体验。GLM的技术团队在实践中积累的"隐性知识"是其核心竞争力之一。</p>
+
+<h3>MoE路由与专家系统(1)的核心设计原则</h3>
+
+
+<h3>MoE路由与专家系统(1)的性能评估与优化策略</h3>
+
+
+
+<div class="deep">
+<strong>总结与展望：</strong>
+<p>GLM-5的MoE架构与国产化训练是中国AI发展史上的标志性事件。753B总参数、128专家、Top-4激活的MoE设计，在保持40B激活参数高效推理的同时，实现了接近全参数Dense模型的能力上限。这一成就的技术含金量不仅在于模型本身的规模，更在于它首次在华为昇腾910C上完成了700B+参数MoE模型的全流程训练。从CUDA到CANN的迁移涉及算子重写、通信库替换、混合精度验证和内存管理适配等大量工程工作——这绝非简单的"换卡"，而是一项需要深入理解两个硬件平台底层特性的系统工程。训练集群超过10000张昇腾910C，采用TP=8、PP=8、DP=64、EP=128的4D并行策略，其中专家并行(EP)是MoE特有的并行维度，128个专家分布在128张卡上通过All-to-All通信实现token路由。负载均衡方面，GLM-5采用了辅助损失、专家选择路由和容量因子限制等多种策略，并借鉴了DeepSeek-V3的无辅助损失负载均衡思想。从战略意义上看，GLM-5在昇腾910C上的成功训练证明了国产AI芯片可以支撑世界级大模型的训练需求，这对中国的AI供应链安全具有里程碑意义。尽管昇腾的软件生态（CANN、MindSpore）与CUDA仍有2-3年的差距，但这一成功案例将加速国产芯片生态的成熟，推动更多国产大模型向国产硬件迁移。</p>
+</div>
+<div class="tip"><strong>学习路径建议：</strong><p>建议先理解本节的基础概念和核心原理，再深入学习数学推导和工程实现细节。可结合配套的代码示例进行动手实践，最后通过对比分析巩固所学知识。</p></div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释GLM-5 MoE 参数对比的核心原理，并举一个实际应用场景。</li>
+<li>GLM-5 MoE 参数对比在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比GLM-5 MoE 参数对比与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+GLM-5 MoE 参数对比的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="ascii">
+GLM-5 MoE 参数对比 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+</div>
+<div class="tip"><strong>相关章节：</strong>
+GLM-5 MoE 参数对比与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

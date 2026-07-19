@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04-推理引擎 | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.deep{background:rgba(188,140,255,0.08);border-left:4px solid var(--purple)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+</head>
+<body>
+<div class="nav"><a href="03-FlashAttention.html">← 03-FlashAttention</a><span>06-效率 / 推理引擎</span><a href="05-总结与练习.html">05-总结与练习 →</a></div>
+<div class="container">
+
+<h1>🚀 4. 推理引擎</h1>
+
+<h2>4.1 为什么需要推理引擎</h2>
+<p>LLM 推理（Inference）是指将训练好的模型用于生成文本的过程。与训练不同，推理面临独特的挑战：自回归生成是逐 token 的（每生成一个 token 都需要一次完整的模型前向传播），延迟敏感（用户等待时间直接影响体验），且需要同时服务多个请求。一个朴素的推理实现在吞吐量和延迟上可能比优化过的引擎差 5-10 倍。</p>
+<p>推理引擎的核心优化包括：连续批处理（最大化 GPU 利用率）、KV Cache 管理（减少显存浪费）、算子融合（减少 kernel launch 开销）、量化支持（减少显存和计算量）、投机解码（减少延迟）。这些优化相互配合，共同提升推理性能。</p>
+
+<h2>4.2 主流推理引擎</h2>
+<table>
+<tr><th>引擎</th><th>核心技术</th><th>适用场景</th><th>易用性</th></tr>
+<tr><td>vLLM</td><td>PagedAttention + 连续批处理</td><td>GPU 服务器高吞吐推理</td><td>⭐⭐⭐⭐⭐</td></tr>
+<tr><td>TensorRT-LLM</td><td>图优化 + 算子融合</td><td>NVIDIA GPU 最高性能</td><td>⭐⭐⭐</td></tr>
+<tr><td>SGLang</td><td>RadixAttention + 前端 DSL</td><td>结构化生成、多轮对话</td><td>⭐⭐⭐⭐</td></tr>
+<tr><td>llama.cpp</td><td>GGUF 量化 + CPU 推理</td><td>消费级硬件、边缘设备</td><td>⭐⭐⭐⭐⭐</td></tr>
+<tr><td>Ollama</td><td>llama.cpp 封装</td><td>一行命令本地部署</td><td>⭐⭐⭐⭐⭐</td></tr>
+<tr><td>TGI</td><td>HuggingFace 官方</td><td>快速部署、API 服务</td><td>⭐⭐⭐⭐</td></tr>
+</table>
+
+<div class="box tip"><div class="label">💡 通俗类比：推理引擎像"不同的厨师"</div>
+vLLM 像"流水线厨师" — 连续处理订单，效率最高。TensorRT-LLM 像"米其林大厨" — NVIDIA GPU 上最快但只在特定厨房工作。llama.cpp 像"家用厨师" — 在普通厨房（CPU/消费级GPU）也能做饭。Ollama 像"外卖平台" — 一行命令点餐，背后的厨师是 llama.cpp。SGLang 像"套餐规划师" — 优化结构化生成，适合复杂任务编排。</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区：推理引擎只是"包装"？</div>
+推理引擎的核心优化远不止包装：连续批处理（动态调度请求）、PagedAttention（消除 KV Cache 碎片）、投机解码（小模型先猜大模型验证）、算子融合（减少 kernel launch 开销）。这些优化可以让同一个模型的吞吐量差 5-10 倍。选择合适的推理引擎是生产部署中最关键的决策之一。</div>
+
+<h2>4.3 连续批处理 (Continuous Batching)</h2>
+<p>传统的静态批处理（Static Batching）将多个请求组成一个 batch，所有请求必须等最慢的那个完成后才能处理下一批。这导致 GPU 利用率很低 — 快完成的请求要等慢的，GPU 大部分时间在空转。连续批处理（也称动态批处理）解决了这个问题：一旦某个请求完成，立即用新请求填补空位，GPU 始终保持满载。</p>
+
+<div class="ascii">静态批处理 (低效):
+  Batch: [请求A, 请求B, 请求C]
+  等所有请求都完成才处理下一批
+  → 快完成的请求要等慢的
+  → GPU 利用率: ~50-70%
+
+连续批处理 (高效):
+  Iteration 1: [A, B, C] → A完成
+  Iteration 2: [D, B, C] → B完成  
+  Iteration 3: [D, E, C] → C完成
+  Iteration 4: [D, E, F] → ...
+  → GPU 始终满载
+  → GPU 利用率: ~95%+</div>
+
+<div class="box tip"><div class="label">💡 通俗类比：连续批处理像"快餐店"</div>
+静态批处理像"固定套餐" — 必须等所有人吃完才能上新菜。连续批处理像"自助餐" — 有人吃完了就腾出位置，新客人立刻入座。这就是为什么连续批处理能让 GPU 利用率始终接近 100%。</div>
+
+<div class="box deep"><div class="label">🔍 深入探讨：连续批处理的调度策略</div>
+连续批处理需要解决一个关键难题：不同请求可能处于不同生成阶段（有的在 prefill 处理长 prompt，有的在 decode 生成 token）。vLLM 的调度策略是：在每个 iteration 中，先处理所有 decode 请求（生成下一个 token），再插入新的 prefill 请求。这样既保证了已有请求的延迟公平性，又最大化了 GPU 利用率。SGLang 则采用更灵活的调度策略，可以将 prefill 和 decode 请求混合处理，进一步提升吞吐量。</div>
+
+<h2>4.4 PagedAttention</h2>
+<p>PagedAttention 是 vLLM 的核心创新，灵感来自操作系统的虚拟内存管理。传统实现中，每个请求的 KV Cache 需要预分配连续的最大长度内存，导致严重的内存碎片和浪费（实际生成长度通常远小于最大长度）。PagedAttention 将 KV Cache 分成固定大小的"页"（block），通过页表管理逻辑块到物理块的映射，实现了按需分配、无碎片的内存管理。</p>
+
+<div class="ascii">PagedAttention 工作原理:
+
+传统 KV Cache (连续内存):
+┌─────────────────────────────────┐
+│ ████████░░░░░░░░████████░░░░░░░ │
+│ 请求A:8页  碎片  请求B:8页  碎片 │
+└─────────────────────────────────┘
+问题: 内存碎片化，利用率 ~50%
+
+PagedAttention (分页管理):
+┌─────────────────────────────────┐
+│ ██│██│░░│██│██│░░│██│██│░░│██│  │
+│ A1│A2│B1│A3│A4│B2│A5│B3│空│A6│  │
+└─────────────────────────────────┘
+页表: A→[1,2,4,5,8,10], B→[3,6,7]
+优势: 无碎片，利用率 ~95%+</div>
+
+<div class="box deep"><div class="label">🔍 深入探讨：KV Cache 共享与 Copy-on-Write</div>
+PagedAttention 支持 KV Cache 共享（copy-on-write）。当多个请求使用相同的 system prompt 时，它们可以共享 system prompt 部分的 KV Cache 页。只有当某个请求需要修改共享页时才进行复制。这在多轮对话和多用户共享 system prompt 的场景中特别有用，可以节省 30-50% 的 KV Cache 显存。SGLang 的 RadixAttention 进一步利用 radix tree 结构来管理和共享 KV Cache，支持更复杂的前缀共享模式。</div>
+
+<h2>4.5 投机解码 (Speculative Decoding)</h2>
+<p>投机解码是减少 LLM 推理延迟的重要技术。其核心思想是：用一个快速的小模型（draft model）先猜测多个候选 token，然后用大模型一次性验证所有候选。如果小模型猜对了（接受），就省了大模型逐个生成的时间；如果猜错了（拒绝），大模型从错误点重新生成。关键是：最终输出的质量完全由大模型保证，与小模型的猜测质量无关。</p>
+
+<div class="ascii">投机解码流程:
+
+小模型 (快):  t1  t2  t3  t4  t5
+大模型 (验证): ✓   ✓   ✓   ✗   -
+结果: 接受 t1-t3，从 t3 重新生成
+
+加速原理:
+  串行: 大模型生成 5 个 token = 5 次前向传播
+  投机: 小模型 5 次 + 大模型 1 次验证 = 2 次前向传播
+  如果接受率 > 50%，就有效果
+  实际接受率: 60-85% (取决于任务和模型对)
+
+吞吐量提升: 2-3x
+输出质量: 完全不变！</div>
+
+<div class="box tip"><div class="label">💡 通俗类比：投机解码像"实习生+主管"</div>
+小模型（实习生）快速出方案，大模型（主管）审核。如果实习生猜对了（接受），省了主管的时间。如果猜错了（拒绝），主管自己重做。关键是：最终结果的质量完全由大模型决定，但大部分工作由小模型完成。2-3 倍加速，质量零损失。</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区：投机解码只能用"小模型"？</div>
+除了小模型，还可以用 n-gram 模型、检索模型、甚至规则模板作为"投机者"。关键是投机者要快，接受率不需要很高（30%+ 就有加速效果）。自投机（Self-Speculative Decoding）则利用模型自身的浅层作为投机者，不需要额外模型。Medusa 在模型顶部添加多个预测头，同时预测多个未来 token，也是一种投机解码的变体。</div>
+
+<h2>4.6 显存需求估算</h2>
+<p>推理显存主要由三部分组成：模型权重（固定）、KV Cache（随并发数和序列长度增长）、框架开销（固定但较小）。理解显存构成对于选择合适的硬件和优化策略至关重要。显存估算的公式和原理是推理系统设计的基础知识。</p>
+
+<h3>4.6.1 模型权重显存</h3>
+<p>模型权重的显存计算非常直观：参数量乘以每个参数的字节数。例如 LLaMA-2 7B 模型在 BF16 下的权重显存为 7B × 2 bytes = 14GB。如果使用 INT4 量化，则为 7B × 0.5 bytes = 3.5GB。需要注意的是，量化后的模型还需要额外存储量化参数（scale 和 zero-point），通常增加约 0.5-3% 的额外开销。</p>
+
+<h3>4.6.2 KV Cache 显存计算</h3>
+<p>KV Cache 的显存计算公式为：2 × n_layers × n_kv_heads × d_head × seq_len × precision_bytes × batch_size。其中系数 2 是因为同时存储 K 和 V。以 LLaMA-2 7B 为例：n_layers=32, n_kv_heads=32, d_head=128, seq_len=4096, precision=2 bytes，则单个请求的 KV Cache = 2 × 32 × 32 × 128 × 4096 × 2 ≈ 2.1GB。当 batch_size=16 时，KV Cache 总量约 33.6GB，已经远超模型权重。这个公式是推理系统容量规划的基础，掌握它可以快速估算所需的 GPU 显存。</p>
+
+<h3>4.6.3 推理框架开销</h3>
+<p>框架开销包括 CUDA context（约 300-500MB）、PyTorch 运行时（约 200-500MB）、以及推理引擎的内部数据结构（如 vLLM 的页表、调度器状态等）。这部分开销通常在 1-2GB 左右，相对于模型权重和 KV Cache 可以忽略。但在显存非常紧张的场景（如单卡部署 70B INT4 模型），这些开销也需要精确计算。</p>
+
+<pre><code><span class="comment"># 推理显存 = 模型权重 + KV Cache + 框架开销</span>
+模型权重 = 参数量 × 精度字节数
+KV Cache = 2 × n_layers × n_kv_heads × d_head × seq_len × precision × batch_size
+
+<span class="comment"># LLaMA-2 7B, BF16, seq=4096, batch=1</span>
+权重: 14 GB + KV: 2.1 GB + 开销: ~1 GB ≈ 17 GB
+
+<span class="comment"># LLaMA-2 70B, INT4, seq=4096, batch=32</span>
+权重: 35 GB + KV: ~20 GB + 开销: ~2 GB ≈ 57 GB</code></pre>
+
+<div class="ascii">推理显存构成 (LLaMA-2 7B, BF16, seq=4096):
+
+┌──────────────────────────────────────────┐
+│████████████████████████████████████│     │
+│        模型权重: 14 GB (82%)           │
+│█████████████│                           │
+│ KV Cache    │                           │
+│ 2.1 GB (12%)│                           │
+│████│                                      │
+│框架│ 1GB (6%)                             │
+└──────────────────────────────────────────┘
+
+当并发用户增加时:
+KV Cache = 2.1GB × 用户数 → 很快超过模型权重！
+batch=16: KV = 33.6 GB → 总计 48.6 GB
+batch=32: KV = 67.2 GB → 总计 82.2 GB</div>
+
+<div class="box tip"><div class="label">💡 通俗类比：推理显存的"三座大山"</div>
+推理显存 = 模型权重（固定）+ KV Cache（随用户数增长）+ 框架开销（固定）。模型权重是"地基"（无法压缩，除非量化）。KV Cache 是"活动房间"（随用户数和序列长度动态变化）。优化 KV Cache 是推理系统优化的核心 — PagedAttention、GQA、KV Cache 量化都是为此而生。</div>
+
+<h2>4.7 推理优化技术全景</h2>
+<table>
+<tr><th>优化技术</th><th>目标</th><th>效果</th><th>适用引擎</th></tr>
+<tr><td>连续批处理</td><td>GPU 利用率</td><td>吞吐量 2-5x</td><td>vLLM, SGLang, TRT-LLM</td></tr>
+<tr><td>PagedAttention</td><td>KV Cache 显存</td><td>显存利用率 ~95%</td><td>vLLM, SGLang</td></tr>
+<tr><td>算子融合</td><td>减少 kernel launch</td><td>延迟降低 10-30%</td><td>TRT-LLM, vLLM</td></tr>
+<tr><td>KV Cache 量化</td><td>KV Cache 显存</td><td>KV Cache 减半</td><td>vLLM</td></tr>
+<tr><td>投机解码</td><td>延迟</td><td>延迟降低 2-3x</td><td>vLLM, SGLang</td></tr>
+<tr><td>GQA/MQA</td><td>KV Cache 计算量</td><td>KV Cache 减少 4-8x</td><td>模型层面</td></tr>
+</table>
+
+<h2>4.8 Prefill 与 Decode 的分离优化</h2>
+<p>LLM 推理过程可以分为两个阶段：Prefill（预填充）和 Decode（解码）。Prefill 阶段处理整个输入 prompt，计算所有 token 的 KV Cache，是计算密集型（compute-bound）。Decode 阶段逐 token 生成输出，每次只处理一个 token，是内存带宽密集型（memory-bound）。这两个阶段的特性完全不同，因此需要不同的优化策略。</p>
+<p>在 Prefill 阶段，FlashAttention 是最有效的优化 — 它可以将长 prompt 的处理速度提升 2-4 倍。在 Decode 阶段，KV Cache 的内存带宽是瓶颈 — 每生成一个 token 都需要读取全部 KV Cache。此时 GQA（减少 KV head 数量）、KV Cache 量化（减少数据量）、以及 PagedAttention（优化内存布局）是最有效的优化。</p>
+<p>一些推理引擎（如 DistServe、Splitwise）甚至将 Prefill 和 Decode 分离到不同的 GPU 上执行：一组 GPU 专门做 Prefill（计算密集），另一组专门做 Decode（带宽密集），各自针对自己的特性做最优配置。这种分离架构可以将整体吞吐量提升 30-50%。</p>
+
+<div class="ascii">Prefill 与 Decode 的特性对比:
+
+Prefill (处理 prompt):
+  输入: [token1, token2, ..., tokenN] (一次性处理)
+  计算: Q×K^T×V (大量矩阵乘法)
+  瓶颈: 计算 (compute-bound)
+  优化: FlashAttention, 算子融合
+
+Decode (生成 token):
+  输入: [token_new] (单个 token)
+  计算: 与所有 KV Cache 做注意力
+  瓶颈: 内存带宽 (memory-bound)
+  优化: GQA, KV Cache 量化, PagedAttention
+
+分离架构:
+  GPU组A → Prefill → KV Cache → GPU组B → Decode → 输出
+  各自优化，互不干扰，整体吞吐量 +30-50%</div>
+
+<h2>4.9 KV Cache 优化技术详解</h2>
+<p>KV Cache 是推理过程中最大的显存消耗者。以 LLaMA-2 70B 为例，单个请求在 4096 token 序列长度下的 KV Cache 约为 20GB（BF16）。当并发 32 个请求时，KV Cache 总量高达 640GB，远超模型权重。因此，KV Cache 的优化是推理系统的核心课题。</p>
+<p>主要的 KV Cache 优化技术包括：1) PagedAttention — 消除内存碎片，按需分配，前面已详细介绍。2) GQA/MQA — 从模型层面减少 KV head 数量，LLaMA-2 70B 使用 8 个 KV head（而非 64 个 Q head），KV Cache 减少 8 倍。3) KV Cache 量化 — 将 KV Cache 从 FP16 量化到 FP8 或 INT8，显存减半。4) KV Cache 驱逐 — 对于超长对话，可以驱逐不重要的历史 token 的 KV Cache（基于注意力分数或最近性）。5) KV Cache 压缩 — 利用低秩分解或聚类技术压缩 KV Cache。</p>
+
+<table>
+<tr><th>KV Cache 优化</th><th>显存节省</th><th>精度影响</th><th>实现复杂度</th></tr>
+<tr><td>PagedAttention</td><td>消除碎片 (~2x)</td><td>无</td><td>中</td></tr>
+<tr><td>GQA (8 KV heads)</td><td>8x</td><td>无</td><td>模型设计</td></tr>
+<tr><td>KV Cache FP8</td><td>2x</td><td>极小</td><td>低</td></tr>
+<tr><td>KV Cache 驱逐</td><td>可变</td><td>小</td><td>中</td></tr>
+<tr><td>KV Cache 低秩压缩</td><td>2-4x</td><td>小-中</td><td>高</td></tr>
+</table>
+
+<div class="box deep"><div class="label">🔍 深入探讨：推理引擎的内存管理策略</div>
+推理引擎的内存管理是一个复杂的工程问题。vLLM 使用 PagedAttention 管理 KV Cache，将 GPU 显存分为两部分：模型权重（固定）和 KV Cache 池（动态）。KV Cache 池按 block 为单位分配，通过页表映射到逻辑位置。当显存不足时，vLLM 可以驱逐不活跃请求的 KV Cache（swap 到 CPU 内存），等请求恢复时再换入。SGLang 使用 radix tree 管理 KV Cache 的前缀共享，支持更复杂的共享模式（如多轮对话中共享历史）。TensorRT-LLM 则使用静态内存池，预分配固定大小的 KV Cache 空间，通过调度器控制并发数来避免溢出。</div>
+
+<h2>4.10 推理性能基准测试</h2>
+<p>推理性能的评估需要关注多个指标：吞吐量（Throughput, tokens/s）、首次延迟（Time to First Token, TTFT）、逐 token 延迟（Inter-Token Latency, ITL）、以及最大并发数。不同的应用场景对这些指标的优先级不同：交互式聊天优先关注 TTFT 和 ITL，批量处理优先关注吞吐量，API 服务需要兼顾所有指标。</p>
+
+<div class="ascii">推理性能指标:
+
+请求: [输入 tokens] → [输出 tokens]
+
+TTFT (首次延迟):
+  从发送请求到收到第一个 token 的时间
+  主要由 Prefill 阶段决定
+  典型值: 100ms - 2s (取决于 prompt 长度)
+
+ITL (逐 token 延迟):
+  生成每个 token 的时间间隔
+  主要由 Decode 阶段决定
+  典型值: 10-50ms (取决于模型大小)
+
+吞吐量:
+  单位时间生成的 token 总数
+  = 并发数 / ITL
+  典型值: 100-10000 tok/s (取决于模型和硬件)</div>
+
+<div class="box tip"><div class="label">💡 推理性能调优建议</div>
+1) 选择合适的量化格式 — AWQ INT4 是精度和速度的最佳平衡。2) 合理设置 max_model_len — 过大的序列长度会浪费 KV Cache 显存。3) 调整 gpu_memory_utilization — vLLM 默认 0.9，可根据实际情况微调。4) 使用 prefix caching — 如果有共享的 system prompt，启用前缀缓存可以大幅减少 TTFT。5) 监控 GPU 利用率 — 如果利用率低于 80%，说明调度可能有瓶颈。</div>
+
+<h3>4.10.1 性能基准测试方法</h3>
+<p>进行推理性能基准测试时，需要注意以下几点：1) 预热 — 前几次推理可能因为 CUDA kernel 编译、内存分配等原因较慢，需要先跑几轮预热；2) 固定输入长度 — 不同输入长度对性能影响很大，测试时应控制变量；3) 测量多个指标 — 同时记录吞吐量、TTFT、ITL 和显存使用；4) 多次测量取平均 — 单次测量可能有波动，建议至少测量 3 次取中位数。以下是使用 vLLM 进行基准测试的示例代码。</p>
+
+<pre><code><span class="comment"># vLLM 基准测试示例</span>
+<span class="keyword">from</span> vllm <span class="keyword">import</span> LLM, SamplingParams
+<span class="keyword">import</span> time
+
+llm = LLM(model="meta-llama/Llama-2-7b-hf", max_model_len=4096)
+prompts = ["解释量子力学的基本原理"] * 32  <span class="comment"># 32 个并发请求</span>
+
+<span class="comment"># 预热</span>
+llm.generate(prompts[:1], SamplingParams(max_tokens=10))
+
+<span class="comment"># 正式测试</span>
+t0 = time.time()
+outputs = llm.generate(prompts, SamplingParams(max_tokens=200))
+elapsed = time.time() - t0
+total_tokens = sum(len(o.outputs[0].token_ids) <span class="keyword">for</span> o <span class="keyword">in</span> outputs)
+print(f"吞吐量: {total_tokens/elapsed:.0f} tok/s")
+print(f"平均延迟: {elapsed/len(prompts)*1000:.0f} ms/req")</code></pre>
+
+<h2>4.11 学习路径与进阶建议</h2>
+<p>推理引擎的学习建议：入门级，学会用 Ollama 本地部署模型、用 vLLM 搭建 API 服务、理解 KV Cache 的基本概念。进阶级，阅读 vLLM 的 PagedAttention 论文、理解连续批处理的调度策略、掌握推理性能基准测试方法。专家级，阅读 TensorRT-LLM 的源码、理解算子融合和 CUDA Graph 优化、探索分布式推理架构（多机推理、模型并行）。</p>
+<p>推荐阅读资源：Kwon et al. 2023 "Efficient Memory Management for Large Language Model Serving with PagedAttention"（SOSP 2023, vLLM 论文）、Zheng et al. 2023 "SGLang: Efficient Execution of Structured Language Model Programs"（SGLang 论文）、Leviathan et al. 2023 "Fast Inference from Transformers via Speculative Decoding"（投机解码论文）。</p>
+
+<p>在实际部署中，选择推理引擎需要综合考虑多个因素：硬件环境（是否有 GPU、GPU 型号和数量）、性能需求（吞吐量 vs 延迟）、功能需求（是否需要多 LoRA、是否需要结构化输出）、运维复杂度（是否需要容器化、监控、自动扩缩容）。对于初学者，建议从 Ollama 开始快速体验，然后迁移到 vLLM 获得更好的性能。对于生产环境，vLLM 和 TensorRT-LLM 是最成熟的选择，前者易用性更好，后者性能更高但配置更复杂。</p>
+
+<p>推理引擎的未来发展趋势包括：1) 更智能的调度算法 — 根据请求特征（输入长度、输出长度预测）动态调整调度策略；2) 更高效的内存管理 — 利用新型存储介质（如 HBM3e、CXL 内存）扩展 KV Cache 容量；3) 硬件-软件协同设计 — 推理引擎与 GPU 架构的深度集成，如 NVIDIA 的 TensorRT-LLM 与 H100/B200 的协同优化；4) 端侧推理 — 在手机、笔记本等消费设备上运行大模型，需要极致的量化和优化。</p>
+
+<p>另一个值得关注的趋势是推理时计算（Inference-Time Compute Scaling）。OpenAI 的 o1/o3 系列模型展示了通过在推理时使用更多计算（如 Chain-of-Thought 推理、多步搜索）来提升模型能力的思路。这种范式下，推理引擎不仅要高效执行单次前向传播，还需要支持复杂的推理流程（如树搜索、多次采样、验证循环）。SGLang 的前端 DSL 和 RadixAttention 正是为此类场景设计的。</p>
+
+<div class="box exercise"><div class="label">🎯 动手练习</div>
+使用 vLLM 部署一个模型，测试不同并发数（1, 4, 16, 32）下的吞吐量和延迟。观察 PagedAttention 如何影响显存利用率和吞吐量。比较 AWQ 量化模型和 FP16 模型的性能差异。</div>
+
+<div class="next-prev"><a href="03-FlashAttention.html">← 03-FlashAttn</a><a href="05-总结与练习.html">05-总结 →</a></div>
+</div>
+<div class="footer"><p>LLM 系统学习 · 04-推理引擎</p><p><a href="../index.html">返回总目录</a> · <a href="05-总结与练习.html">继续学习: 总结与练习</a></p></div>
+<div class="tip"><strong>相关章节：</strong>
+为什么需要推理引擎与以下内容密切相关：<a href="01-LoRA与PEFT.html">01-LoRA与PEFT</a> | <a href="02-量化技术.html">02-量化技术</a> | <a href="03-FlashAttention.html">03-FlashAttention</a>。建议结合学习。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+推理引擎的工程实践建议：在选择和部署推理引擎时，建议按以下步骤进行。(1) 快速原型阶段：用Ollama一行命令部署模型，验证模型在目标任务上的基本效果。(2) 性能评估阶段：用vLLM部署同一模型，测试不同并发数（1/4/16/32）下的吞吐量（tokens/s）和延迟（TTFT/ITL）。(3) 量化优化阶段：对比FP16和AWQ INT4模型的性能差异——INT4通常可将显存减少75%同时保持95%以上的精度。(4) 生产部署阶段：配置Continuous Batching、PagedAttention和prefix caching，监控GPU利用率和显存使用。关键性能指标：GPU利用率应>80%，显存利用率应>85%，KV Cache命中率（有prefix caching时）应>60%。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+推理引擎的<strong>核心价值</strong>在于将LLM推理从"能跑"提升到"高效服务"。<strong>推导</strong>：以一个7B模型为例，朴素实现在batch_size=1时的decode速度约为10 tokens/s，而经过Continuous Batching（GPU利用率从50%提升到95%）、PagedAttention（KV Cache利用率从40%提升到95%）和算子融合（减少kernel launch开销）优化后，吞吐量可提升到100+ tokens/s。<strong>数学本质</strong>上，推理优化的三个维度——计算效率（MFU）、内存效率（KV Cache利用率）和调度效率（GPU利用率）——是乘法关系：总吞吐量 = 理论峰值 × MFU × 内存效率 × 调度效率。每个维度从0.5提升到0.9，总吞吐量就提升约3倍。推理引擎的价值正在于同时优化这三个维度。
+</div>
+
+<div class="tip"><strong>相关章节：</strong><a href="01-LoRA与PEFT.html">01-LoRA与PEFT</a> | <a href="02-量化技术.html">02-量化技术</a> | <a href="03-FlashAttention.html">03-FlashAttention</a></div>
+
+
+
+<div class="deep"><strong>深入探讨：</strong>
+从<strong>系统架构的角度</strong>看，推理引擎面临的核心挑战是如何在吞吐量和延迟之间找到最优平衡。高吞吐量要求大batch size（充分利用GPU并行性），但大batch会增加单请求的排队延迟。<strong>推导</strong>：设请求到达率为λ，服务率为μ，batch_size为B，则平均等待时间 ≈ B/(2μ) + 1/(μ-λ)。第一项随B增大而增大（batch等待时间），第二项随λ接近μ而急剧增大（排队效应）。最优的batch_size需要根据SLA要求（延迟上限）和负载特征（请求到达率）动态调整。vLLM和SGLang都实现了自适应调度策略，在满足延迟SLA的前提下最大化吞吐量。Prefill与Decode的分离架构（如DistServe）进一步将计算密集型和带宽密集型操作分配到不同的GPU上，各自优化。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习推理引擎时，很多人只看架构图而不实际部署和测试。建议动手做以下实验：(1) 用Ollama本地部署一个7B模型，测试单请求延迟和吞吐量；(2) 用vLLM部署同一模型，对比不同并发数（1/4/16/32）下的吞吐量提升；(3) 对比FP16和AWQ INT4模型的显存占用和推理速度差异；(4) 用vLLM的benchmark工具测量TTFT和ITL，理解Prefill和Decode阶段的性能特征。这些实验将帮助你建立对推理引擎优化效果的直觉理解。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为推理引擎只是"套个API框架"就可以忽视其底层机制。不理解KV Cache的显存计算公式（2×n_layers×n_kv_heads×d_head×seq_len×precision×batch_size）就无法合理规划GPU显存；不理解Continuous Batching的调度原理就无法优化多用户服务的延迟分布；不理解PagedAttention的分页机制就无法理解为什么vLLM的吞吐量比朴素实现高2-4倍。这些基础概念是正确配置推理引擎参数、诊断性能问题和做容量规划的前提。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+为什么需要推理引擎与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

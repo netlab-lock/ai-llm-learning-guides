@@ -1,0 +1,521 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PyTorch FSDP2完全指南 - 分布式训练系统</title><style>
+*{margin:0;padding:0;box-sizing:border-box}body{background:#0f1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;line-height:1.8;padding:20px;max-width:1000px;margin:0 auto}h1{color:#58a6ff;font-size:1.8em;margin:20px 0 10px;border-bottom:2px solid #30363d;padding-bottom:10px}h2{color:#79c0ff;font-size:1.4em;margin:25px 0 10px}h3{color:#d2a8ff;font-size:1.2em;margin:20px 0 8px}p{margin:10px 0}.nav{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:25px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}.nav a{color:#58a6ff;text-decoration:none;font-size:0.9em}.nav a:hover{text-decoration:underline}pre{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;overflow-x:auto;margin:15px 0;font-size:0.9em;line-height:1.6}code{background:#161b22;padding:2px 6px;border-radius:4px;font-size:0.9em;color:#e6edf3}pre code{background:none;padding:0}table{border-collapse:collapse;width:100%;margin:15px 0}th,td{border:1px solid #30363d;padding:10px 12px;text-align:left}th{background:#161b22;color:#58a6ff}tr:nth-child(even){background:#161b22}.highlight{background:#1a2332;border-left:4px solid #58a6ff;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.formula{background:#1a1a2e;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;text-align:center;font-family:'Courier New',monospace;color:#e6edf3}.ascii-art{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto}ul,ol{margin:10px 0 10px 25px}li{margin:5px 0}.warning{background:#2d1b00;border-left:4px solid #d29922;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.tip{background:#0d2818;border-left:4px solid #3fb950;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.footer{margin-top:40px;padding-top:20px;border-top:1px solid #30363d;font-size:0.85em;color:#8b949e}.ref{margin-top:30px;padding:16px;background:#161b22;border-radius:8px;border:1px solid #30363d}.ref h2{margin-top:0}.ref a{color:#58a6ff}</style></head><body><div class="nav"><a href="05-3D并行与混合并行.html">⬅ 3D并行与混合并行</a><a href="index.html">📖 目录</a><a href="07-通信原语与集合通信.html">通信原语与集合通信 ➡</a></div><h1>06 PyTorch FSDP2 完全指南</h1>
+
+<h2>FSDP1 vs FSDP2 的核心区别</h2>
+<p>FSDP2（Fully Sharded Data Parallel 2）是 PyTorch 原生的分布式训练方案，相比 FSDP1 有重大架构改进。</p>
+
+<table>
+<tr><th>特性</th><th>FSDP1</th><th>FSDP2</th></tr>
+<tr><td>参数表示</td><td>FlatParameter（所有参数拼成一个大张量）</td><td>每参数独立 shard（DTensor）</td></tr>
+<tr><td>混合精度</td><td>WrappedAMP</td><td>MixedPrecisionPolicy（更灵活）</td></tr>
+<tr><td>与 TP 结合</td><td>困难（FlatParameter 不兼容）</td><td>原生支持（DTensor 统一）</td></tr>
+<tr><td>torch.compile</td><td>不支持</td><td>支持</td></tr>
+<tr><td>分片粒度</td><td>整个模块</td><td>单个参数</td></tr>
+</table>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>FSDP2 最关键的改进是用 DTensor 替代 FlatParameter：每个参数独立分片（而非拼成一个大张量），这使得 FSDP2 天然兼容 TP 和 torch.compile。如果你在新项目中选择框架，FSDP2 是 PyTorch 原生方案的首选。迁移成本：将 FSDP 的 <code>FullyShardedDataParallel(model)</code> 替换为 <code>fully_shard(layer)</code> 即可。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>FSDP1 的 FlatParameter 方案在实践中有很多坑：参数名改变导致 checkpoint 加载困难、与 TP 不兼容、无法用 torch.compile。迁移到 FSDP2 可以一次性解决这些问题。但注意 FSDP2 需要较新版本的 PyTorch（2.2+）。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「FSDP1 vs FSDP2 的核心区别」的深层理解：从系统设计的角度看，TP的设计体现了关注点分离的原则——每个组件只负责一个明确的功能，通过清晰的接口协作。这种设计哲学是构建可维护、可扩展系统的基础。</div>
+<h2>FSDP2 核心 API</h2>
+<pre><code>import torch
+from torch.distributed._composable.fsdp import fully_shard
+from torch.distributed._tensor import DTensor
+
+# 模型定义
+model = TransformerModel(config)
+
+# 对每一层应用 FSDP
+for layer in model.layers:
+    fully_shard(layer)  # 每层独立分片
+
+# 最外层也应用 FSDP
+fully_shard(model)
+
+# 配置混合精度
+from torch.distributed._composable.fsdp import MixedPrecisionPolicy
+
+mp_policy = MixedPrecisionPolicy(
+    param_dtype=torch.bfloat16,      # 参数精度
+    reduce_dtype=torch.float32,       # 梯度归约精度
+    output_dtype=torch.bfloat16,      # 输出精度
+)
+
+for layer in model.layers:
+    fully_shard(layer, mp_policy=mp_policy)
+fully_shard(model, mp_policy=mp_policy)
+</code></pre>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>FSDP2 的核心 API 只有两个：<code>fully_shard(layer)</code> 和 <code>MixedPrecisionPolicy</code>。最佳实践：先对每层调用 <code>fully_shard(layer)</code>，再对整个模型调用 <code>fully_shard(model)</code>。混合精度推荐 BF16 参数 + FP32 梯度归约（<code>reduce_dtype=torch.float32</code>），兼顾精度和显存。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>FSDP2 API 的一个常见陷阱是分片顺序：必须先分片子模块，再分片父模块。如果反过来，子模块的参数会被父模块的分片覆盖，导致意外行为。另外 <code>MixedPrecisionPolicy</code> 的 <code>output_dtype</code> 参数容易被忽略，它控制前向输出的精度。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>FSDP2 的 API 设计哲学是「composable」（可组合的）——<code>fully_shard</code> 不是像 FSDP1 那样包装整个模型，而是对每一层独立应用。这种设计使得 FSDP2 可以与 TP、SP 等其他并行策略自由组合，每层可以有不同的分片策略。</div>
+<h2>FSDP2 的执行流程</h2>
+
+<div class="ascii-art">
+FSDP2 前向传播：
+┌─────────────────────────────────────────┐
+│ Layer 0 前向                             │
+│  1. AllGather 收集完整参数               │
+│  2. 计算前向                             │
+│  3. 释放非本地 shard（保留完整参数用于反向）│
+├─────────────────────────────────────────┤
+│ Layer 1 前向                             │
+│  ...同上...                              │
+└─────────────────────────────────────────┘
+
+FSDP2 反向传播：
+┌─────────────────────────────────────────┤
+│ Layer 1 反向                             │
+│  1. AllGather 收集完整参数               │
+│  2. 计算梯度                             │
+│  3. ReduceScatter 分片梯度              │
+│  4. 释放完整参数                         │
+├─────────────────────────────────────────┤
+│ Layer 0 反向                             │
+│  ...同上...                              │
+└─────────────────────────────────────────┘
+</div>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>FSDP2 的执行流程本质就是 ZeRO-3 的 PyTorch 原生实现。前向：AllGather → 计算 → 释放非本分片；反向：AllGather → 计算梯度 → ReduceScatter → 释放。理解这个流程对调试 OOM 和通信瓶颈至关重要。用 <code>torch.profiler</code> 可以可视化每层的 AllGather/ReduceScatter 耗时。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>FSDP2 执行流程中容易被忽略的细节是「释放时机」。前向时非本分片参数在计算完后立即释放，但完整参数会保留到反向结束后才释放（因为反向需要完整参数计算梯度）。这意味着峰值显存 = 分片参数 + 单层完整参数 + 激活值。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>FSDP2 的执行流程与 DeepSpeed ZeRO-3 几乎相同，但实现方式不同：DeepSpeed 用 C++ 扩展和自定义 CUDA kernel，FSDP2 用纯 Python + DTensor。FSDP2 的优势是更易调试和扩展，劣势是某些极端场景下性能可能略低。</div>
+<h2>FSDP2 + torch.compile</h2>
+<pre><code># FSDP2 与 torch.compile 组合使用
+model = TransformerModel(config)
+
+for layer in model.layers:
+    fully_shard(layer)
+fully_shard(model)
+
+# 编译模型（FSDP2 原生支持）
+compiled_model = torch.compile(model)
+
+# 训练循环
+for batch in dataloader:
+    loss = compiled_model(batch)
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+</code></pre>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>FSDP2 是第一个原生支持 torch.compile 的全分片方案。使用方式：<code>compiled_model = torch.compile(model)</code>，无需额外配置。实测收益：compile 可将训练吞吐提升 10-25%（取决于模型结构）。注意：自定义 CUDA 算子可能与 compile 不兼容，需要先检查。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>FSDP2 + torch.compile 的一个已知限制是动态 shape 支持。如果输入序列长度变化较大，compile 的 graph break 会增多，性能收益下降。建议在训练时使用固定的 padding 策略，确保输入 shape 尽量一致。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>FSDP2 与 torch.compile 的兼容性得益于 DTensor 的设计：DTensor 的分片和收集操作是 torch.compile 可以追踪的 Python 操作，不像 FSDP1 的 FlatParameter 需要特殊的 C++ 处理。这是 DTensor 统一抽象带来的额外好处。</div>
+<h2>FSDP2 + TP（DTensor 统一）</h2>
+<pre><code># FSDP2 与张量并行结合
+from torch.distributed.tensor.parallel import parallelize_module, ColwiseParallel, RowwiseParallel
+
+# 先应用 TP
+tp_plan = {
+    "attention.q_proj": ColwiseParallel(),
+    "attention.k_proj": ColwiseParallel(),
+    "attention.v_proj": ColwiseParallel(),
+    "attention.out_proj": RowwiseParallel(),
+    "mlp.fc1": ColwiseParallel(),
+    "mlp.fc2": RowwiseParallel(),
+}
+model = parallelize_module(model, device_mesh=tp_mesh, parallelize_plan=tp_plan)
+
+# 再应用 FSDP
+for layer in model.layers:
+    fully_shard(layer)
+fully_shard(model)
+</code></pre>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>FSDP2 + TP 的混合并行是 DTensor 统一抽象的核心优势。实现步骤：先用 <code>parallelize_module()</code> 应用 TP（ColwiseParallel/RowwiseParallel），再用 <code>fully_shard()</code> 应用 FSDP。TP 组内用 NVLink 做 AllReduce，TP 组间用 IB 做 FSDP 的 AllGather/ReduceScatter。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>FSDP2 + TP 配置的一个关键决策是 TP 度和 FSDP 度的分配。8 GPU 单机：TP=8（全 NVLink）或 TP=2+FSDP=4 是常见选择。TP 度越大，TP 通信越快（NVLink 带宽高），但 FSDP 的分片度越小（显存节省越少）。需要根据模型大小和通信带宽做权衡。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>FSDP2 + TP 的组合展示了 DTensor 统一抽象的价值：在 DTensor 框架下，TP 和 FSDP 只是同一张量的不同维度的分片方式。TP 沿列/行维度分片，FSDP 沿参数维度分片，两者可以自由组合而无需特殊处理。这是 FSDP2 相比 FSDP1 最大的架构优势。</div>
+<h2>实战：用 FSDP2 训练 7B 模型</h2>
+<pre><code>import torch
+import torch.distributed as dist
+from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+
+def main():
+    dist.init_process_group("nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+
+    # 模型
+    model = build_llama_7b(config).cuda()
+
+    # 混合精度策略
+    mp = MixedPrecisionPolicy(
+        param_dtype=torch.bfloat16,
+        reduce_dtype=torch.bfloat32,
+    )
+
+    # 分片
+    for layer in model.layers:
+        fully_shard(layer, mp_policy=mp)
+    fully_shard(model, mp_policy=mp)
+
+    # 优化器
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+
+    # 训练
+    for step, batch in enumerate(dataloader):
+        batch = {k: v.cuda() for k, v in batch.items()}
+        loss = model(**batch).loss
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        if step % 100 == 0:
+            print(f"Step {step}, Loss: {loss.item():.4f}")
+
+if __name__ == "__main__":
+    main()
+
+# 启动命令
+# torchrun --nproc_per_node=8 train.py
+</code></pre>
+
+<div class="tip">
+<p><strong>FSDP2 优势</strong>：PyTorch 原生，无需额外安装；API 简洁；与 torch.compile 和 TP 无缝集成。适合 7B-70B 模型训练。</p>
+</div>
+
+<div class="ref">
+<div class="warn"><strong>⚠️ 注意事项：</strong>7B 模型训练中的常见问题：① OOM 时检查是否开启了梯度检查点（<code>activation_checkpointing</code>）；② Loss 爆炸时检查混合精度配置，<code>reduce_dtype</code> 建议用 float32；③ 训练速度慢时检查是否开启了 <code>forward_prefetch</code> 和 <code>backward_prefetch</code>。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>FSDP2 训练 7B 模型的完整流程展示了 PyTorch 原生分布式训练的最佳实践：DTensor 分片 + 混合精度 + 通信预取 + 梯度累积。相比 DeepSpeed 的 JSON 配置方式，FSDP2 的代码方式更透明，适合需要深度定制的场景。</div>
+<h2>📚 参考资料</h2><ul>
+<li>Zhao et al., "PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel", VLDB 2023</li>
+<li>PyTorch FSDP2 官方文档: https://pytorch.org/docs/stable/fsdp.html</li>
+<li>torch.distributed 官方教程</li>
+</ul></div>
+
+<div class="tip"><strong>💡 实用技巧：</strong>深入学习资源：PyTorch 官方 FSDP2 教程（pytorch.org/tutorials/intermediate/FSDP_tutorial.html）是最佳入门材料。源码在 <code>torch/distributed/_composable/fsdp/</code> 目录。VLDB 2023 论文详细分析了 FSDP1 的设计决策和性能特征，对理解 FSDP2 的改进动机很有帮助。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>FSDP2 的发展速度很快，API 可能在新版本中有变化。建议锁定 PyTorch 版本（2.2+），并关注 PyTorch 官方的 release notes 中关于 FSDP2 的更新。特别是 DTensor 的 API 变化可能影响 FSDP2 的使用方式。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>FSDP2 vs DeepSpeed ZeRO-3 的选择：FSDP2 是 PyTorch 原生方案，无需额外安装，与 torch.compile 天然兼容；DeepSpeed ZeRO-3 是成熟方案，经过大规模生产验证，配置更简单（JSON）。对于 PyTorch 生态内的项目，FSDP2 是更自然的选择。</div>
+
+<h2>FSDP2 的核心架构与实现细节</h2>
+
+
+<h3>FSDP2 与 FSDP1 的架构对比</h3>
+
+<table>
+<tr><th>特性</th><th>FSDP1</th><th>FSDP2</th><th>改进意义</th></tr>
+<tr><td>底层抽象</td><td>FlatParameter</td><td>DTensor</td><td>更灵活的张量管理</td></tr>
+<tr><td>分片粒度</td><td>整个模块</td><td>单个参数</td><td>更细粒度控制</td></tr>
+<tr><td>通信调度</td><td>预定义顺序</td><td>计算图驱动</td><td>更好的重叠</td></tr>
+<tr><td>混合并行</td><td>需手动配置</td><td>原生支持</td><td>TP+FSDP 无缝集成</td></tr>
+<tr><td>激活检查点</td><td>独立模块</td><td>集成设计</td><td>统一管理</td></tr>
+<tr><td>混合精度</td><td>AmpScaler</td><td>原生 FP8/BF16</td><td>更低显存</td></tr>
+</table>
+
+<h3>FSDP2 的参数分片与收集流程</h3>
+
+
+<h3>FSDP2 的通信调度优化</h3>
+<table>
+<tr><th>优化技术</th><th>原理</th><th>效果</th><th>配置方式</th></tr>
+<tr><td>AllGather 预取</td><td>提前发起下一层的 AllGather</td><td>隐藏 50-80% 通信延迟</td><td>forward_prefetch=True</td></tr>
+<tr><td>ReduceScatter 预取</td><td>反向传播中提前发起</td><td>隐藏 30-50% 通信延迟</td><td>backward_prefetch=True</td></tr>
+<tr><td>梯度累积融合</td><td>多步梯度合并通信</td><td>减少通信次数</td><td>gradient_accumulation</td></tr>
+<tr><td>混合分片策略</td><td>部分参数不分片</td><td>减少频繁 AllGather</td><td>NO_SHARD 选项</td></tr>
+</table>
+
+<table>
+<tr><th>模型规模</th><th>GPU 数</th><th>FSDP2 显存/卡</th><th>MFU</th><th>对比 DeepSpeed ZeRO-3</th></tr>
+<tr><td>7B</td><td>8</td><td>~28 GB</td><td>45-50%</td><td>相当</td></tr>
+<tr><td>13B</td><td>16</td><td>~30 GB</td><td>42-48%</td><td>略低 2-3%</td></tr>
+<tr><td>70B</td><td>64</td><td>~35 GB</td><td>38-45%</td><td>相当</td></tr>
+<tr><td>175B</td><td>256</td><td>~40 GB</td><td>35-42%</td><td>略高 1-2%</td></tr>
+</table>
+
+<div class="ascii-art">
+FSDP2 参数分片与通信流程（2 GPU 示例）：
+
+前向传播:
+GPU 0: [param_shard_0]                    GPU 1: [param_shard_1]
+         ↓ AllGather                               ↓ AllGather
+       [param_full]                                [param_full]
+         ↓ compute                                 ↓ compute
+       [output]                                    [output]
+         ↓ release shard_1                         ↓ release shard_0
+       [param_shard_0]                            [param_shard_1]
+
+反向传播:
+GPU 0: [param_shard_0]                    GPU 1: [param_shard_1]
+         ↓ AllGather                               ↓ AllGather
+       [param_full]                                [param_full]
+         ↓ backward                                ↓ backward
+       [grad_full]                                 [grad_full]
+         ↓ ReduceScatter                           ↓ ReduceScatter
+       [grad_shard_0]                             [grad_shard_1]
+         ↓ update                                  ↓ update
+       [param_shard_0]                            [param_shard_1]
+</div>
+
+<div class="ascii-art">
+FSDP2 通信计算重叠示意图：
+
+时间 →
+Layer N 前向:   [AllGather_N][Compute_N][Release]
+Layer N+1 前向:       [AllGather_N+1][Compute_N+1]
+                              ↑
+                    预取：在 Compute_N 执行时发起 AllGather_N+1
+
+Layer N 反向:   [AllGather_N][Backward_N][ReduceScatter_N]
+Layer N-1 反向:       [AllGather_N-1][Backward_N-1][ReduceScatter_N-1]
+                              ↑
+                    预取：在 Backward_N 执行时发起 AllGather_N-1
+
+通信时间节省：约 40-60%（取决于计算/通信比）
+</div>
+
+<h3>练习与思考</h3>
+<div class="tip"><strong>向前串联：</strong>
+FSDP1 vs FSDP2 的核心区别的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+FSDP1 vs FSDP2 的核心区别与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+<div class="exercise"><strong>📝 练习题：</strong>
+<ol>
+<li>请用自己的话解释FSDP2的核心原理，并画出数据流向图。</li>
+<li>在给定的2-GPU环境下，配置并运行一个FSDP2的最小可行示例，记录性能数据。</li>
+<li>对比分析FSDP2与其他替代方案的优劣势，撰写500字的技术报告。</li>
+</ol>
+</div>
+
+<h2>📚 学习路径与建议</h2>
+<p>建议按照以下顺序系统学习分布式训练技术：</p>
+<ol>
+<li><strong>基础理论</strong>：理解集合通信原语和并行计算的基本概念</li>
+<li><strong>核心技术</strong>：掌握 ZeRO 系列、张量并行、流水线并行等关键技术</li>
+<li><strong>框架实践</strong>：深入学习 DeepSpeed、Megatron-LM、FSDP2 等主流框架</li>
+<li><strong>高级主题</strong>：研究容错训练、弹性训练、混合精度优化等进阶内容</li>
+<li><strong>工程实战</strong>：完成完整的3D并行训练项目，积累生产级经验</li>
+</ol>
+<p>推荐阅读顺序：<a href="05-3D并行与混合并行.html">上一章</a> → 本章 → <a href="07-通信原语与集合通信.html">下一章</a></p>
+
+<div class="highlight">
+<strong>🚀 继续学习：</strong>掌握本章内容后，建议继续深入学习<a href="07-通信原语与集合通信.html">下一章</a>，将理论知识转化为实践能力。
+在实际项目中，FSDP2通常需要与其他章节的技术结合使用，才能发挥最大训练效率。
+下一步请学习下一章的详细内容，了解更高级的优化策略和工程实践。
+</div>
+
+
+<h2>FSDP2 的核心架构与实现细节</h2>
+<p>PyTorch FSDP2（Fully Sharded Data Parallel 2）是 PyTorch 原生的全分片数据并行框架，相比 FSDP1 进行了大量架构改进。FSDP2 采用了更细粒度的分片策略和更灵活的通信调度，使得大模型训练更加高效。</p>
+
+<h3>FSDP2 与 FSDP1 的架构对比</h3>
+<p>FSDP2 不是 FSDP1 的简单升级，而是基于 DTensor 的全新设计。其核心变化包括参数管理、通信调度和混合并行支持等方面。</p>
+<table>
+<tr><th>特性</th><th>FSDP1</th><th>FSDP2</th><th>改进意义</th></tr>
+<tr><td>底层抽象</td><td>FlatParameter</td><td>DTensor</td><td>更灵活的张量管理</td></tr>
+<tr><td>分片粒度</td><td>整个模块</td><td>单个参数</td><td>更细粒度控制</td></tr>
+<tr><td>通信调度</td><td>预定义顺序</td><td>计算图驱动</td><td>更好的重叠</td></tr>
+<tr><td>混合并行</td><td>需手动配置</td><td>原生支持</td><td>TP+FSDP 无缝集成</td></tr>
+<tr><td>激活检查点</td><td>独立模块</td><td>集成设计</td><td>统一管理</td></tr>
+<tr><td>混合精度</td><td>AmpScaler</td><td>原生 FP8/BF16</td><td>更低显存</td></tr>
+</table>
+
+<h3>FSDP2 的参数分片与收集流程</h3>
+<p>FSDP2 将模型参数按 DTensor 的方式分片存储在不同 GPU 上。在前向传播时，通过 AllGather 收集完整参数；计算完成后立即释放非本 GPU 负责的参数分片。反向传播时再次 AllGather 收集参数，计算梯度后通过 ReduceScatter 分发梯度。</p>
+
+<h3>FSDP2 的通信调度优化</h3>
+<table>
+<tr><th>优化技术</th><th>原理</th><th>效果</th><th>配置方式</th></tr>
+<tr><td>AllGather 预取</td><td>提前发起下一层的 AllGather</td><td>隐藏 50-80% 通信延迟</td><td>forward_prefetch=True</td></tr>
+<tr><td>ReduceScatter 预取</td><td>反向传播中提前发起</td><td>隐藏 30-50% 通信延迟</td><td>backward_prefetch=True</td></tr>
+<tr><td>梯度累积融合</td><td>多步梯度合并通信</td><td>减少通信次数</td><td>gradient_accumulation</td></tr>
+<tr><td>混合分片策略</td><td>部分参数不分片</td><td>减少频繁 AllGather</td><td>NO_SHARD 选项</td></tr>
+</table>
+
+<table>
+<tr><th>模型规模</th><th>GPU 数</th><th>FSDP2 显存/卡</th><th>MFU</th><th>对比 DeepSpeed ZeRO-3</th></tr>
+<tr><td>7B</td><td>8</td><td>~28 GB</td><td>45-50%</td><td>相当</td></tr>
+<tr><td>13B</td><td>16</td><td>~30 GB</td><td>42-48%</td><td>略低 2-3%</td></tr>
+<tr><td>70B</td><td>64</td><td>~35 GB</td><td>38-45%</td><td>相当</td></tr>
+<tr><td>175B</td><td>256</td><td>~40 GB</td><td>35-42%</td><td>略高 1-2%</td></tr>
+</table>
+
+<div class="ascii-art">
+FSDP2 参数分片与通信流程（2 GPU 示例）：
+
+前向传播:
+GPU 0: [param_shard_0]                    GPU 1: [param_shard_1]
+         ↓ AllGather                               ↓ AllGather
+       [param_full]                                [param_full]
+         ↓ compute                                 ↓ compute
+       [output]                                    [output]
+         ↓ release shard_1                         ↓ release shard_0
+       [param_shard_0]                            [param_shard_1]
+
+反向传播:
+GPU 0: [param_shard_0]                    GPU 1: [param_shard_1]
+         ↓ AllGather                               ↓ AllGather
+       [param_full]                                [param_full]
+         ↓ backward                                ↓ backward
+       [grad_full]                                 [grad_full]
+         ↓ ReduceScatter                           ↓ ReduceScatter
+       [grad_shard_0]                             [grad_shard_1]
+         ↓ update                                  ↓ update
+       [param_shard_0]                            [param_shard_1]
+</div>
+
+<div class="ascii-art">
+FSDP2 通信计算重叠示意图：
+
+时间 →
+Layer N 前向:   [AllGather_N][Compute_N][Release]
+Layer N+1 前向:       [AllGather_N+1][Compute_N+1]
+                              ↑
+                    预取：在 Compute_N 执行时发起 AllGather_N+1
+
+Layer N 反向:   [AllGather_N][Backward_N][ReduceScatter_N]
+Layer N-1 反向:       [AllGather_N-1][Backward_N-1][ReduceScatter_N-1]
+                              ↑
+                    预取：在 Backward_N 执行时发起 AllGather_N-1
+
+通信时间节省：约 40-60%（取决于计算/通信比）
+</div>
+
+<h3>练习与思考</h3>
+<div class="exercise"><strong>📝 练习题：</strong>
+<ol>
+<li>请用自己的话解释FSDP2的核心原理，并画出数据流向图。</li>
+<li>在给定的2-GPU环境下，配置并运行一个FSDP2的最小可行示例，记录性能数据。</li>
+<li>对比分析FSDP2与其他替代方案的优劣势，撰写500字的技术报告。</li>
+</ol>
+</div>
+
+<h2>📚 学习路径与建议</h2>
+<p>建议按照以下顺序系统学习分布式训练技术：</p>
+<ol>
+<li><strong>基础理论</strong>：理解集合通信原语和并行计算的基本概念</li>
+<li><strong>核心技术</strong>：掌握 ZeRO 系列、张量并行、流水线并行等关键技术</li>
+<li><strong>框架实践</strong>：深入学习 DeepSpeed、Megatron-LM、FSDP2 等主流框架</li>
+<li><strong>高级主题</strong>：研究容错训练、弹性训练、混合精度优化等进阶内容</li>
+<li><strong>工程实战</strong>：完成完整的3D并行训练项目，积累生产级经验</li>
+</ol>
+<p>推荐阅读顺序：<a href="05-3D并行与混合并行.html">上一章</a> → 本章 → <a href="07-通信原语与集合通信.html">下一章</a></p>
+
+<div class="highlight">
+<strong>🚀 继续学习：</strong>掌握本章内容后，建议继续深入学习<a href="07-通信原语与集合通信.html">下一章</a>，将理论知识转化为实践能力。
+在实际项目中，FSDP2通常需要与其他章节的技术结合使用，才能发挥最大训练效率。
+下一步请学习下一章的详细内容，了解更高级的优化策略和工程实践。
+</div>
+
+<div class="ascii-art">
+FSDP2 的 DTensor 分片表示：
+
+完整参数张量 (8×8):
+┌───┬───┬───┬───┬───┬───┬───┬───┐
+│ 0 │ 1 │ 2 │ 3 │ 4 │ 5 │ 6 │ 7 │  Row 0
+├───┼───┼───┼───┼───┼───┼───┼───┤
+│ 8 │ 9 │10 │11 │12 │13 │14 │15 │  Row 1
+├───┼───┼───┼───┼───┼───┼───┼───┤
+│...│   │   │   │   │   │   │   │
+└───┴───┴───┴───┴───┴───┴───┴───┘
+
+2-GPU 行分片 (DTensor):
+GPU 0: rows 0-3 (32 elements)
+GPU 1: rows 4-7 (32 elements)
+
+AllGather 后每 GPU 得到完整 64 elements
+</div>
+<div class="ascii-art">
+FSDP2 MixedShard 策略示意：
+
+策略: transformer.auto_wrap_policy
+┌─────────────────────────────────────────┐
+│ TransformerBlock 0                       │
+│  ├─ attention.q_proj  [Shard(dim=0)]    │
+│  ├─ attention.k_proj  [Shard(dim=0)]    │
+│  ├─ attention.v_proj  [Shard(dim=0)]    │
+│  └─ attention.out_proj [Shard(dim=1)]   │
+│  ├─ mlp.fc1           [Shard(dim=0)]    │
+│  └─ mlp.fc2           [Shard(dim=1)]    │
+│  └─ layer_norm        [Replicate]       │
+├─────────────────────────────────────────┤
+│ TransformerBlock 1                       │
+│  └─ ... (同上)                           │
+└─────────────────────────────────────────┘
+
+每层参数独立分片，通信粒度更细
+</div>
+<div class="ascii-art">
+FSDP2 与 TP 组合的混合并行：
+
+8 GPU (单机), TP=2, FSDP_shard=4
+
+GPU: 0  1  2  3  4  5  6  7
+     ├──┤  ├──┤  ├──┤  ├──┤
+     TP组0  TP组1  TP组2  TP组3
+
+TP组内:  AllReduce (NVLink, 高带宽)
+TP组间:  AllGather/ReduceScatter (FSDP)
+
+Layer 执行流程:
+  1. FSDP AllGather: 收集完整参数 (TP组间)
+  2. TP AllReduce: 并行计算 (TP组内)
+  3. FSDP ReduceScatter: 分发梯度 (TP组间)
+
+优势: 兼顾通信效率和显存优化
+</div>
+
+<div class="ascii">FSDP2 参数分片与 AllGather 流程（2 GPU）：
+
+前向:
+GPU0: [shard_0] →AllGather→ [full_param] →compute→ release shard_1
+GPU1: [shard_1] →AllGather→ [full_param] →compute→ release shard_0
+
+反向:
+GPU0: [shard_0] →AllGather→ [full_param] →backward→ ReduceScatter→ [grad_0]
+GPU1: [shard_1] →AllGather→ [full_param] →backward→ ReduceScatter→ [grad_1]
+
+更新:
+GPU0: [shard_0] -= lr * [grad_0]
+GPU1: [shard_1] -= lr * [grad_1]
+</div>
+<div class="ascii">FSDP2 通信计算重叠示意：
+
+时间 →
+Layer N:   [AllGather][Compute ][RS ]
+Layer N+1:      [AllGather][Compute][RS]
+                      ↑ 预取
+
+Layer N 反向:   [AG][Backward ][RS ]
+Layer N-1 反向:    [AG][Backward][RS]
+                       ↑ 预取
+
+通信节省: 40-60% (取决于计算/通信比)
+配置: forward_prefetch=True, backward_prefetch=True
+</div>
+<div class="ascii">FSDP2 与 TP 混合并行（8 GPU, TP=2, FSDP=4）：
+
+GPU分组:
+  TP Group 0: [GPU0, GPU1] -- NVLink
+  TP Group 1: [GPU2, GPU3] -- NVLink
+  TP Group 2: [GPU4, GPU5] -- NVLink
+  TP Group 3: [GPU6, GPU7] -- NVLink
+
+执行流程:
+  1. FSDP AllGather (跨TP组, IB)
+  2. TP AllReduce (组内, NVLink)
+  3. FSDP ReduceScatter (跨TP组, IB)
+
+优势: NVLink 处理高频 TP 通信
+      IB 处理低频 FSDP 通信
+</div>
+<div class="footer">分布式训练系统深度指南 © 2026</div></body></html>

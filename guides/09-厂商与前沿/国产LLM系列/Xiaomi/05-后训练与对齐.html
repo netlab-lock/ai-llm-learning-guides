@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>05-后训练与对齐 | MiMo 学习指南</title>
+<style>
+:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#c9d1d9;--accent:#58a6ff;--green:#3fb950}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.6;padding:2rem;max-width:1100px;margin:0 auto}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+h1{font-size:2rem;color:#fff;margin-bottom:.3rem}
+.subtitle{color:var(--accent);font-size:1rem;margin-bottom:2rem}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1.5rem;margin-bottom:1.2rem}
+.card h2{color:#fff;font-size:1.3rem;margin-bottom:.8rem}
+.tag{display:inline-block;background:var(--border);color:var(--text);padding:2px 10px;border-radius:12px;font-size:.8rem;margin:2px}
+.tag.accent{background:rgba(88,166,255,.15);color:var(--accent)}
+.tag.green{background:rgba(63,185,80,.15);color:var(--green)}
+.tag.orange{background:rgba(210,153,34,.15);color:#d29922}
+table{width:100%;border-collapse:collapse;margin:1rem 0}
+th,td{padding:.6rem .8rem;text-align:left;border-bottom:1px solid var(--border);font-size:.9rem}
+th{color:var(--accent);font-weight:600}
+tr:hover{background:rgba(88,166,255,.05)}
+.highlight{background:rgba(63,185,80,.08);border-left:3px solid var(--green);padding:.8rem 1rem;border-radius:0 6px 6px 0;margin:1rem 0}
+.nav{margin-bottom:2rem;padding:.8rem 0;border-bottom:1px solid var(--border)}
+.nav a{margin-right:1.5rem;font-size:.95rem}
+.arch-box{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:1.5rem;margin:1rem 0;font-family:"Fira Code",monospace;font-size:.85rem;line-height:1.8}
+.arch-box .label{color:var(--accent);font-weight:600}
+.arch-box .val{color:var(--green)}
+.footer{text-align:center;margin-top:3rem;padding-top:1rem;border-top:1px solid var(--border);font-size:.8rem;opacity:.5}
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="nav"><a href="04-预训练策略与数据工程.html">&larr; 04-预训练策略与数据工程</a><span>05 后训练与对齐</span><a href="06-推理能力与长上下文.html">06-推理能力与长上下文 &rarr;</a></div>
+<div class="container">
+
+<h1>Xiaomi</h1>
+
+<h2>1. MiMo 后训练策略</h2>
+<p>1. MiMo 后训练策略的工程实践涉及数据管线、分布式训练和checkpoint管理三大子系统。Xiaomi的数据管线支持PB级数据的实时处理和质量监控；分布式训练系统采用数据并行+张量并行+流水线并行的三维并行策略；checkpoint管理支持增量保存和快速恢复。这些基础设施的完善程度直接决定了模型训练的效率和稳定性。</p>
+
+<h3>MiMo 后训练策略的技术原理与实现细节</h3>
+<p>1. MiMo 后训练策略的训练流程通常分为三个阶段：预训练(Pre-training)在大规模无标注语料上学习语言表示，微调(Fine-tuning)在任务特定数据上适配下游任务，对齐(Alignment)通过人类偏好反馈优化输出质量。每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。</p>
+
+
+
+<div class="tip"><strong>通俗类比：</strong>MiMo 后训练策略就像厨师学基本功——先练刀工火候(基础能力)，再学具体菜式(下游任务)。</div>
+<div class="warn"><strong>常见误区：</strong>学习Xiaomi的1. MiMo 后训练策时，不要陷入技术完美主义。Xiaomi的工程哲学是先跑起来再优化——用最小可行方案验证核心假设，再逐步迭代。</div>
+<div class="deep"><strong>深入探讨：</strong>从注意力矩阵的低秩特性看，Xiaomi在1. MiMo 后训练策方面的优化有理论基础。前100个奇异值解释95%方差，这为低秩近似提供了依据。Xiaomi的稀疏注意力设计正是利用这一特性。</div>
+<div class="ascii"><pre>MiMo 后训练策略 - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<p>MiMo 的后训练最大特点是：仅使用规则奖励，不使用奖励模型。</p>
+
+<h2>2. RL 数据准备</h2>
+<p>Xiaomi在2. RL 数据准备方面的技术积累体现在数据质量控制和训练策略优化两个维度。在数据方面，Xiaomi建立了多层数据过滤管线：基于规则的过滤、基于分类器的质量评分和基于多样性的采样。在训练策略方面，Xiaomi采用了学习率warmup、梯度裁剪和z-loss正则化等技术保障训练稳定性。这些措施确保了模型在大规模训练中的一致性和可复现性。</p>
+
+<h3>MiMo强化学习数据构建策略</h3>
+<p>MiMo的RL训练数据包含130K个可验证的数学和编程问题，全部采用规则奖励（Rule-based Accuracy Rewards）进行评估，完全不使用奖励模型。数学问题通过符号计算或数值验证判断答案正确性，编程问题通过运行测试用例验证代码功能。这种简洁的设计避免了奖励模型可能带来的"奖励黑客"问题，同时简化了训练流程。数据筛选时移除通过率超过90%的简单问题，确保训练数据具有足够的挑战性。</p>
+<div class="tip"><strong>通俗类比：</strong>如果把RL 数据准备比作酿酒，粮食(数据)+酒曲(算法)+时间(算力)=好酒(模型)。</div>
+<div class="warn"><strong>常见误区：</strong>学习Xiaomi的1. MiMo 后训练策时不要以为上下文越长模型越聪明。上下文长度只是工作记忆大小不等于推理能力。Xiaomi的长上下文技术在保持推理能力的同时扩展了记忆容量。</div>
+<div <div class="deep"><strong>深入探讨：</strong>从MoE路由的数学原理看，Xiaomi在1. MiMo 后训练策方面的门控函数为G(x)=softmax(W_g·x)。优化路由均衡性是提升MoE效率的关键。Xiaomi通过动态偏置项实现无辅助损失负载均衡。</div> class="ascii"><pre>RL 数据准备 - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<table>
+<thead><tr><th>配置</th><th>值</th></tr></thead>
+<tbody>
+<tr><td>问题数量</td><td class="hl">130K 可验证的数学和编程问题</td></tr>
+<tr><td>验证方式</td><td class="hl">规则奖励 (Rule-based Accuracy Rewards)</td></tr>
+<tr><td>奖励模型</td><td class="hl">不使用 (无 RM)</td></tr>
+</tbody>
+</table>
+
+<div class="box info">
+  <div class="label">💡 为什么不用奖励模型？</div>
+  <p>MiMo 选择规则奖励而非奖励模型，是因为数学和编程问题有明确的正确答案。规则奖励更精确、更稳定、且无需额外训练奖励模型。这简化了 RL 训练流程并提高了训练稳定性。</p>
+</div>
+
+<h2>3. 核心创新</h2>
+<p>3. 核心创新是Xiaomi技术体系中的重要组成部分。从系统工程角度看，这一技术的实现需要平衡计算效率、内存占用和输出质量三个维度。Xiaomi通过精心的架构设计和工程优化，在这三个维度上都达到了令人满意的平衡点。这种平衡能力是Xiaomi技术成熟度的重要体现。</p>
+
+<h3>MiMo后训练核心技术创新概览</h3>
+<p>MiMo在后训练阶段的核心创新集中在三个方面：纯规则奖励替代奖励模型、测试难度驱动的代码奖励方案、以及高效的RL基础设施。纯规则奖励利用数学和编程任务的可验证性，从根本上消除了奖励模型误差导致的训练不稳定。代码奖励方案借鉴IOI评分风格，根据测试用例的通过率动态调整权重，有效缓解了稀疏奖励问题。RL基础设施通过连续Rollout、异步奖励计算和提前终止机制，实现了2倍以上的训练加速。</p>
+
+
+<div class="tip"><strong>通俗类比：</strong>如果把核心创新比作搜索引擎排序，根据关键词相关度(注意力权重)排序结果。</div>
+<div class="warn"><strong>常见误区：</strong>Xiaomi在1. MiMo 后训练策方面的一个误区是以为训练数据越多越好。数据质量远比数量重要——低质量数据不仅浪费算力还可能污染模型能力。Xiaomi通过多层过滤管线确保数据质量。</div>
+<div class<div class="deep"><strong>深入探讨：</strong>Xiaomi在1. MiMo 后训练策方面的推理优化遵循FlashAttention的IO优化原理。通过分块计算将HBM访问从O(n²)降到理论下界。Xiaomi在A100上实测2-4倍加速，达到理论FLOPS的50-70%。</div>s="ascii"><pre>核心创新 - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<h3>3.1 测试难度驱动的代码奖励方案</h3>
+<div class="ascii">
+  Test-Difficulty-Driven Code-Reward Scheme
+  ┌──────────────────────────────────────────────────────────────┐
+  │                                                               │
+  │  传统方法: 所有测试用例等权                                   │
+  │  问题: 简单测试通过率高但不区分能力                           │
+  │                                                               │
+  │  MiMo 方法: IOI 风格评分                                      │
+  │  ┌────────────────────────────────────┐                      │
+  │  │  测试用例  │  通过率  │  权重      │                      │
+  │  │  Test-1    │  95%     │  低        │                      │
+  │  │  Test-2    │  60%     │  中        │                      │
+  │  │  Test-3    │  15%     │  高        │                      │
+  │  └────────────────────────────────────┘                      │
+  │                                                               │
+  │  效果: 缓解稀疏奖励问题, 区分不同能力水平                    │
+  │                                                               │
+  └──────────────────────────────────────────────────────────────┘
+</div>
+
+<h3>3.2 简单数据过滤与重采样</h3>
+<table>
+<thead><tr><th>策略</th><th>方法</th><th>目的</th></tr></thead>
+<tbody>
+<tr><td>过滤</td><td>移除通过率 >90% 的问题</td><td>避免简单问题主导训练</td></tr>
+<tr><td>重采样</td><td>战略性重采样</td><td>稳定训练过程</td></tr>
+</tbody>
+</table>
+
+<h2>4. RL 基础设施</h2>
+<p>Xiaomi在4. RL 基础设施方面的技术实现体现了其对工程质量和创新的追求。从技术原理到工程落地，Xiaomi在每个环节都进行了深入的优化。这些优化不仅提升了模型的性能指标，更重要的是提升了模型在实际应用中的可靠性和用户体验。Xiaomi的技术团队在实践中积累的"隐性知识"是其核心竞争力之一。</p>
+
+<h3>端侧量化验证与MiAI Engine集成</h3><p>MiMo的RL训练流程中包含了端侧量化验证环节——在RL训练完成后，通过MiAI Engine将模型量化到INT4/INT8精度，然后在量化模型上重新评估推理质量，确保量化不会显著影响RL训练获得的推理能力。这种"训练-量化-验证"的闭环流程保证了端侧部署模型的推理质量，使量化后的MiMo在MATH评测上精度损失控制在1%以内。</p>
+
+
+
+<div class="tip"><strong>通俗类比：</strong>Xiaomi在技术实现方面的技术积累是多年工程实践的结果。从最初的架构探索到大规模部署的工程优化，每一步都建立在对前一步经验的总结之上。这种渐进式的技术演进路线确保了每次改进都是可验证和可复现的。</div>
+<div class="warn"><strong>常见误区：</strong>关于Xiaomi的1. MiMo 后训练策，很多人以为注意力权重代表token重要性。实际上注意力只是Q-K点积的相关性度量。Xiaomi的多头注意力设计通过多个视角综合判断token的真正重要性。</div>
+<div class="dee<div class="deep"><strong>深入探讨：</strong>从信息论角度看，Xiaomi的核心挑战是"在有限的计算资源下最大化信息处理效率"。模型的每一层都在进行信息压缩和提取——将高维输入压缩为低维表示，同时保留任务相关的关键信息。Xiaomi通过注意力机制实现动态的信息路由。</div>cii"><pre>RL 基础设施 - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<table>
+<thead><tr><th>组件</th><th>说明</th><th>效果</th></tr></thead>
+<tbody>
+<tr><td>连续 Rollout 引擎</td><td>不间断生成训练样本</td><td>提高 GPU 利用率</td></tr>
+<tr><td>异步奖励计算</td><td>奖励评估与生成并行</td><td>减少等待时间</td></tr>
+<tr><td>提前终止</td><td>Early Termination</td><td>跳过无价值样本</td></tr>
+<tr><td>整体加速</td><td>—</td><td class="hl">2.x 加速</td></tr>
+</tbody>
+</table>
+
+<h2>5. 小结</h2>
+<p>5. 小结是Xiaomi技术体系中的重要组成部分。从系统工程角度看，这一技术的实现需要平衡计算效率、内存占用和输出质量三个维度。Xiaomi通过精心的架构设计和工程优化，在这三个维度上都达到了令人满意的平衡点。这种平衡能力是Xiaomi技术成熟度的重要体现。</p>
+
+<h3>5. 小结的工程实践与性能优化</h3>
+<p>在实际工程应用中，5. 小结的实现需要在准确率、推理速度和资源消耗之间找到最优平衡。关键优化策略包括：(1)算子融合(Operator Fusion)将多个小kernel合并为一个大kernel，减少GPU启动开销和中间结果的显存读写；(2)混合精度计算在保持数值稳定性的前提下使用FP16/BF16，将显存占用降低约50%；(3)动态批处理(Dynamic Batching)根据请求的序列长度自适应调整batch大小，最大化GPU利用率。</p>
+
+
+<h3>5. 小结的最新研究进展与未来方向</h3>
+
+
+<h3>5. 小结的工程实践与性能优化（Xiaomi视角1）</h3>
+<p>在实际工程应用中，5. 小结的实现需要在准确率、推理速度和资源消耗之间找到最优平衡。关键优化策略包括：(1)算子融合(Operator Fusion)将多个小kernel合并为一个大kernel，减少GPU启动开销和中间结果的显存读写；(2)混合精度计算在保持数值稳定性的前提下使用FP16/BF16，将显存占用降低约50%；(3)动态批处理(Dynamic Batching)根据请求的序列长度自适应调整batch大小，最大化GPU利用率。</p>
+
+
+<h3>5. 小结的最新研究进展与未来方向（Xiaomi视角1）</h3<div class="tip"><strong>通俗类比：</strong>Xiaomi在技术实现方面的设计理念就像交响乐团——弦乐(注意力)、管乐(FFN)、打击(归一化)各司其职，指挥(调度器)协调全局。单独听每个声部可能平平无奇，合在一起才能奏出华章。</div>div>
+<div class="warn"><strong>常见误区：</strong>Xiaomi在1. MiMo 后训练策方面的常见误区是以为换推理框架就能解决所有性能问题。实际上框架只是变速箱，瓶颈可能在模型、硬件或数据。Xiaomi建议先profiler定位再优化。</div>
+<div class="deep"><s<div class="deep"><strong>深入探讨：</strong>从注意力矩阵的低秩特性看，Xiaomi在1. MiMo 后训练策方面的优化有理论基础。前100个奇异值解释95%方差，这为低秩近似提供了依据。Xiaomi的稀疏注意力设计正是利用这一特性。</div><pre>小结 - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<div class="box tip">
+  <div class="label">✅ 要点</div>
+  <ol>
+    <li><strong>纯规则奖励</strong>: 不使用 RM, 仅用规则准确性奖励</li>
+    <li><strong>代码奖励</strong>: 测试难度驱动, IOI 风格评分, 缓解稀疏奖励</li>
+    <li><strong>数据过滤</strong>: 移除 >90% 通过率问题, 战略重采样</li>
+    <li><strong>RL 工程</strong>: 连续 Rollout + 异步奖励 + 提前终止, 2.x 加速</li>
+  </ol>
+</div>
+
+</div>
+<div class="footer"><p><a href="index.html">返回MiMo总览</a> | <a href="../index.html">返回国产LLM总览</a> | 小米MiMo系列深度学习指南</p></div>
+
+<div class="deep"><strong>思考与练习：</strong>
+<ol>
+<li><strong>概念理解：</strong>请用自己的话解释"MiMo 后训练策略"的核心原理，并说明它在Xiaomi技术体系中的定位。</li>
+<li><strong>对比分析：</strong>对比"MiMo 后训练策略"与"RL 数据准备"的异同点，分析各自的适用场景和优劣势。</li>
+<li><strong>实践思考：</strong>如果要将本章技术应用到实际项目中，你会如何设计方案？请列出关键步骤并说明可能遇到的挑战。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+本章内容为理解Xiaomi后续更高级的技术主题奠定了基础。建议在学习后续章节时，回顾本章的核心概念作为知识锚点。特别是本章介绍的关键技术原理，将在后续的性能优化和工程部署中反复出现。
+</div>
+
+<div class="deep"><strong<div class="deep"><strong>深入探讨：</strong>Xiaomi在1. MiMo 后训练策方面的DPO训练消除了显式奖励模型。损失函数L=-logσ(β·(logπ(y_w)/π_ref(y_w)-logπ(y_l)/π_ref(y_l)))直接从偏好数据优化策略。Xiaomi的实践表明DPO+SFT两阶段训练效果与RLHF相当。</div>全摒弃了奖励模型（Reward Model），转而采用纯规则奖励（Rule-based Accuracy Rewards）进行强化学习训练。这一设计决策源于一个深刻的洞察：数学和编程任务具有明确的正确答案，可以被程序化验证——数学题可以通过符号计算或数值验证判断答案正确性，编程题可以通过运行测试用例验证代码功能。在这些可验证任务上，规则奖励比神经网络奖励模型更精确、更稳定，且完全避免了奖励模型可能带来的"奖励黑客"（Reward Hacking）问题——即模型学会利用奖励模型的缺陷获得高分而非真正解决问题。MiMo使用130K个可验证的数学和编程问题作为RL训练数据，通过规则奖励直接评估答案的正确性，这一简洁设计不仅简化了训练流程（无需额外训练和维护奖励模型），还显著提升了训练稳定性——传统RLHF中奖励模型的误差会通过PPO的策略梯度被放大，导致训练不稳定甚至崩溃，而规则奖励的确定性从根本上消除了这一风险。</p>
+
+<p>在代码奖励设计方面，MiMo引入了"测试难度驱动的代码奖励方案"（Test-Difficulty-Driven Code-Reward Scheme），这是一种借鉴IOI（国际信息学奥林匹克）评分风格的创新机制。传统的代码评估方法对所有测试用例赋予相同权重，导致简单测试用例的通过率极高（通常超过95%），无法有效区分不同能力水平的模型。MiMo的方法根据测试用例的通过率动态调整权重：通过率高的简单测试赋予较低权重，通过率低的困难测试赋予较高权重。这种加权机制有效缓解了RL训练中的"稀疏奖励"问题——在传统方法中，如果一个模型生成的代码只通过了简单测试而未通过困难测试，它获得的奖励信号与完全不通过的模型差异很小，导致梯度信号微弱、学习效率低下。此外，MiMo还实施了"简单数据过滤与重采样"策略——移除通过率超过90%的简单问题避免它们主导训练梯度，并通过战略性重采样确保困难问题在每个训练批次中占据足够比例，进一步稳定了RL训练过程。在RL基础设施方面，MiMo的连续Rollout引擎实现了不间断生成训练样本，异步奖励计算将奖励评估与生成并行执行，提前终止机制跳过无价值样本，整体实现了2倍以上的训练加速。</p>
+
+<p>小米MiMo在后训练阶段的创新代表了大模型对齐技术的一次重要范式转移——从依赖神经网络奖励模型的RLHF转向基于确定性规则的纯规则奖励。这一决策的深层逻辑在于数学和编程任务的可验证性本质：数学题可通过符号计算或数值验证判断正确性，编程题可通过运行测试用例验证功能，规则奖励在这些任务上比神经网络奖励模型更精确、更稳定，且完全避免了"奖励黑客"问题。MiMo使用130K个可验证问题作为RL训练数据，通过规则奖励直接评估答案正确性，不仅简化了训练流程（无需额外训练维护奖励模型），还显著提升了训练稳定性。在代码奖励设计上，MiMo借鉴IOI评分风格的测试难度驱动机制，根据测试用例通过率动态调整权重——通过率高的简单测试赋予较低权重，通过率低的困难测试赋予较高权重，有效缓解了RL训练中的稀疏奖励问题。简单数据过滤策略移除通过率超过90%的简单问题，通过战略性重采样确保困难问题在训练批次中占据足够比例。在RL基础设施方面，MiMo的连续Rollout引擎实现不间断生成训练样本，异步奖励计算将奖励评估与生成并行执行，提前终止机制跳过无价值样本，整体实现2倍以上训练加速。这种简洁高效的设计理念为国产大模型的后训练技术提供了新思路。</p>
+
+<p>小米MiMo在后训练阶段的技术创新代表了大模型对齐技术从依赖神经网络奖励模型的RLHF范式向基于确定性规则的纯规则奖励范式的重要转变。这一转变的核心逻辑在于利用数学和编程任务的可验证性本质——数学题可通过符号计算或数值验证判断正确性，编程题可通过运行测试用例验证功能，规则奖励在这些任务上比神经网络奖励模型更精确、更稳定且完全避免了奖励黑客问题。MiMo使用130K个可验证问题作为RL训练数据，通过规则奖励直接评估答案正确性，不仅简化了训练流程无需额外训练维护奖励模型，还显著提升了训练稳定性。在代码奖励设计上，MiMo借鉴IOI评分风格的测试难度驱动机制，根据测试用例通过率动态调整权重——通过率高的简单测试赋予较低权重、通过率低的困难测试赋予较高权重，有效缓解了RL训练中的稀疏奖励问题。简单数据过滤策略移除通过率超过90%的简单问题，通过战略性重采样确保困难问题在训练批次中占据足够比例。在RL基础设施方面，连续Rollout引擎实现不间断生成训练样本，异步奖励计算将奖励评估与生成并行执行，提前终止机制跳过无价值样本，整体实现2倍以上训练加速。这种简洁高效的设计理念证明了在可验证任务上简单的规则系统可以胜过复杂的神经网络奖励模型，为国产大模型后训练技术开辟了新的方向。</p>
+
+<p style="margin-top:24px;padding:20px;background:#161b22;border:1px solid #30363d;border-radius:8px;font-size:0.93em;line-height:1.8;">小米MiMo在后训练阶段的技术创新代表了大模型对齐技术从依赖神经网络奖励模型的RLHF范式向基于确定性规则的纯规则奖励范式的重要转变，覆盖后训练策略、RL数据准备、核心创新、RL基础设施和效果总结五个关键环节。这一转变的核心逻辑在于利用数学和编程任务的可验证性本质——数学题可通过符号计算或数值验证判断正确性，编程题可通过运行测试用例验证功能，规则奖励在这些任务上比神经网络奖励模型更精确、更稳定且完全避免了奖励黑客问题。MiMo使用130K个可验证问题作为RL训练数据，通过规则奖励直接评估答案正确性，不仅简化了训练流程无需额外训练维护奖励模型，还显著提升了训练稳定性。在代码奖励设计上，MiMo借鉴IOI评分风格的测试难度驱动机制，根据测试用例通过率动态调整权重——通过率高的简单测试赋予较低权重、通过率低的困难测试赋予较高权重，有效缓解了RL训练中的稀疏奖励问题。简单数据过滤策略移除通过率超过90%的简单问题，通过战略性重采样确保困难问题在训练批次中占据足够比例。在RL基础设施方面，连续Rollout引擎实现不间断生成训练样本，异步奖励计算将奖励评估与生成并行执行，提前终止机制跳过无价值样本，整体实现2倍以上训练加速。后训练流程通常分为预训练（大规模无标注语料学习语言表示）、微调（任务特定数据适配下游任务）和对齐（人类偏好反馈优化输出质量）三个阶段，每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。混合精度训练（FP16/BF16）减少显存占用约50%，梯度累积在有限显存下模拟大batch，分布式训练扩展到多节点。</p>
+<p style="margin-top:1.5rem;padding:0.8rem;background:var(--surface-2,#1e1e2e);border-radius:6px;border-left:3px solid var(--accent,#7c3aed);">📌 <strong>学习目标：</strong>通过本节学习，掌握核心概念与技术原理，为后续进阶学习奠定基础。</p>
+<div class="tip"><strong>学习路径建议：</strong>建议先理解本节的基础概念和核心原理，再深入学习数学推导和工程实现细节。可结合配套的代码示例进行动手实践，最后通过对比分析巩固所学知识。</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释MiMo 后训练策略的核心原理，并举一个实际应用场景。</li>
+<li>MiMo 后训练策略在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比MiMo 后训练策略与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>相关章节：</strong>
+MiMo 后训练策略与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

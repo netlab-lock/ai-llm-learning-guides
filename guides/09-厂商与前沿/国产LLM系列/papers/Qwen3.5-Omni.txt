@@ -1,0 +1,458 @@
+2026-04-22
+Qwen3.5-Omni Technical Report
+Qwen Team
+https://huggingface.co/spaces/Qwen/Qwen3.5-Omni-Online-Demo
+https://modelscope.cn/studios/Qwen/Qwen3.5-Omni-Online-Demo
+Abstract
+In this work, we present Qwen3.5-Omni, the latest advancement in the Qwen-Omni
+model family. Representing a significant evolution over its predecessor, Qwen3.5-Omni
+scales to hundreds of billions of parameters and supports a 256k context length. By
+leveraging a massive dataset comprising heterogeneous text-vision pairs and over 100
+million hours of audio-visual content, the model demonstrates robust omni-modality ca-
+pabilities. Qwen3.5-Omni-Plus achieves SOTA results across 215 audio and audio-visual
+understanding, reasoning, and interaction subtasks and benchmarks, surpassing Gemini-
+3.1 Pro in key audio tasks and matching it in comprehensive audio-visual understanding.
+Architecturally, Qwen3.5-Omni employs a Hybrid Attention Mixture-of-Experts (MoE)
+framework for both Thinker and Talker, enabling efficient long-sequence inference. The
+model facilitates sophisticated interaction, supporting over 10 hours of audio under-
+standing and 400 seconds of 720P video (at 1 FPS). To address the inherent instability
+and unnaturalness in streaming speech synthesis—often caused by encoding efficiency
+discrepancies between text and speech tokenizers—we introduce ARIA (Adaptive Rate
+Interleave Alignment). ARIA dynamically aligns text and speech units, significantly
+enhancing the stability and prosody of conversational speech with minimal latency
+impact. Furthermore, Qwen3.5-Omni expands linguistic boundaries, supporting mul-
+tilingual understanding and speech generation across 10 languages with human-like
+emotional nuance. Beyond preset voices, the model enables zero-shot voice customiza-
+tion via user-provided samples. Finally, Qwen3.5-Omni exhibits superior audio-visual
+grounding capabilities, generating script-level structured captions with precise temporal
+synchronization and automated scene segmentation. Remarkably, we observed the
+emergence of a new capability in omnimodal models: directly performing coding based
+on audio-visual instructions, which we call Audio-Visual Vibe Coding. Qwen3.5-Omni
+is publicly accessible via API1.
+1
+Introduction
+Human interaction with the world is inherently omnimodal and agentic, involving the integration of
+visual, auditory, and linguistic information, and the production of responses through text, speech, and
+goal-directed tool-mediated actions, facilitating information exchange with other organisms and demon-
+strating intelligence. Building on the rapid advances in the understanding and reasoning capabilities
+of large models across text (Brown et al., 2020; OpenAI, 2023; Gemini Team, 2024; Anthropic, 2023a;b;
+2024; Bai et al., 2023a; Yang et al., 2024a; 2025a; Touvron et al., 2023; Dubey et al., 2024), vision (Li
+et al., 2023; Liu et al., 2023; Zhu et al., 2023; Bai et al., 2023b; 2025a), and audio (Chu et al., 2023; 2024),
+natively omnimodal systems that jointly process and generate across all modalities have drawn sub-
+stantial attention (OpenAI, 2024; Comanici et al., 2025; Xu et al., 2025a;b). However, existing models
+predominantly operate within passive perception-response paradigms and exhibit limited capacity for
+scalable agentic behavior, real-time interaction, autonomous tool utilization, and cross-modal reasoning,
+which are essential prerequisites for practical deployment.
+In this report, we present Qwen3.5-Omni, Qwen’s latest generation of fully omnimodal LLM, supporting
+the understanding of text, images, audio, and audio-visual content. Natively pretrained in an omnimodal
+manner on massive amounts of text, visual data, and more than 100 million hours of audio-visual data,
+Qwen3.5-Omni is designed as a native omni agent model: it not only perceives and reasons across all
+modalities, but also acts, autonomously invoking WebSearch, executing complex FunctionCall, generating
+speech outputs, and engaging in real-time streaming interaction. The model series includes Plus and
+Flash variants, all of which are instruct models with 256k-token long-context input.
+Qwen3.5-Omni builds on the Thinker–Talker architecture introduced in Qwen2.5-Omni (Xu et al., 2025a)
+and introduces five key technical upgrades over Qwen3-Omni (Xu et al., 2025b): (1) both the Thinker
+1https://www.alibabacloud.com/help/en/model-studio/qwen-omni
+1
+arXiv:2604.15804v2  [cs.CL]  21 Apr 2026
+Figure 1: Qwen3.5-Omni is a unified end-to-end model capable of processing multiple modalities, such
+as text, audio, image and video, and generating real-time text or speech response. Based on these
+features, Qwen3.5-Omni supports a wide range of tasks, including but not limited to voice dialogue,
+video dialogue, and audio-visual tool use.
+and Talker adopt Hybrid-Attention Mixture-of-Experts (MoE) designs, enabling highly efficient inference;
+(2) supporting long-context modeling up to 256k tokens, supporting more than 10 hours of audio and
+over 400 seconds of 720P audio-visual content at 1 FPS; (3) on the speech generation side, a multi-
+codebook codec representation enables single-frame, immediate synthesis; (4) the Talker introduces
+ARIA, a technique that dynamically aligns text and speech units during streaming decoding, significantly
+improving naturalness and robustness; and (5) multilingual training is substantially expanded, covering
+113 languages and dialects for speech recognition and 36 for speech synthesis.
+Enabled by these technical advances, Qwen3.5-Omni delivers three major new capabilities over Qwen3-
+Omni: (1) controllable audio-visual captioning, capable of generating controllable, detailed, and struc-
+tured captions as well as screenplay-level fine-grained descriptions, including automatic segmentation,
+timestamp annotation, and detailed descriptions of characters and their relationship to audio; (2) com-
+prehensive real-time interaction, encompassing semantic interruption through native turn-taking intent
+recognition, end-to-end voice control over volume, speed, and emotion, and voice cloning from user-
+provided samples; and (3) native omnimodal agentic behavior, including autonomous WebSearch,
+complex FunctionCall invocation, and Audio-Visual Vibe Coding, an emergent capability wherein the
+model directly generates executable code from audio-visual instructions, enabling the model to respond
+to real-time queries without external orchestration.
+Critically, Qwen3.5-Omni maintains state-of-the-art performance on text and visual modalities without
+degradation relative to same-size single-model Qwen counterparts. Across 215 audio and audio-visual
+understanding, reasoning, and interaction subtasks and benchmarks, covering audio-visual benchmarks,
+audio benchmarks, ASR benchmarks, language-specific speech-to-text translation tasks, and language-
+specific ASR tasks, Qwen3.5-Omni-Plus achieves SOTA results, surpassing Gemini-3.1 Pro across general
+audio understanding, reasoning, recognition, translation, and dialogue, while its overall audio-visual
+understanding reaches the level of Gemini-3.1 Pro.
+2
+Architecture
+2.1
+Overview
+As shown in Figure 2, Qwen3.5-Omni continues to adopt the Thinker-Talker architecture (Xu et al., 2025a).
+Compared with Qwen3-Omni (Xu et al., 2025b), Qwen3.5-Omni introduces several key improvements in
+scalability, alignment, and real-time interaction:
+2
+Figure 2: The overview of Qwen3.5-Omni. Qwen3.5-Omni adopts the Thinker-Talker architecture.
+Thinker is tasked with text generation while Talker focuses on generating streaming speech tokens by
+receives high-level representations directly from Thinker. To achieve ultra–low-latency streaming, Talker
+autoregressively predicts a multi-codebook sequence. At each decoding step, an MTP module outputs the
+residual codebooks for the current frame, after which the Code2Wav renderer incrementally synthesizes
+the corresponding waveform, enabling frame-by-frame streaming generation.
+• The overall backbone adopts a Hybrid Mixture-of-Experts (MoE) design, improving scalability
+while better balancing capacity and efficiency across multimodal understanding and generation.
+• The Thinker receives visual and audio signals through the Vision Encoder and AuT, respectively.
+Audio and video inputs are interleaved for unified multimodal modeling, with explicit times-
+tamps inserted to improve temporal perception, especially for long video or audio-video contexts.
+This design enables the Thinker to handle extended inputs, supporting up to 256k tokens, 10
+hours of audio, or 400 seconds of 720P video at 1 FPS.
+• The Talker is responsible for contextual speech generation by conditioning on multimodal
+inputs together with the textual outputs from the Thinker. Qwen3.5-Omni adopts the RVQ-
+based speech representation introduced in Qwen3-Omni (Xu et al., 2025b), which substantially
+improves inference efficiency.
+• To support real-time interaction, Qwen3.5-Omni adopts both chunk-wise streaming input process-
+ing in the Thinker and a streaming Talker design, enabling low-latency end-to-end multimodal
+conversation.
+• Different from the dual-track Talker input design in Qwen3-Omni (Xu et al., 2025b), the Talker
+in Qwen3.5-Omni adopts ARIA to dynamically align text and speech units before interleaving
+them. This design mitigates the instability caused by mismatched tokenization rates between
+text and speech, thereby reducing issues such as skipped words, incorrect pronunciations, and
+ambiguous rendering of numbers.
+In the following sections, we first introduce with the AuT encoder, including its training methodology.
+Then, describe how Thinker processes various inputs. We then detail Talker’s multi-codebook streaming
+speech generation. Finally, we highlight a series of improvements on both the understanding and
+generation modules aimed at achieving ultra–low-latency, end-to-end streaming audio inference.
+3
+Figure 3: The overview of AuT. Consuming 40 million hours of supervised data especially more multi-
+lingual data, AuT encoder in Qwen3.5-Omni obtain stronger general purpose audio representation in
+6.25Hz.
+2.2
+Audio Transformer (AuT)
+We use transformer based audio encoder trained from scratch in attention-encoder-decoder model AuT,
+as is shown in Figure 3. The training of Qwen3.5-Omni encoder consumed 40 million hours of audio-text
+pair data generated by Qwen3-ASR. The filter bank features of the audio are downsampled 16 times
+using 4 Conv2D blocks and then fed into self-attention layers to obtain audio tokens in 6.25Hz token rate.
+Comparing to the training process of Qwen3-Omni encoder, the encoder of Qwen3.5-Omni adapts more
+multilingual data of more than 20 languages, and the proportion of Chinese, English and multilingual
+data comes to 3.5 : 3.5 : 3. The dynamic attention window size training mechanism is adopted for
+guaranting balance performance of inference under real-time prefill caching and for the offline audio
+understanding tasks.
+2.3
+Perceivation
+Text, Audio, Image and Video (w/o Audio).
+The Thinker converts text, audio, image, and silent video
+inputs into a unified sequence of representations. For text, we use the Qwen3.5 tokenizer (Team, 2026),
+which adopts byte-level byte-pair encoding with a vocabulary size of 250k (up from 150k), improving
+encoding and decoding efficiency by 10–60% across most languages. For audio inputs, including audio
+extracted from video, we resample the waveform to 16 kHz and convert it into a 128-channel mel-
+spectrogram using a 25 ms window and a 10 ms hop size. We use AuT as the audio encoder, trained
+from scratch on 40 million hours of audio data, where each output frame corresponds to approximately
+160 ms of the original signal. For visual inputs, we adopt the vision encoder from Qwen3.5 (Team,
+2026) to process both images and videos. Trained on a mixture of image and video data, this encoder
+provides strong capabilities in both image understanding and video comprehension. To preserve video
+information as much as possible while maintaining alignment with the audio stream, we sample video
+frames at a dynamic frame rate.
+Audio-visual Timestamp.
+Following Qwen3-Omni (Xu et al., 2025b), we apply TM-RoPE to endow
+the model with temporal awareness for audio-video synchronization. However, we find that directly
+encoding absolute time through temporal position IDs can lead to excessively sparse indices for visual
+patches from long video with audio inputs, which weakens long-range temporal modeling. In addition,
+such a design often requires large-scale and uniformly distributed training samples across different frame
+rates, increasing data construction cost. To address these issues, we prepend each video or audio-video
+temporal patch with an explicit timestamp represented as a formatted text string in seconds, allowing
+the model to learn timecode representations more naturally. For audio sequences, we further insert
+timestamps at random intervals to improve temporal alignment across modalities. Although this strategy
+4
+slightly increases the context length, it enables more precise and robust temporal perception, especially
+when extrapolating long-context multimodal inputs.
+In the context of multimodal audio-visual streams, the audio component is encoded with a temporal ID
+for every 160 ms. The video is treated as a sequence of frames with monotonically increasing temporal
+IDs that are dynamically adjusted based on their actual timestamps to ensure a consistent temporal
+resolution of 160 ms per ID. The height and width IDs for video frames are assigned in the same manner
+as for still images. To prevent positional conflicts when processing multiple modalities, the position
+numbering is made contiguous, with each subsequent modality commencing from one plus the maximum
+position ID of the preceding modality. This refined approach to positional encoding enables the model to
+effectively integrate and jointly model information from diverse modalities. Qwen3.5-Omni aligns these
+representations using their temporal IDs, which are explicitly anchored to absolute time. This design
+choice affords the model the flexibility to support streaming inputs of arbitrary duration.
+2.4
+Speech Generation
+Talker operates directly on the RVQ tokens produced by Qwen3.5-Omni-Audio-Tokenizer. To model the
+residual codebooks, it employs a multi-token prediction (MTP) module, which enables fine-grained
+modeling and control of acoustic details. Coupled with a causal ConvNet for waveform reconstruction,
+Talker delivers high-fidelity speech synthesis with low inference latency and modest computational
+overhead.
+In multi-turn spoken dialogue, Talker is conditioned on the rich contextual information provided by the
+Thinker component, including historical text tokens, multimodal representations, and the streamed text
+of the current turn. Such conditioning allows Talker to dynamically modulate acoustic attributes—such
+as prosody, loudness, and emotion—in accordance with the evolving conversational context.
+Architecturally, our approach differs from Qwen3-Omni (Xu et al., 2025b) in two key respects. First, we
+introduce a dedicated system prompt for Talker that specifies target voice characteristics, thereby enabling
+both zero-shot voice cloning and controllable speech generation. Compared with conventional speaker
+embeddings, this prompt can encode richer multimodal cues, including textual descriptions and codec
+sequences, providing substantially finer-grained control over acoustic realization. Second, we propose
+ARIA (Adaptive Rate Interleave Alignment), which unifies the conventional dual-channel generation
+paradigm into a single-channel formulation. Rather than relying on MFA-derived alignments or fixed
+interleaving rates, ARIA enforces an adaptive rate constraint: for any prefix of the generated sequence,
+the cumulative speech-to-text token ratio must not exceed the corresponding item-level global ratio.
+Despite its simplicity, this design affords flexible text-speech alignment across languages, including those
+with relatively low encoding efficiency, and naturally supports arbitrary text-token prefixes followed by
+coherent speech-token continuation.
+2.5
+Designs for Streaming and Concurrency
+In streaming audio-visual interaction scenarios, the first-packet latency is a critical factor affecting user
+experience, and the model’s concurrency capability is key to reducing service costs and improving
+response speed. This section discusses how Qwen3.5-Omni enhances concurrency and reduces first-
+packet latency through algorithmic and architectural optimizations. Table 1 provides an overview of the
+relevant architecture of the Qwen3.5-Omni and its associated latency.
+Table 1: Architecture of Qwen3.5-Omni and end-to-end first-packet latency under audio/video settings
+(ms).
+Module
+Architecture
+Streaming
+Audio Encoder
+AuT
+✓
+Vision Encoder
+SigLIP2
+–
+Thinker
+Hybrid MoE Transformer
+✓
+Talker
+Hybrid MoE Transformer
+✓
+MTP
+Dense Transformer
+✓
+Code2wav
+ConvNet
+✓
+First-Packet Latency (Audio Input)
+Plus: 435ms
+Flash: 235ms
+First-Packet Latency (Video Input)
+Plus: 651ms
+Flash: 426ms
+Chunked Prefilling and Hybrid MoE Architecture.
+In Qwen3.5-Omni, we retain the chunked-prefilling
+mechanism as implemented in Qwen3-Omni and Qwen2.5-Omni, whose audio and vision encoders are
+5
+capable of outputting chunks along the temporal dimension. This approach significantly reduces the
+Time-To-First-Token (TTFT) for both the Thinker and the Talker. Architecturally, both the Thinker and the
+Talker in Qwen3.5-Omni are built upon the Hybrid MoE architecture introduced in Qwen3.5. Beyond
+the general efficiency advantage of Hybrid MoE, this architecture includes the Gated Delta Net (GDN)
+module, which is particularly effective for accelerating the modeling of long audio-video sequences. As a
+result, it significantly reduces KV-cache I/O overhead in long-context inference, improving generation
+throughput and enabling higher serving concurrency.
+Streaming Generation with ARIA.
+For streaming speech generation and high-concurrency serving,
+Qwen3.5-Omni largely inherits the efficient design of Qwen3-Omni: Talker predicts RVQ codec tokens
+with a lightweight MTP module, and the generated multi-codebook tokens are converted to waveform by
+a causal and streaming ConvNet codec decoder. These components remain computationally lightweight,
+batch-friendly, and well-suited for low-latency deployment. Built on this shared foundation, the pre-
+viously introduced ARIA further reformulates the dual-channel generation pattern in Qwen3-Omni
+into a unified interleaved single-stream formulation over text and speech tokens. By organizing text
+and speech generation under a monotonic interleaving constraint, ARIA reduces the synchronization
+overhead between separate generation tracks, enables more efficient token scheduling during decoding,
+and better matches the naturally incremental regime of streaming interaction.
+In Table 2, we report the theoretical first-packet latency of Qwen3.5-Omni under different concurrency
+levels for audio and video input, evaluated on internal vLLM with torch.compile and CUDA Graph
+acceleration enabled for the MTP module and codec decoder. Here, Thinker TTFT (Time-To-First-Token)
+denotes the time from receiving the input stream to the first text token generated by Thinker, while
+Talker TTFC (Time-To-First-Chunk) measures the time until Talker produces the first audio chunk. TPOP
+(Time-Per-Output-Token) represents the per-output-token latency during steady-state decoding, where
+Talker TPOP includes the combined latency of the Talker backbone and the MTP module. TPS (Tokens Per
+Second) denotes generation throughput. Since ARIA organizes text and speech generation in a unified
+interleaved stream, Overall Latency cannot be obtained by simply summing several row values, but
+instead reflects the end-to-end critical path to the first playable audio packet. We also note that, due to
+the substantial scale difference between Qwen3.5-Omni-Flash and Qwen3.5-Omni-Plus, the two variants
+adopt different deployment-time resource allocation and parallelization strategies; therefore, their latency
+and throughput numbers are not intended for strict horizontal comparison. As shown in the table,
+Qwen3.5-Omni maintains stable latency and decoding efficiency as concurrency increases, while the low
+Generation RTF provides sufficient margin for smooth streaming audio generation.
+Table 2: Theoretical first-packet latency of Qwen3.5-Omni under different concurrency levels. A/V
+denotes audio/video input.
+Qwen3.5-Omni-Flash
+Qwen3.5-Omni-Plus
+1 Conc.
+4 Conc.
+8 Conc.
+1 Conc.
+4 Conc.
+8 Conc.
+Thinker TTFT
+80/255ms
+86/446ms
+103/765ms
+162/377ms
+183/907ms
+260/1243ms
+Talker TTFC
+56/61ms
+68/108ms
+81/116ms
+54/56ms
+72/88ms
+95/116ms
+Thinker TPOP
+5.6/5.9ms
+8.2/9.2ms
+9.6/15.8ms
+17.4/18.5ms
+25.6/26.9ms
+33.3/40.2ms
+Talker TPOP
+14.2/14.2ms
+16.9/17.0ms
+20.5/20.6ms
+14.9/14.9ms
+21.0/21.3ms
+25.8/27.1ms
+Codec Decode
+3~5ms
+Overall Latency
+235/426ms
+298/891ms
+352/1625ms
+435/651ms
+619/1515ms
+955/1980ms
+Thinker TPS
+177/171
+556/457
+942/598
+57/54
+156/149
+266/240
+Talker TPS
+70/70
+237/235
+389/388
+67/67
+191/189
+320/296
+Generation RTF
+0.178
+0.211
+0.257
+0.187
+0.267
+0.334
+3
+Pretraining
+Qwen3.5-Omni is pre-trained on a diverse dataset that encompasses multiple languages and dialects as
+shown in Table 3 and modalities, including image-text, video-text, audio-text, video-audio, video-audio-
+text, and pure text corpora. Following Qwen3-Omni (Xu et al., 2025b), we employ a wider range of natural
+language prompts to enhance both the generalization ability and instruction-following capabilities. To
+achieve robust performance across all modalities, our training strategy incorporates both unimodal and
+cross-modal data from the early pretraining stage.
+In Qwen3-Omni (Xu et al., 2025b), we employ TMRoPE to endow the model with temporal awareness.
+However, we identify two key limitations of this approach: (1) By directly tying temporal position IDs to
+6
+Table 3: Supported languages and dialects in Qwen3.5-Omni-Plus.
+Modality
+# Varieties
+Supported languages and dialects
+Text
+201
+See Qwen3.5 for the complete list of supported languages.
+Speech Input
+113
+74 languages: Afrikaans, Arabic, Asturian, Azerbaijani, Basque, Be-
+larusian, Bengali, Bosnian, Bulgarian, Cantonese, Catalan, Cebuano,
+Chinese, Croatian, Czech, Danish, Dutch, English, Esperanto, Estonian,
+Filipino, Finnish, French, Galician, Georgian, German, Greek, Hebrew,
+Hindi, Hungarian, Icelandic, Indonesian, Interlingua, Italian, Japanese,
+Javanese, Kannada, Kazakh, Korean, Kyrgyz, Lingala, Latvian, Lithua-
+nian, Macedonian, Malay, Malayalam, Maltese, Maori, Marathi, Mon-
+golian, Norwegian Bokmål, Norwegian Nynorsk, Oriya, Persian, Pol-
+ish, Portuguese, Punjabi, Romanian, Russian, Serbian, Slovak, Slove-
+nian, Spanish, Swahili, Swedish, Tajiki, Tamil, Telugu, Thai, Turkish,
+Ukrainian, Urdu, Uyghur, and Vietnamese.
+39 Chinese dialects: Northeastern Mandarin, Guizhou dialect, Guang-
+dong Cantonese, Henan dialect, Hong Kong Cantonese, Shanghainese,
+Shaanxi dialect, Tianjin dialect, Taiwanese Mandarin, Yunnan dialect,
+Anhui dialect, Fujian dialect, Gansu dialect, Guangdong Mandarin,
+Hubei dialect, Hunan dialect, Jiangxi dialect, Shandong dialect, Shanxi
+dialect, Sichuanese, Guangxi dialect, Hainan dialect, Chongqing di-
+alect, Changsha dialect, Hangzhou dialect, Hefei dialect, Yinchuan di-
+alect, Zhengzhou dialect, Shenyang dialect, Wenzhou dialect, Wuhan
+dialect, Kunming dialect, Taiyuan dialect, Nanchang dialect, Jinan di-
+alect, Lanzhou dialect, Nanjing dialect, Hakka, and Southern Min.
+Speech Output
+36
+29 languages: Chinese, English, German, Italian, Portuguese, Spanish,
+Japanese, Korean, French, Russian, Thai, Indonesian, Arabic, Vietnamese,
+Turkish, Finnish, Polish, Hindi, Dutch, Czech, Urdu, Tagalog, Swedish,
+Danish, Hebrew, Icelandic, Malay, Norwegian, and Persian.
+7 Chinese dialects: Sichuanese, Beijing dialect, Tianjin dialect, Nanjing
+dialect, Shaanxi dialect, Cantonese, and Southern Min.
+absolute time, it produces excessively large and sparse temporal position IDs for long audio-video or
+video inputs, which undermines the model’s ability to capture long-range temporal contexts. (2) Effective
+learning under this scheme typically requires large-scale and uniformly distributed sampling across
+different frame rates (fps), significantly increasing the cost of training data construction. To address
+these issues, we prepend each video or audio-video temporal patch with a timestamp represented as a
+formatted text string in seconds, enabling the model to better learn and interpret timecode representations.
+In addition, for audio sequences, we insert timestamps at random intervals to better align training across
+different modalities. Although this approach introduces a modest increase in context length, it allows the
+model to perceive temporal information more effectively and precisely.
+The pre-training of Qwen3.5-Omni is structured into three distinct stages. In the first stage, we lock
+the LLM parameters and focus on training the vision and audio encoders, utilizing a vast corpus of
+audio-text and image-text pairs to enhance semantic understanding within the LLM. In the second stage,
+we unfreeze all parameters and train with a wider range of multimodal data for more comprehensive
+learning with a sequence length of 32,768. In the final stage, we use data with a sequence length of
+262,144 to enhance the model’s ability to understand complex long-sequence data:
+(1) Encoder Alignment Stage (S1): During the initial pretraining phase, the LLM component of
+Qwen3.5-Omni is initialized with parameters from Qwen3.5, while the vision encoder is adopted
+from Qwen3.5, and the audio encoder is initialized with AuT. The two encoders are trained
+separately on the fixed LLM, with both initially focusing on training their respective adapters
+before training the encoders.
+(2) General Stage (S2): The second phase of pretraining utilizes a large-scale dataset containing
+approximately 4 trillion tokens, with the following distribution across modalities: text (0.92
+trillion), audio (1.99 trillion), image (0.95 trillion), video (0.14 trillion), and video-audio 0.29
+trillion). During this stage, the introduction of more diverse multimodal data and tasks enhances
+the model’s understanding and interaction capabilities in auditory, visual, textual, and audio-
+visual information.
+(3) Long Context Stage (S3): In the final pre-training phase, we increased the maximum token length
+from 32,768 to 262,144 and also raised the proportion of long audio and long video in the training
+7
+data. Experimental results indicate that these adjustments lead to significant improvements in
+the model’s ability to understand long sequence data.
+4
+Post-training
+4.1
+Thinker
+The post-training phase employs a three-stage strategy for the Thinker, designed to preserve the model’s
+capabilities across all modalities without degradation, ensure high response quality under audio queries,
+and optimize the overall interaction experience. The training corpus, structured in the ChatML (OpenAI,
+2022) format, encompasses pure text, visual, audio, and mixed-modality conversational data. Specifically,
+the process consists of the following stages:
+• Stage 1: Specialist Distillation To establish a strong foundation for omnimodal capabilities, we
+first train a suite of domain-specialized teacher models via independent Supervised Fine-Tuning
+(SFT) and reinforcement learning (RL). All teacher models are fine-tuned from the pre-trained
+Qwen-3.5 base checkpoint. Beyond text-related tasks, including agentic, coding, and foundational
+reasoning tasks, we also train specialized teacher models for vision and audio. These teacher
+models are used to generate domain-specific data, enabling the specialized capabilities learned
+in each domain to be distilled into a single unified model.
+• Stage 2: On-Policy Distillation Through the specialist distillation described above, the model
+already achieves strong performance in domains such as multimodal understanding and rea-
+soning, as well as text-based dialogue, reasoning, coding, and agentic tasks. Nevertheless, a
+substantial gap remains between the quality of responses conditioned on audio queries and that
+of responses conditioned on text queries, particularly in speech dialogue. To reduce this gap, we
+introduce a second-stage training procedure based on on-policy distillation (OPD), with the goal
+of distilling the model’s stronger response capabilities under text inputs into the audio-input
+setting. Concretely, for each audio-text paired query, we first obtain a response generated un-
+der the text condition, which typically exhibits higher quality in terms of fluency, reasoning,
+and task completion. We then use this response as the distillation target for the corresponding
+audio-conditioned query. By training on such on-policy targets, the model gradually aligns
+its audio-conditioned outputs with its text-conditioned behavior, thereby improving response
+quality under audio inputs and promoting modality-consistent generation.
+• Stage 3: Interaction-Aligned Reinforcement Learning Although the previous two stages sub-
+stantially improve the model’s domain capabilities and cross-modal response quality, they are not
+sufficient to fully optimize the model for real-world interactive use. In multi-turn conversations,
+we observe several interaction-specific issues, including unintended language code-switching,
+persona inconsistency, and degraded instruction-following over extended contexts. To mitigate
+these issues, we introduce Interaction-Aligned RL, a third-stage reinforcement learning proce-
+dure aimed at optimizing the model for interaction quality. We construct multi-turn interaction
+trajectories and design reward signals around these user experience objectives, enabling the
+model to learn behaviors that are more stable, consistent, and aligned in prolonged interactions.
+By explicitly optimizing for i

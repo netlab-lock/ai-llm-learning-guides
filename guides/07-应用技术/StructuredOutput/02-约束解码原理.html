@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02 约束解码原理 | Structured Output</title>
+<style>:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--heading:#f0f6fc;--blue:#58a6ff;--green:#3fb950;--yellow:#d29922;--red:#f85149;--purple:#a371f7;--cyan:#39d2c0}*{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.8;font-size:16px}.container{max-width:900px;margin:0 auto;padding:2rem 1.5rem}h1{color:var(--blue);font-size:2rem;margin:1rem 0 .5rem}h2{color:var(--heading);font-size:1.5rem;margin:2rem 0 .8rem;padding-left:.8rem;border-left:4px solid var(--blue)}h3{color:var(--cyan);font-size:1.2rem;margin:1.5rem 0 .5rem}h4{color:var(--yellow);font-size:1.05rem;margin:1.2rem 0 .4rem}p{margin:.6rem 0}a{color:var(--blue);text-decoration:none}code{background:#21262d;color:#79c0ff;padding:.15em .4em;border-radius:4px;font-size:.9em}pre{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;overflow-x:auto;margin:1rem 0;font-size:.9em;line-height:1.6}pre code{background:none;padding:0}table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9em}th,td{border:1px solid var(--border);padding:.5rem .8rem;text-align:left}th{background:#161b22;color:var(--blue);font-weight:600}tr:nth-child(even){background:rgba(22,27,34,.5)}.nav{background:var(--card);border-bottom:1px solid var(--border);padding:.6rem 1.5rem;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.nav a{color:var(--blue);font-size:.9rem}.nav span{color:var(--heading);font-weight:600;font-size:.95rem}.footer{text-align:center;margin-top:3rem;padding:1.5rem;border-top:1px solid var(--border);color:#8b949e;font-size:.85rem}.tip,.warn,.exercise,.deep{border-radius:8px;padding:1rem 1.2rem;margin:1rem 0}.tip{background:#0d2818;border-left:4px solid #3fb950}.warn{background:#2d1b00;border-left:4px solid var(--yellow)}.exercise{background:#0d2818;border-left:4px solid var(--green)}.deep{background:#1a1024;border-left:4px solid var(--purple)}.ascii{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;font-family:monospace;font-size:.85em;line-height:1.5;overflow-x:auto;white-space:pre}.badge{display:inline-block;padding:.15em .6em;border-radius:12px;font-size:.75em;font-weight:600;margin:0 .3em}.badge-blue{background:rgba(88,166,255,.15);color:var(--blue)}.badge-green{background:rgba(63,185,80,.15);color:var(--green)}.badge-yellow{background:rgba(210,153,34,.15);color:var(--yellow)}.badge-purple{background:rgba(163,113,247,.15);color:var(--purple)}.badge-red{background:rgba(248,81,73,.15);color:var(--red)}.badge-cyan{background:rgba(57,210,192,.15);color:var(--cyan)}.formula{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1.2rem;margin:1rem 0;text-align:center;font-size:1.1em;color:var(--cyan);font-family:monospace}.next-prev{display:flex;justify-content:space-between;margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border)}ul,ol{margin:.5rem 0 .5rem 1.5rem}li{margin:.3rem 0}</style>
+</head>
+<body>
+<div class="nav"><a href="01-结构化输出总览.html">&larr; 01</a><span>模块 02 · 约束解码原理</span><a href="03-Outlines框架详解.html">03 &rarr;</a></div>
+<div class="container">
+
+<h1>⚙️ 02 · 约束解码原理</h1>
+<p><span class="badge badge-blue">中级</span> <span class="badge badge-cyan">核心</span></p>
+
+<h2>1. 核心思想</h2>
+<p>约束解码的核心：<strong>在每一步解码时，根据当前语法状态，屏蔽不合法的 token</strong>。这保证了输出的格式正确性，而不需要后处理或重试。</p>
+<div class="formula">logits[illegal] = -inf → softmax → 只有合法 token 有非零概率</div>
+
+<h3>直觉理解</h3>
+<div class="ascii">想象你在走迷宫:
+
+  自由生成 = 在每个路口随意选方向 (可能走错)
+  约束解码 = 在每个路口只开放通往终点的路 (保证到达)
+
+  LLM 的词表 = 50,000 个 token
+  在 JSON 的某个位置, 可能只有 100 个 token 是合法的
+  约束解码 = 把 49,900 个非法 token 的概率设为 0</div>
+
+<h2>2. FSM 引导解码（有限状态机）</h2>
+<h3>完整编译链：Schema → Regex → FSM → Token Mask</h3>
+
+<h4>Step 1: JSON Schema → 正则表达式</h4>
+<pre><code># 输入 JSON Schema
+{
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "age": {"type": "integer"}
+    },
+    "required": ["name", "age"]
+}
+
+# 编译为正则表达式 (简化)
+\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"age"\s*:\s*[0-9]+\s*\}
+
+# 注意: 实际的 Schema→Regex 编译器会处理更多边界情况
+# 如: 可选字段、嵌套对象、数组、枚举等</code></pre>
+
+<h4>Step 2: 正则表达式 → 有限状态机 (FSM)</h4>
+<div class="svg-diagram"><svg viewBox="0 0 740 220" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="fm1" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#fbbf24"/></marker></defs>
+<rect width="740" height="220" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="370" y="22" text-anchor="middle" fill="#f0f6fc" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold">FSM 状态转移图 (解析 {"name":"...","age":N})</text>
+<!-- Row 1: parse "name" key -->
+<rect x="20" y="42" width="40" height="26" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="40" y="60" text-anchor="middle" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">S0</text>
+<line x1="64" y1="55" x2="88" y2="55" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#fm1)"/>
+<text x="76" y="48" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">{'{'}</text>
+<rect x="92" y="42" width="40" height="26" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="112" y="60" text-anchor="middle" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">S1</text>
+<line x1="136" y1="55" x2="160" y2="55" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#fm1)"/>
+<text x="148" y="48" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">"</text>
+<rect x="164" y="42" width="80" height="26" rx="6" fill="#0d1117" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="204" y="60" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">S2→S6</text>
+<text x="204" y="52" text-anchor="middle" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="7">n-a-m-e-"</text>
+<line x1="248" y1="55" x2="272" y2="55" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#fm1)"/>
+<text x="260" y="48" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">:</text>
+<rect x="276" y="42" width="40" height="26" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="296" y="60" text-anchor="middle" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">S8</text>
+<line x1="320" y1="55" x2="344" y2="55" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#fm1)"/>
+<text x="332" y="48" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">"</text>
+<!-- S9: String content state -->
+<rect x="348" y="38" width="120" height="34" rx="8" fill="#0d2818" stroke="#34d399" stroke-width="2"/>
+<text x="408" y="56" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" font-weight="bold">S9: 字符串内容</text>
+<text x="408" y="68" text-anchor="middle" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="7">accept any char</text>
+<path d="M 468 46 C 500 18 500 18 468 38" fill="none" stroke="#34d399" stroke-width="1.2" marker-end="url(#fm1)"/>
+<text x="502" y="28" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="7">any</text>
+<!-- S9 → S10 downward -->
+<line x1="408" y1="76" x2="408" y2="100" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#fm1)"/>
+<text x="422" y="92" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">"</text>
+<!-- Row 2: comma, "age" key, value, close -->
+<rect x="388" y="104" width="40" height="26" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="408" y="122" text-anchor="middle" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">S10</text>
+<line x1="384" y1="117" x2="356" y2="117" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#fm1)"/>
+<text x="370" y="110" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">,</text>
+<rect x="312" y="104" width="40" height="26" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="332" y="122" text-anchor="middle" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">S11</text>
+<line x1="308" y1="117" x2="280" y2="117" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#fm1)"/>
+<text x="294" y="110" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">"</text>
+<rect x="180" y="104" width="96" height="26" rx="6" fill="#0d1117" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="228" y="122" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">S12→SN</text>
+<text x="228" y="114" text-anchor="middle" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="7">"-age-...-}</text>
+<line x1="176" y1="117" x2="148" y2="117" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#fm1)"/>
+<circle cx="128" cy="117" r="18" fill="none" stroke="#34d399" stroke-width="2"/>
+<circle cx="128" cy="117" r="14" fill="#0d2818" stroke="#34d399" stroke-width="1.5"/>
+<text x="128" y="121" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="9" font-weight="bold">终态</text>
+<!-- Legend -->
+<rect x="530" y="82" width="196" height="80" rx="6" fill="#0d1117" stroke="#30363d"/>
+<text x="628" y="100" text-anchor="middle" fill="#f0f6fc" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" font-weight="bold">图例</text>
+<rect x="546" y="108" width="12" height="12" rx="3" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="564" y="119" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">单字符解析状态</text>
+<rect x="546" y="126" width="12" height="12" rx="3" fill="#0d2818" stroke="#34d399" stroke-width="1.5"/>
+<text x="564" y="137" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">接受态 / 特殊状态</text>
+<rect x="546" y="144" width="12" height="12" rx="3" fill="#0d1117" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="564" y="155" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">合并显示的状态组</text>
+<!-- Notes -->
+<text x="20" y="182" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">每个状态维护一个转移表: Dict[字符→下一状态]。S9 为字符串内容状态，接受任意字符自循环。</text>
+<text x="20" y="198" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">遇到引号退出字符串状态。到达终态表示输入被 FSM 完全接受。</text>
+<text x="20" y="214" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">实际 FSM 可有数百个状态；S2-S6/S12-SN 在此合并显示以节省空间。</text>
+</svg></div>
+
+<h4>Step 3: FSM 状态 → Token Mask</h4>
+<pre><code># 在状态 9 (期望字符串内容) 时:
+# 遍历整个词表, 检查每个 token 是否能从状态 9 转移到合法状态
+
+vocab = tokenizer.get_vocab()  # 50,000 tokens
+
+valid_tokens = []
+for token_str, token_id in vocab.items():
+    # 尝试从状态 9 消费这个 token
+    next_state = fsm.try_transition(state=9, input=token_str)
+    if next_state is not ERROR_STATE:
+        valid_tokens.append(token_id)
+
+# 结果示例:
+# 合法: "hello", "world", "foo", "bar", " " (空格), ...
+# 非法: "}", "{", "true", "false", "123", "null", ...
+
+# 应用 mask
+import torch
+mask = torch.full((vocab_size,), float('-inf'))
+mask[valid_tokens] = 0.0
+logits = logits + mask  # 非法 token 的 logits 变为 -inf</code></pre>
+
+<h2>3. FSM 的关键数据结构</h2>
+<pre><code>from typing import Dict, List, Set
+
+class FSMState:
+    """FSM 的一个状态"""
+    def __init__(self, state_id: int):
+        self.state_id = state_id
+        self.transitions: Dict[str, int] = {}  # 字符 → 下一状态
+        self.is_final: bool = False  # 是否为接受状态
+        self.token_cache: Dict[int, List[int]] = {}  # 缓存合法 token
+
+class ConstrainedFSM:
+    """基于 FSM 的约束解码器"""
+    def __init__(self, states: List[FSMState]):
+        self.states = states
+        self.current_state = 0
+
+    def get_valid_token_ids(self, tokenizer, vocab_size: int) -> List[int]:
+        """获取当前状态下所有合法的 token ID"""
+        # 先检查缓存
+        if self.current_state in self.states[self.current_state].token_cache:
+            return self.states[self.current_state].token_cache[self.current_state]
+
+        valid = []
+        for token_id in range(vocab_size):
+            token_str = tokenizer.decode([token_id])
+            if self._can_consume(token_str):
+                valid.append(token_id)
+
+        # 缓存结果
+        self.states[self.current_state].token_cache[self.current_state] = valid
+        return valid
+
+    def _can_consume(self, text: str) -> bool:
+        """检查文本是否能从当前状态消费"""
+        state = self.current_state
+        for ch in text:
+            if ch not in self.states[state].transitions:
+                return False
+            state = self.states[state].transitions[ch]
+        self.current_state = state
+        return True
+
+    def advance(self, token_str: str):
+        """根据选中的 token 更新状态"""
+        for ch in token_str:
+            self.current_state = self.states[self.current_state].transitions.get(ch, -1)</code></pre>
+
+<h2>4. CFG 引导解码（上下文无关文法）</h2>
+<h3>为什么需要 CFG？</h3>
+<p>FSM 只能处理<strong>正则语言</strong>（Type-3 语法），无法处理<strong>递归结构</strong>：</p>
+<div class="svg-diagram"><svg viewBox="0 0 720 310" xmlns="http://www.w3.org/2000/svg">
+<rect width="720" height="310" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="360" y="22" text-anchor="middle" fill="#f0f6fc" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold">FSM vs CFG 的能力边界</text>
+<!-- FSM section -->
+<rect x="20" y="38" width="330" height="200" rx="8" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="185" y="60" text-anchor="middle" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold">FSM (正则语言 / Type-3)</text>
+<rect x="36" y="70" width="298" height="22" rx="4" fill="#0d2818"/>
+<text x="52" y="86" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">✓</text>
+<text x="70" y="86" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">{"name": "hello"}  (固定结构)</text>
+<rect x="36" y="98" width="298" height="22" rx="4" fill="#0d2818"/>
+<text x="52" y="114" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">✓</text>
+<text x="70" y="114" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">{"a": 1, "b": 2}  (重复模式)</text>
+<rect x="36" y="126" width="298" height="22" rx="4" fill="#2d1b00"/>
+<text x="52" y="142" fill="#f85149" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">✗</text>
+<text x="70" y="142" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">{"nested": {"key": "val"}} (递归！)</text>
+<text x="36" y="170" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">无法记住嵌套深度</text>
+<text x="36" y="186" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">没有栈 → 无法处理递归结构</text>
+<text x="36" y="210" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">能力: a*b+ | {x} | [0-9]+</text>
+<!-- CFG section -->
+<rect x="370" y="38" width="330" height="200" rx="8" fill="#0d1117" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="535" y="60" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold">CFG (上下文无关语言 / Type-2)</text>
+<rect x="386" y="70" width="298" height="22" rx="4" fill="#0d2818"/>
+<text x="402" y="86" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">✓</text>
+<text x="420" y="86" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">{"nested": {"key": "val"}}  (嵌套对象)</text>
+<rect x="386" y="98" width="298" height="22" rx="4" fill="#0d2818"/>
+<text x="402" y="114" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">✓</text>
+<text x="420" y="114" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">{"arr": [1, [2, [3]]]}  (嵌套数组)</text>
+<rect x="386" y="126" width="298" height="22" rx="4" fill="#0d2818"/>
+<text x="402" y="142" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">✓</text>
+<text x="420" y="142" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">{"a":{"b":{"c":{"d":1}}}} (任意深度)</text>
+<text x="386" y="170" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">下推自动机 (PDA) 有栈</text>
+<text x="386" y="186" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">栈跟踪嵌套深度 → 任意深度递归</text>
+<text x="386" y="210" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">能力: S→{S} | [S] | "str" | num</text>
+<!-- Summary arrow -->
+<text x="360" y="262" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" font-weight="bold">JSON 的嵌套结构需要「栈」来跟踪</text>
+<text x="185" y="282" text-anchor="middle" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">FSM: 无栈 → 只能处理正则</text>
+<text x="535" y="282" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">CFG/PDA: 有栈 → 支持递归嵌套</text>
+<text x="360" y="302" text-anchor="middle" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">正则 ⊂ CFG：所有正则语言都是上下文无关语言，反之不然</text>
+</svg></div>
+
+<h3>下推自动机 (Pushdown Automata, PDA)</h3>
+<div class="svg-diagram"><svg viewBox="0 0 700 340" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="pd1" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#fbbf24"/></marker></defs>
+<rect width="700" height="340" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="350" y="22" text-anchor="middle" fill="#f0f6fc" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold">PDA 处理嵌套 JSON: {"a": {"b": 1}}</text>
+<!-- Header row -->
+<rect x="20" y="38" width="660" height="26" rx="4" fill="#21262d"/>
+<text x="72" y="56" text-anchor="middle" fill="#58a6ff" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" font-weight="bold">状态</text>
+<text x="200" y="56" text-anchor="middle" fill="#58a6ff" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" font-weight="bold">栈</text>
+<text x="390" y="56" text-anchor="middle" fill="#58a6ff" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" font-weight="bold">输入</text>
+<text x="570" y="56" text-anchor="middle" fill="#58a6ff" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" font-weight="bold">动作</text>
+<!-- Line separator -->
+<line x1="20" y1="68" x2="680" y2="68" stroke="#30363d"/>
+<!-- Row 1: { -->
+<rect x="20" y="72" width="660" height="24" rx="2" fill="#0d2818"/>
+<text x="72" y="89" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">q0</text>
+<text x="200" y="89" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">[ ]</text>
+<text x="390" y="89" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">{"{"}</text>
+<text x="570" y="89" text-anchor="middle" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">push(OBJECT)</text>
+<!-- Row 2: "a" -->
+<rect x="20" y="100" width="660" height="24" rx="2" fill="#161b22"/>
+<text x="72" y="117" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">q1</text>
+<text x="200" y="117" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">[OBJ]</text>
+<text x="390" y="117" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">"a"</text>
+<text x="570" y="117" text-anchor="middle" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">→ q2</text>
+<!-- Row 3: : -->
+<rect x="20" y="128" width="660" height="24" rx="2" fill="#0d2818"/>
+<text x="72" y="145" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">q2</text>
+<text x="200" y="145" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">[OBJ]</text>
+<text x="390" y="145" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">:</text>
+<text x="570" y="145" text-anchor="middle" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">→ q3</text>
+<!-- Row 4: { (nested) -->
+<rect x="20" y="156" width="660" height="24" rx="2" fill="#161b22"/>
+<text x="72" y="173" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">q3</text>
+<text x="200" y="173" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">[OBJ]</text>
+<text x="390" y="173" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">{"{"}</text>
+<text x="570" y="173" text-anchor="middle" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">push(OBJECT) ← 新嵌套层</text>
+<!-- Row 5: "b" -->
+<rect x="20" y="184" width="660" height="24" rx="2" fill="#0d2818"/>
+<text x="72" y="201" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">q4</text>
+<text x="200" y="201" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">[OBJ,OBJ]</text>
+<text x="390" y="201" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">"b"</text>
+<text x="570" y="201" text-anchor="middle" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">→ q5</text>
+<!-- Row 6: : -->
+<rect x="20" y="212" width="660" height="24" rx="2" fill="#161b22"/>
+<text x="72" y="229" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">q5</text>
+<text x="200" y="229" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">[OBJ,OBJ]</text>
+<text x="390" y="229" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">:</text>
+<text x="570" y="229" text-anchor="middle" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">→ q6</text>
+<!-- Row 7: 1 -->
+<rect x="20" y="240" width="660" height="24" rx="2" fill="#0d2818"/>
+<text x="72" y="257" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">q6</text>
+<text x="200" y="257" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">[OBJ,OBJ]</text>
+<text x="390" y="257" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">1</text>
+<text x="570" y="257" text-anchor="middle" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">→ q7</text>
+<!-- Row 8: } (close inner) -->
+<rect x="20" y="268" width="660" height="24" rx="2" fill="#161b22"/>
+<text x="72" y="285" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">q7</text>
+<text x="200" y="285" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">[OBJ,OBJ]</text>
+<text x="390" y="285" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">}</text>
+<text x="570" y="285" text-anchor="middle" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">pop(OBJECT) ← 退出嵌套</text>
+<!-- Row 9: } (close outer) -->
+<rect x="20" y="296" width="660" height="24" rx="2" fill="#0d2818"/>
+<text x="72" y="313" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">q8</text>
+<text x="200" y="313" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">[OBJ]</text>
+<text x="390" y="313" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">}</text>
+<text x="570" y="313" text-anchor="middle" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">pop(OBJECT) ← 退出外层</text>
+<!-- Accept -->
+<text x="350" y="336" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" font-weight="bold">栈空 → 接受！栈跟踪了嵌套深度，所以能处理任意嵌套</text>
+</svg></div>
+
+<h3>GBNF 格式 (llama.cpp)</h3>
+<pre><code># GBNF (GGML BNF) 文法定义
+# llama.cpp 使用的 CFG 格式
+
+root   ::= object
+object ::= "{" ws members "}"
+members ::= pair ("," ws pair)*
+pair   ::= string ":" ws value
+value  ::= string | number | object | array | "true" | "false" | "null"
+string ::= "\"" chars "\""
+chars  ::= [^"\\]+
+number ::= "-"? ("0" | [1-9] [0-9]*) ("." [0-9]+)?
+array  ::= "[" ws values "]"
+values ::= value ("," ws value)*
+ws     ::= [ \t\n]*
+
+# 使用方式 (llama.cpp):
+# ./main -m model.gguf --grammar-file json.gbnf</code></pre>
+
+<h2>5. XGrammar 的核心优化</h2>
+<p><a href="https://blog.mlc.ai/2024/11/22/achieving-efficient-flexible-portable-structured-generation-with-xgrammar">XGrammar</a> (MLC, 2024) 将 token 分为两类实现 <strong>10x 加速</strong>：</p>
+
+<div class="svg-diagram"><svg viewBox="0 0 700 260" xmlns="http://www.w3.org/2000/svg">
+<rect width="700" height="260" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="350" y="22" text-anchor="middle" fill="#f0f6fc" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold">XGrammar 的 Token 分类</text>
+<!-- CI Token section -->
+<rect x="20" y="38" width="320" height="200" rx="8" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+<rect x="20" y="38" width="320" height="32" rx="8" fill="#0d1d30"/>
+<text x="180" y="60" text-anchor="middle" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="12" font-weight="bold">Context-Independent (CI, &gt;99%)</text>
+<text x="36" y="90" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">合法性不依赖当前语法上下文</text>
+<rect x="36" y="100" width="288" height="20" rx="3" fill="#1c2128"/>
+<text x="180" y="115" text-anchor="middle" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">例: "{" 在 JSON 开头永远合法</text>
+<rect x="36" y="124" width="288" height="20" rx="3" fill="#1c2128"/>
+<text x="180" y="139" text-anchor="middle" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">"true" 在 value 位置永远合法</text>
+<text x="36" y="166" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">→ 预计算！FSM 初始化时一次性计算</text>
+<text x="36" y="186" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">→ 每步解码直接查表，零运行时开销</text>
+<rect x="36" y="198" width="288" height="28" rx="4" fill="#0d2818" stroke="#34d399" stroke-width="1"/>
+<text x="180" y="217" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" font-weight="bold">查表 O(1)，无运行时成本</text>
+<!-- CD Token section -->
+<rect x="360" y="38" width="320" height="200" rx="8" fill="#0d1117" stroke="#fbbf24" stroke-width="1.5"/>
+<rect x="360" y="38" width="320" height="32" rx="8" fill="#2d1b00"/>
+<text x="520" y="60" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="12" font-weight="bold">Context-Dependent (CD, &lt;1%)</text>
+<text x="376" y="90" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">合法性依赖当前语法状态</text>
+<rect x="376" y="100" width="288" height="20" rx="3" fill="#1c2128"/>
+<text x="520" y="115" text-anchor="middle" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">例: "," 在对象内部合法，字符串内非法</text>
+<rect x="376" y="124" width="288" height="20" rx="3" fill="#1c2128"/>
+<text x="520" y="139" text-anchor="middle" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">"}" 只在嵌套结束时合法</text>
+<text x="376" y="166" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">→ 运行时检查，但数量极少 (&lt;1%)</text>
+<text x="376" y="186" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">→ 只需遍历极少量 token</text>
+<rect x="376" y="198" width="288" height="28" rx="4" fill="#1c2128" stroke="#fbbf24" stroke-width="1"/>
+<text x="520" y="217" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" font-weight="bold">运行时极小开销 (50,000 中仅 ~500)</text>
+<!-- Bottom note -->
+<text x="350" y="254" text-anchor="middle" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">核心优化: 将 99%+ token 预计算为 CI 类，仅 &lt;1% 需运行时检查 → 10x 加速</text>
+</svg></div>
+
+<pre><code># XGrammar 的使用 (Python)
+import xgrammar as xgr
+
+# 编译 JSON Schema 为 Grammar
+grammar = xgr.Grammar.from_json_schema(json_schema_str)
+
+# 创建编译器 (一次性)
+compiler = xgr.GrammarCompiler(grammar, tokenizer)
+
+# 每步解码时获取 mask
+for step in range(max_tokens):
+    # 获取当前状态的 token mask
+    mask = compiler.get_token_mask(fsm_state)
+
+    # 应用 mask
+    logits[mask == 0] = float('-inf')
+
+    # 采样
+    next_token = sample(logits)
+
+    # 更新状态
+    compiler.accept_token(next_token)</code></pre>
+
+<h2>6. Token 边界问题</h2>
+<p>一个关键挑战：FSM 在<strong>字符级别</strong>工作，但 LLM 在<strong>token 级别</strong>工作。Token 的边界可能与 FSM 状态不同步：</p>
+<div class="svg-diagram"><svg viewBox="0 0 700 310" xmlns="http://www.w3.org/2000/svg">
+<rect width="700" height="310" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="350" y="22" text-anchor="middle" fill="#f0f6fc" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold">Token 边界问题: 字符级 FSM vs Token 级 LLM</text>
+<!-- Section 1: Vocab tokens -->
+<rect x="20" y="38" width="660" height="60" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="36" y="58" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" font-weight="bold">词表中的 Token (不同长度)</text>
+<rect x="36" y="66" width="120" height="22" rx="4" fill="#1c2128" stroke="#34d399" stroke-width="1"/>
+<text x="96" y="82" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">"hello" (5字符)</text>
+<rect x="170" y="66" width="140" height="22" rx="4" fill="#1c2128" stroke="#a78bfa" stroke-width="1"/>
+<text x="240" y="82" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">" world" (6字符)</text>
+<rect x="324" y="66" width="80" height="22" rx="4" fill="#1c2128" stroke="#fbbf24" stroke-width="1"/>
+<text x="364" y="82" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">"!" (1字符)</text>
+<rect x="418" y="66" width="100" height="22" rx="4" fill="#2d1b00" stroke="#f85149" stroke-width="1"/>
+<text x="468" y="82" text-anchor="middle" fill="#f85149" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">"lo wo" (5字符)</text>
+<text x="530" y="82" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">← 跨越状态边界!</text>
+<!-- Section 2: FSM character tracking -->
+<rect x="20" y="108" width="660" height="60" rx="6" fill="#0d1117" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="36" y="128" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" font-weight="bold">FSM 在字符级别跟踪 (每个字符一个状态转移)</text>
+<text x="36" y="152" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">h → e → l → l → o → [空格] → w → o → r → l → d → !</text>
+<text x="608" y="152" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">12步</text>
+<!-- Section 3: LLM token output -->
+<rect x="20" y="178" width="660" height="60" rx="6" fill="#0d1117" stroke="#34d399" stroke-width="1.5"/>
+<text x="36" y="198" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="11" font-weight="bold">LLM 每次输出一个完整 Token (多字符)</text>
+<rect x="36" y="206" width="120" height="22" rx="4" fill="#0d2818" stroke="#34d399" stroke-width="1"/>
+<text x="96" y="222" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">"hello" → 5字符</text>
+<line x1="160" y1="217" x2="180" y2="217" stroke="#fbbf24" stroke-width="1.5"/>
+<rect x="184" y="206" width="140" height="22" rx="4" fill="#0d2818" stroke="#a78bfa" stroke-width="1"/>
+<text x="254" y="222" text-anchor="middle" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">" world" → 6字符</text>
+<line x1="328" y1="217" x2="348" y2="217" stroke="#fbbf24" stroke-width="1.5"/>
+<rect x="352" y="206" width="80" height="22" rx="4" fill="#0d2818" stroke="#fbbf24" stroke-width="1"/>
+<text x="392" y="222" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">"!" → 1字符</text>
+<!-- Section 4: Problem & Solution -->
+<rect x="20" y="248" width="320" height="50" rx="6" fill="#2d1b00" stroke="#f85149" stroke-width="1.5"/>
+<text x="36" y="268" fill="#f85149" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" font-weight="bold">⚠ 问题</text>
+<text x="36" y="284" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">Token 可能跨越 FSM 状态边界</text>
+<rect x="360" y="248" width="320" height="50" rx="6" fill="#0d2818" stroke="#34d399" stroke-width="1.5"/>
+<text x="376" y="268" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="10" font-weight="bold">✓ 解决方案</text>
+<text x="376" y="284" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">预计算 token 在每个 FSM 状态的转移</text>
+<text x="376" y="294" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="9">Token Index (Outlines) / Compressed FSM (SGLang)</text>
+</svg></div>
+
+<h2>7. 性能开销分析</h2>
+<table>
+<tr><th>组件</th><th>开销</th><th>优化方法</th></tr>
+<tr><td>FSM 构建</td><td>一次性 ~1-10ms</td><td>缓存编译结果</td></tr>
+<tr><td>Token Index 预计算</td><td>一次性 ~100ms</td><td>只在初始化时计算</td></tr>
+<tr><td>Token Mask 计算</td><td>每步 ~0.1ms</td><td>XGrammar CI 预计算</td></tr>
+<tr><td>Logits 修改</td><td>每步 ~0.01ms</td><td>就地修改，GPU 上操作</td></tr>
+<tr><td>FSM 状态更新</td><td>每步 ~0.001ms</td><td>查表操作</td></tr>
+<tr><td><strong>总体</strong></td><td><strong>+5-15% 延迟</strong></td><td><strong>Compressed FSM 可降至 +2-5%</strong></td></tr>
+</table>
+
+<div class="deep">
+<p><strong>🔬 为什么开销这么小？</strong></p>
+<p>约束解码的主要操作是修改 logits（一个向量加法），这在 GPU 上几乎免费。真正的开销来自 CPU 端的 FSM 状态查询和 token mask 计算。XGrammar 通过预计算 99% 的 token mask，将这个开销降到了几乎为零。</p>
+</div>
+
+<h2>8. 实际实现：Transformers + Outlines</h2>
+<pre><code>from transformers import LogitsProcessor
+import interegular  # 正则→FSM 编译库
+
+class FSMLogitsProcessor(LogitsProcessor):
+    """Transformers 的 FSM 约束解码器"""
+
+    def __init__(self, regex_pattern: str, tokenizer):
+        # 编译正则为 FSM
+        self.fsm = interegular.parse_pattern(regex_pattern).to_fsm()
+        self.current_state = self.fsm.initial
+        self.tokenizer = tokenizer
+
+        # 预计算 token→FSM 转移表
+        self.token_to_next_state = {}
+        vocab = tokenizer.get_vocab()
+        for token_str, token_id in vocab.items():
+            for state in self.fsm.states:
+                next_state = self._try_consume(state, token_str)
+                if next_state is not None:
+                    self.token_to_next_state[(state, token_id)] = next_state
+
+    def __call__(self, input_ids, scores):
+        """每步解码时调用"""
+        # 获取当前状态的合法 token
+        valid_mask = scores.new_full(scores.shape, float('-inf'))
+        for token_id in range(scores.shape[-1]):
+            key = (self.current_state, token_id)
+            if key in self.token_to_next_state:
+                valid_mask[token_id] = 0  # 合法
+
+        # 应用 mask
+        scores = scores + valid_mask
+        return scores
+
+    def advance(self, token_id):
+        """根据选中的 token 更新状态"""
+        key = (self.current_state, token_id)
+        if key in self.token_to_next_state:
+            self.current_state = self.token_to_next_state[key]</code></pre>
+
+<h2>9. 各方案对比</h2>
+<table>
+<tr><th>方案</th><th>方法</th><th>能力</th><th>性能</th><th>使用场景</th></tr>
+<tr><td>Outlines</td><td>FSM + Token Index</td><td>正则+JSON Schema</td><td>中等</td><td>vLLM, Transformers</td></tr>
+<tr><td>SGLang</td><td>Compressed FSM</td><td>正则+JSON+CFG</td><td>快 2-10x</td><td>高吞吐生产</td></tr>
+<tr><td>XGrammar</td><td>CFG + CI/CD 分离</td><td>完整 CFG</td><td>最快</td><td>底层库</td></tr>
+<tr><td>llama.cpp</td><td>GBNF Grammar</td><td>完整 CFG</td><td>快</td><td>本地推理</td></tr>
+<tr><td>Guidance</td><td>Interleaved 约束</td><td>混合控制</td><td>中等</td><td>复杂生成流程</td></tr>
+</table>
+
+<div class="tip"><strong>向前串联：</strong>
+核心思想的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="ascii">
+核心思想 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+</div>
+<div class="deep"><strong>⚙️ 02 · 约束解码原理的技术原理与深度分析：</strong>
+<strong>核心概念</strong>：⚙️ 02 · 约束解码原理是StructuredOutput领域的关键技术方向，其理论基础涉及信息论、优化理论和系统工程的交叉。
+<strong>推导</strong>：从信息论角度，任何信息处理系统的吞吐量受限于信道容量——Shannon定理指出C=B×log₂(1+S/N)，
+其中B为带宽、S/N为信噪比。在⚙️ 02 · 约束解码原理的语境下，"信道"可以理解为模型的上下文窗口或推理管线，
+"信噪比"对应有用信息与噪声（无关上下文、冗余计算）的比例。
+<strong>为什么</strong>这很重要？因为理解⚙️ 02 · 约束解码原理的理论限制，才能在工程实践中做出正确的权衡——
+盲目追求指标上限往往导致过度设计，而理解根本约束才能找到最高效的优化路径。
+从<strong>工程实践</strong>看，⚙️ 02 · 约束解码原理的优化通常遵循"先测量、再分析、后优化"的循环：
+首先建立完善的评测基准（覆盖质量、延迟、成本三个维度），然后通过profiling定位瓶颈环节，
+最后针对性地优化——是计算受限就优化算法，是内存受限就优化数据布局，是通信受限就优化网络拓扑。
+这一系统化方法论适用于StructuredOutput领域的所有技术问题。</div>
+<div class="exercise">
+<p><strong>🧪 练习 1</strong>：用 Python 的 <code>interegular</code> 库将正则表达式 <code>\{"name":"[^"]*","age":[0-9]+\}</code> 编译为 FSM，打印每个状态的转移表。</p>
+<p><strong>🧪 练习 2</strong>：手动模拟 FSM 约束解码：给定词表 <code>["{", "}", "\"", "a", "b", ":", "1", "2", ","]</code>，在状态 9（字符串内容）时列出合法 token。</p>
+<p><strong>🧪 练习 3</strong>：比较 FSM 和 CFG 在处理 <code>{"a":{"b":{"c":1}}}</code> 时的行为差异。</p>
+</div>
+
+<h2>10. 小结</h2>
+<table>
+<tr><th>要点</th><th>内容</th></tr>
+<tr><td>核心原理</td><td>每步解码时屏蔽非法 token（logits = -inf）</td></tr>
+<tr><td>FSM</td><td>正则→状态机，适合简单 JSON</td></tr>
+<tr><td>CFG</td><td>文法→下推自动机，支持递归嵌套</td></tr>
+<tr><td>XGrammar</td><td>CI/CD token 分离，10x 加速</td></tr>
+<tr><td>开销</td><td>总体 +5-15% 延迟，优化后 +2-5%</td></tr>
+</table>
+
+<div class="next-prev"><a href="01-结构化输出总览.html">&larr; 上一模块</a><a href="03-Outlines框架详解.html">下一模块：Outlines &rarr;</a></div>
+</div>
+<div class="tip"><strong>通俗类比：</strong>约束解码就像给AI装了一个"语法检查器"——每次AI要输出一个token时，检查器会说"这个位置只能放数字"或"这个位置必须是引号"。就像填答题卡——你只能在规定位置涂黑，不能涂到外面去。这样AI的输出就100%符合JSON格式，不可能出现"少了一个引号"这种低级错误。</div>
+
+<div class="warn"><strong>常见误区：</strong>1) 以为约束解码很慢——现代实现（如Outlines）通过预编译状态机，额外开销仅5-15%；2) 以为约束解码会降低质量——它只约束格式不约束内容，模型的语义理解能力不受影响；3) 忽略正则vs JSON Schema的选择——简单模式用正则更高效，复杂嵌套结构用JSON Schema更清晰。</div>
+
+<div class="tip"><strong>通俗类比——交通信号灯：</strong>约束解码就像给AI的输出通道装上了交通信号灯系统。在每个十字路口（token生成位置），红灯代表"此路不通"（非法token被设为-logits=-inf），绿灯代表"可以通行"（合法token保持原始概率）。FSM就是那个智能交通控制系统，它知道每个路口该亮什么灯。没有信号灯（无约束），车辆（token）可能逆行、闯红灯，导致交通事故（JSON格式错误）。有了信号灯，交通100%有序。</div>
+
+<div class="tip"><strong>实用技巧——调试约束解码问题：</strong>当约束解码的输出不符合预期时，排查步骤：1) 检查正则/Schema是否正确表达了你的意图（用regex101.com测试正则）；2) 确认tokenizer的行为——同一个词在不同tokenizer下可能被切分为不同token；3) 检查FSM状态转移日志，看哪一步偏离了预期路径；4) 对于中文等多字节字符，确保tokenizer的special tokens不会干扰FSM状态。</div>
+
+<div class="warn"><strong>性能陷阱——状态爆炸：</strong>复杂JSON Schema（尤其是含oneOf/anyOf/嵌套数组）编译出的FSM可能有数万个状态。每个状态需要预计算合法token集合（遍历50000词表），初始化时间可能长达数秒。解决方案：1) 尽量简化Schema，避免不必要的嵌套；2) 使用缓存——相同Schema只编译一次；3) 生产环境用SGLang/XGrammar的压缩FSM，可减少90%状态数；4) 对实时性要求高的场景，考虑预热（warmup）阶段提前编译所有常用Schema。</div>
+
+<div class="deep"><strong>深入探讨——约束解码的理论基础与前沿：</strong>约束解码的核心是"有限状态机（FSM）"——将JSON Schema编译成FSM，每生成一个token就推进状态，只允许合法的下一个token。数学上，这等价于在每一步对logits向量施加一个二值掩码M：logits' = logits + M，其中M[i]=0（合法）或M[i]=-inf（非法）。Outlines框架的创新在于：1) 预编译FSM并缓存，避免每次重新编译；2) 用index加速token到FSM状态的映射；3) 支持正则和JSON Schema两种约束语法。前沿研究方向包括：① SGLang的Compressed FSM（将线性路径合并，减少状态数90%+）；② XGrammar的Context-Independent/Dependent分离（99% token预计算，10x加速）；③ 基于CFG的递归约束（下推自动机处理嵌套JSON）。Willard & Louf (2023) 的论文证明，预计算Token Index后，约束解码的额外延迟开销仅为5-15%，远低于后处理+重试方案。</div>
+
+<h2>11. 延伸阅读与学习路径</h2>
+
+<div class="ascii">推荐学习路径:
+
+[基础] 理解正则表达式和有限状态机
+    ↓
+[核心] 掌握 JSON Schema 规范 (json-schema.org)
+    ↓
+[实践] 用 Outlines 框架实现第一个约束生成
+    ↓
+[进阶] 学习 XGrammar 的 CI/CD Token 分类优化
+    ↓
+[高级] 研究 SGLang Compressed FSM 原理
+    ↓
+[前沿] 阅读原始论文: Willard & Louf 2023</div>
+
+<table>
+<tr><th>资源</th><th>类型</th><th>推荐度</th><th>说明</th></tr>
+<tr><td><a href="https://arxiv.org/abs/2307.09702">Willard & Louf 2023</a></td><td>论文</td><td>⭐⭐⭐⭐⭐</td><td>Outlines 核心论文，Token Index 方法</td></tr>
+<tr><td><a href="https://blog.mlc.ai/2024/11/22/achieving-efficient-flexible-portable-structured-generation-with-xgrammar">XGrammar Blog</a></td><td>博客</td><td>⭐⭐⭐⭐</td><td>CI/CD 分类的直觉解释</td></tr>
+<tr><td><a href="https://github.com/dottxt-ai/outlines">Outlines GitHub</a></td><td>代码</td><td>⭐⭐⭐⭐⭐</td><td>约束解码参考实现</td></tr>
+<tr><td>《计算理论导引》Ch1-3</td><td>教材</td><td>⭐⭐⭐⭐</td><td>正则语言、CFG、自动机理论基础</td></tr>
+<tr><td><a href="https://json-schema.org/specification">JSON Schema 规范</a></td><td>标准</td><td>⭐⭐⭐⭐</td><td>理解约束解码的输入格式</td></tr>
+</table>
+
+<div class="next-prev"><a href="01-结构化输出总览.html">&larr; 上一模块</a><a href="03-Outlines框架详解.html">下一模块：Outlines &rarr;</a></div>
+</div>
+<div class="footer"><p><a href="index.html">返回总览</a></p></div>
+</body>
+</html>

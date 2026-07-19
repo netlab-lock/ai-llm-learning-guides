@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NVIDIA集合通信 — GPU架构与互联技术</title>
+<style>
+:root{--bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;--text:#e6edf3;--text2:#8b949e;--accent:#76b900;--accent2:#3fb950;--accent3:#d2a8ff;--accent4:#f0883e;--red:#f85149;--yellow:#e3b341}
+*{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--text);font-family:-apple-system,'Noto Sans SC',sans-serif;line-height:1.8}.container{max-width:1100px;margin:0 auto;padding:20px}
+h1{font-size:2em;color:var(--accent);margin-bottom:10px;border-bottom:2px solid var(--accent);padding-bottom:10px}h2{font-size:1.5em;color:var(--accent2);margin:30px 0 15px;padding-left:12px;border-left:4px solid var(--accent2)}h3{font-size:1.2em;color:var(--accent3);margin:20px 0 10px}h4{font-size:1.05em;color:var(--accent4);margin:15px 0 8px}
+p{margin:10px 0}a{color:var(--accent);text-decoration:none}table{width:100%;border-collapse:collapse;margin:15px 0}th,td{border:1px solid var(--border);padding:10px 14px;text-align:left}th{background:var(--bg3);color:var(--accent);font-weight:600}tr:nth-child(even){background:var(--bg2)}
+code{background:var(--bg3);padding:2px 6px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:0.9em;color:var(--accent4)}
+.nav{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px;margin:20px 0}.nav-title{color:var(--accent);font-weight:600;margin-bottom:10px}.nav ul{list-style:none;padding-left:0}.nav li{padding:4px 0}.nav li::before{content:"📄 "}
+.callout{border-left:4px solid var(--accent);background:rgba(118,185,0,.08);padding:12px 16px;border-radius:0 8px 8px 0;margin:15px 0}
+.callout-warn{border-left-color:var(--yellow);background:rgba(227,179,65,.08)}
+.callout-important{border-left-color:var(--red);background:rgba(248,81,73,.08)}
+.callout-tip{border-left-color:var(--accent2);background:rgba(63,185,80,.08)}
+.ascii-box{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'JetBrains Mono',monospace;font-size:0.82em;line-height:1.5;white-space:pre;overflow-x:auto;margin:15px 0}
+ul,ol{margin:10px 0 10px 24px}li{margin:6px 0}
+.badge{display:inline-block;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600}.badge-green{background:rgba(63,185,80,.15);color:var(--accent2)}.source{color:var(--text2);font-size:0.82em;margin-top:4px}
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>🔷 GPU架构与互联技术 — NVIDIA集合通信基础</h1>
+<p style="color:var(--text2);font-size:0.95em">
+<span class="badge badge-green">架构</span> 第1章 / 共7章 &nbsp;|&nbsp;
+GPU内部架构 · NVLink 5代演进 · NVSwitch交换 · NVL72系统 · SHARP网络内计算
+</p>
+
+<div class="nav"><div class="nav-title">📚 全系列导航</div>
+<ul>
+<li><a href="01-GPU架构与互联技术.html">01-GPU架构与互联技术</a> ← 当前</li>
+<li><a href="02-NCCL通信库架构.html">02-NCCL通信库架构</a></li>
+<li><a href="03-NCCL算法实现.html">03-NCCL算法实现</a></li>
+<li><a href="04-集合通信算法原理.html">04-算法原理</a></li>
+<li><a href="05-性能调优.html">05-性能调优</a></li>
+<li><a href="06-对比与面试.html">06-对比与面试</a></li>
+<li><a href="00-资料索引.html">00-资料索引</a></li>
+<li style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">📖 <a href="/mnt/d/学习/AI-LLM技术/昇腾超节点集合通信/01-架构总览.html">昇腾系列指南</a></li>
+</ul></div>
+
+<!-- ============================================================ -->
+<h2 id="s1">1.1 NVIDIA GPU内部架构</h2>
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>类比：一个超大型厨房。映射关系：厨房的“灶台”（CUDA Core）数量极多，但每个只能做简单的“炒”或“煮”（浮点/整数运算）。“米其林大厨”（CPU）技艺精湛但灶台少，擅长处理复杂逻辑（如决定菜品顺序）。AI训练的“同时炒一万盘番茄炒蛋”（大规模矩阵乘法）恰好是GPU数千灶台并行的完美场景。</div>
+<div class="warn"><strong>常见误区：</strong>误区：以为理论算力（如A100的312 TFLOPS FP16）等于实际能用的算力。误解来源：忽略了数据搬运。GPU强大的计算单元（灶台）需要海量的数据（食材）持续供应。如果内存带宽（厨房仓库的传送带速度）不足，再快的灶台也会“饿肚子”等待数据，导致实际利用率远低于理论峰值。</div>
+<div class="deep"><strong>深入探讨：</strong>深入：GPU的层次化存储与计算单元。以A100为例：1. 计算：6912个FP32 CUDA Core，432个Tensor Core。2. 存储层次：L2 Cache (40MB) > HBM2e显存 (带宽2TB/s) > L1/Shared Memory (每个SM 192KB)。关键瓶颈往往在显存带宽。NVIDIA通过增加显存带宽（HBM）和片上缓存（如Grace Hopper的NVLink-C2C）来缓解此瓶颈。公式：算力利用率 ≈ (实际数据搬运量/带宽) / 计算所需时间。</div>
+<div class="ascii"><pre>┌─────────────────────────────────┐
+│          GPU (SM Cluster)       │
+│  ┌──────┐ ┌──────┐ ... ┌──────┐│
+│  │ SM 0 │ │ SM 1 │     │SM N  ││
+│  │CUDA Cores│      │      │      │
+│  │Tensor Core│      │      │      │
+│  └──┬───┘ └──┬───┘     └──┬───┘│
+│     └────────┴────────────┘     │
+│         L2 Cache (统一)         │
+└──────────────┬──────────────────┘
+               │ (极高的片内带宽)
+         ┌─────┴─────┐
+         │ HBM 显存堆 │ (带宽~2TB/s)
+         └───────────┘</pre></div>
+<table><tr><th>组件</th><th>类比（厨房）</th><th>核心功能</th><th>典型数据 (A100)</th></tr><tr><td>CUDA Core</td><td>简单灶台</td><td>执行通用浮点/整数运算</td><td>6912个 FP32 Core</td></tr><tr><td>Tensor Core</td><td>多功能料理机</td><td>高效执行矩阵乘加运算</td><td>432个 (FP16/BF16混合精度)</td></tr><tr><td>SM (流多处理器)</td><td>灶台组团+小仓库</td><td>调度和管理一组Core，共享L1/共享内存</td><td>108个 SMs</td></tr><tr><td>HBM显存</td><td>中央食材仓库</td><td>存储模型权重、激活值等大数据</td><td>80GB, 带宽2039GB/s</td></tr></table>
+<table><tr><th>GPU</th><th>显存</th><th>FP16算力</th><th>显存带宽</th><th>适用</th></tr>
+<tr><td>A100</td><td>80GB</td><td>312 TFLOPS</td><td>2.0 TB/s</td><td>训练+推理</td></tr>
+<tr><td>H100</td><td>80GB</td><td>990 TFLOPS</td><td>3.35 TB/s</td><td>新一代训练</td></tr>
+<tr><td>H200</td><td>141GB</td><td>990 TFLOPS</td><td>4.8 TB/s</td><td>大模型推理</td></tr>
+<tr><td>L40S</td><td>48GB</td><td>362 TFLOPS</td><td>0.86 TB/s</td><td>推理/轻量训练</td></tr></table>
+
+<!-- ============================================================ -->
+
+<h3 id="s1-1">1.1.1 SM (Streaming Multiprocessor) 结构</h3>
+
+<div class="callout-tip">
+<strong>通俗理解：GPU = 一个超大工厂。</strong>
+<ul>
+<li><strong>GPU</strong> = 一个拥有上百个车间(SM)的巨型工厂</li>
+<li><strong>SM (流式多处理器)</strong> = 一个车间，里面有128个工人(CUDA Core)和4个特殊技师(Tensor Core)</li>
+<li><strong>CUDA Core</strong> = 普通工人，做加减乘除等基本运算</li>
+<li><strong>Tensor Core</strong> = 高级技师，专门做矩阵乘法（一个周期完成一个小矩阵乘法）</li>
+<li><strong>Shared Memory</strong> = 车间里的公共白板，工人们共享数据用</li>
+<li><strong>L1 Cache</strong> = 车间里的自动补货系统（硬件管理）</li>
+<li><strong>L2 Cache</strong> = 工厂大门口的中转仓（所有车间共享）</li>
+<li><strong>HBM</strong> = 工厂外面的大仓库（容量大但搬过来慢）</li>
+</ul>
+</div>
+
+<div class="ascii-box">
+NVIDIA GPU 内部结构 (以Hopper H100为例)
+
+┌─────────────────────────────────────────────────────────┐
+│  GPU (H100)                                              │
+│                                                           │
+│  ┌─────────┐ ┌─────────┐ ┌─────────┐     ┌─────────┐   │
+│  │  SM #0  │ │  SM #1  │ │  SM #2  │ ... │ SM #131 │   │
+│  │         │ │         │ │         │     │         │   │
+│  │ 128×    │ │ 128×    │ │ 128×    │     │ 128×    │   │
+│  │ CUDA Core│ │ CUDA Core│ │ CUDA Core│     │ CUDA Core│  │
+│  │ 4×      │ │ 4×      │ │ 4×      │     │ 4×      │   │
+│  │ Tensor  │ │ Tensor  │ │ Tensor  │     │ Tensor  │   │
+│  │ Core    │ │ Core    │ │ Core    │     │ Core    │   │
+│  │         │ │         │ │         │     │         │   │
+│  │ 192KB   │ │ 192KB   │ │ 192KB   │     │ 192KB   │   │
+│  │ SharedMem│ │ SharedMem│ │ SharedMem│     │ SharedMem│  │
+│  │ + L1    │ │ + L1    │ │ + L1    │     │ + L1    │   │
+│  └─────────┘ └─────────┘ └─────────┘     └─────────┘   │
+│                                                           │
+│  ┌───────────────────────────────────────────────────┐   │
+│  │  L2 Cache: 50 MB (所有SM共享)                      │   │
+│  └───────────────────────────────────────────────────┘   │
+│                                                           │
+│  ┌───────────────────────────────────────────────────┐   │
+│  │  HBM3: 80 GB, 3.35 TB/s 带宽                      │   │
+│  └───────────────────────────────────────────────────┘   │
+│                                                           │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐                │
+│  │ NVLink #0│ │ NVLink #1│ │ ... ×18  │                │
+│  │ 50 GB/s  │ │ 50 GB/s  │ │          │                │
+│  └──────────┘ └──────────┘ └──────────┘                │
+└─────────────────────────────────────────────────────────┘
+</div>
+
+<h3 id="s1-2">1.1.2 Tensor Core：矩阵乘法加速器</h3>
+
+<table>
+<tr><th>架构</th><th>Tensor Core代际</th><th>单次操作</th><th>FP16 TFLOPS</th><th>关键特性</th></tr>
+<tr><td>Volta (V100)</td><td>第1代</td><td>4×4×4 FMA</td><td>125</td><td>首款Tensor Core</td></tr>
+<tr><td>Ampere (A100)</td><td>第3代</td><td>8×8×8 (稀疏16×16×16)</td><td>312</td><td>TF32, 稀疏加速</td></tr>
+<tr><td>Hopper (H100)</td><td>第4代</td><td>8×8×8 (FP8)</td><td>989</td><td>FP8, 异步执行, TMA</td></tr>
+<tr><td>Blackwell (B200)</td><td>第5代</td><td>更大tile</td><td>2250</td><td>FP4, 微缩格式(MX)</td></tr>
+</table>
+
+<div class="callout">
+<strong>为什么Tensor Core对集合通信重要？</strong>Tensor Core的计算速度极快（H100: 989 TFLOPS FP16），但需要持续喂数据。如果HBM带宽(3.35 TB/s)不够，Tensor Core就会"饿着"等数据。这就是为什么NVLink（900 GB/s）和NVSwitch（全交换）如此关键——它们决定了多GPU间的数据供给速度。
+</div>
+
+<h3 id="s1-3">1.1.3 存储层次与带宽</h3>
+
+<table>
+<tr><th>层级</th><th>H100容量</th><th>带宽</th><th>管理方式</th><th>类比</th></tr>
+<tr><td><strong>寄存器</strong></td><td>256 KB/SM</td><td>~TB/s级</td><td>硬件</td><td>工人手里的工具</td></tr>
+<tr><td><strong>Shared Memory</strong></td><td>192 KB/SM</td><td>~TB/s级</td><td>软件管理</td><td>车间里的白板</td></tr>
+<tr><td><strong>L1 Cache</strong></td><td>与SharedMem共享</td><td>~TB/s级</td><td>硬件缓存</td><td>自动补货系统</td></tr>
+<tr><td><strong>L2 Cache</strong></td><td>50 MB</td><td>~12 TB/s</td><td>硬件缓存</td><td>工厂中转仓</td></tr>
+<tr><td><strong>HBM3</strong></td><td>80 GB</td><td>3.35 TB/s</td><td>片外DRAM</td><td>远处大仓库</td></tr>
+<tr><td><strong>NVLink</strong></td><td>远端GPU HBM</td><td>900 GB/s</td><td>硬件链路</td><td>工厂间的高速传送带</td></tr>
+<tr><td><strong>InfiniBand</strong></td><td>远端节点</td><td>400 Gbps</td><td>网络</td><td>工厂间的公路</td></tr>
+</table>
+
+<div class="callout-tip">
+<strong>通俗理解：带宽金字塔。</strong>越靠近计算单元，容量越小但速度越快。集合通信的本质就是<strong>在金字塔的高层(NVLink/SharedMem)完成尽可能多的工作，避免掉到低层(InfiniBand/HBM)</strong>。
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s2">1.2 NVLink：GPU间高速互联</h2>
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>类比：GPU间的“磁悬浮列车专用通道”。映射关系：传统的PCIe就像城市间的老国道，速度慢且需要经过多个“路口”（CPU、芯片组）。而NVLink是连接两个GPU的专属高速磁悬浮轨道，点对点直达，速度极快（PCIe 5.0 x16 ~64GB/s， NVLink4 ~900GB/s）且几乎没有中转延迟。</div>
+<div class="warn"><strong>常见误区：</strong>误区：以为NVLink只是比PCIe“快一点”的连接。误解来源：量化差距认知不足。PCIe是“通用”总线，服务于所有设备；NVLink是“专用”高速通道。这不仅是速度差异，更是架构差异。在All-Reduce等集合通信中，PCIe必须通过CPU内存中转数据（两次拷贝），而NVLink可直接在GPU显存间搬运，延迟和带宽优势是数量级的。</div>
+<div class="deep"><strong>深入探讨：</strong>深入：NVLink的物理层与协议。以NVLink4（H100）为例：1. 物理层：采用NRZ（非归零）编码，每个信道18个差分对（9对收，9对发），运行速率达50 Gbps。2. 带宽计算：单链路9个端口，每端口双向50 GB/s，故单链路双向带宽900 GB/s。H100 SXM5版本提供18个NVLink端口，总双向带宽达900 GB/s。3. 协议：支持内存语义（Load/Store）和消息语义（Data Packet），实现GPU内存池化。关键论文：《NVLink and NVSwitch: The Architecture and Design of the First Generation NVIDIA Multi-GPU System》。</div>
+<div class="ascii"><pre>    GPU 0                     GPU 1
+┌──────────┐   NVLink 4x4   ┌──────────┐
+│          │◄═══════════════►│          │
+│  SM/Cache │  (高速专用通道)  │  SM/Cache │
+│          │◄═══════════════►│          │
+└──────────┘                 └──────────┘
+      ▲                           ▲
+      │ (传统PCIe)               │ (传统PCIe)
+      └───────────┬───────────────┘
+                  │
+             ┌────┴────┐
+             │   CPU   │
+             └─────────┘</pre></div>
+<table><tr><th>互联技术</th><th>单GPU理论带宽(双向)</th><th>典型延迟</th><th>连接拓扑</th><th>主要用途</th></tr><tr><td>PCIe 5.0 x16</td><td>128 GB/s</td><td>~1 μs (需经过CPU)</td><td>树形 (CPU为中心)</td><td>通用外设连接</td></tr><tr><td>NVLink 4 (H100)</td><td>900 GB/s</td><td>~0.1 μs (GPU间直达)</td><td>点对点全网格</td><td>GPU显存池化、高速通信</td></tr><tr><td>NVLink 3 (A100)</td><td>600 GB/s</td><td>~0.2 μs</td><td>点对点全网格</td><td>多GPU训练</td></tr><tr><td>NVLink-C2C (Grace)</td><td>900 GB/s</td><td>极低</td><td>CPU-GPU直连</td><td>CPU+GPU异构集成</td></tr></table>
+<table><tr><th>GPU</th><th>显存</th><th>FP16算力</th><th>显存带宽</th><th>适用</th></tr>
+<tr><td>A100</td><td>80GB</td><td>312 TFLOPS</td><td>2.0 TB/s</td><td>训练+推理</td></tr>
+<tr><td>H100</td><td>80GB</td><td>990 TFLOPS</td><td>3.35 TB/s</td><td>新一代训练</td></tr>
+<tr><td>H200</td><td>141GB</td><td>990 TFLOPS</td><td>4.8 TB/s</td><td>大模型推理</td></tr>
+<tr><td>L40S</td><td>48GB</td><td>362 TFLOPS</td><td>0.86 TB/s</td><td>推理/轻量训练</td></tr></table>
+
+<!-- ============================================================ -->
+
+<h3 id="s2-1">1.2.1 NVLink 五代演进</h3>
+
+<div class="ascii-box">
+NVLink 五代演进 (2016-2024)
+
+NVLink 1.0 (Pascal P100, 2016)
+  ┌─────────────────────────────────────────────┐
+  │ 带宽: 160 GB/s (双向)                        │
+  │ 链路: 4条, 每条40 GB/s                       │
+  │ 信号: 20 GT/s NRZ                            │
+  │ 拓扑: GPU直连Mesh (无交换机)                  │
+  │ 首次使用: DGX-1 (8×P100)                     │
+  └─────────────────────────────────────────────┘
+
+NVLink 2.0 (Volta V100, 2017)
+  ┌─────────────────────────────────────────────┐
+  │ 带宽: 300 GB/s (双向)                        │
+  │ 链路: 6条, 每条50 GB/s                       │
+  │ 信号: 25 GT/s NRZ                            │
+  │ 拓扑: 引入NVSwitch (第1代, 18端口)            │
+  │ 首次使用: DGX-2 (16×V100, 全交换)            │
+  └─────────────────────────────────────────────┘
+
+NVLink 3.0 (Ampere A100, 2020)
+  ┌─────────────────────────────────────────────┐
+  │ 带宽: 600 GB/s (双向)                        │
+  │ 链路: 12条, 每条50 GB/s                      │
+  │ 信号: 50 GT/s NRZ                            │
+  │ 拓扑: NVSwitch第2代                          │
+  │ 首次使用: DGX A100 (8×A100)                  │
+  └─────────────────────────────────────────────┘
+
+NVLink 4.0 (Hopper H100, 2022)
+  ┌─────────────────────────────────────────────┐
+  │ 带宽: 900 GB/s (双向)                        │
+  │ 链路: 18条, 每条50 GB/s                      │
+  │ 信号: 50 GT/s PAM4 (速率翻倍的关键!)         │
+  │ 拓扑: NVSwitch第3代 (64端口, 含SHARP硬件归约)│
+  │ 新增: NVLink-C2C (CPU-GPU 900GB/s)           │
+  │ 首次使用: DGX H100 (8×H100)                  │
+  └─────────────────────────────────────────────┘
+
+NVLink 5.0 (Blackwell GB200, 2024)
+  ┌─────────────────────────────────────────────┐
+  │ 带宽: 1800 GB/s (双向, 1.8 TB/s!)           │
+  │ 链路: 18条, 每条100 GB/s                     │
+  │ 信号: 100 GT/s PAM4                          │
+  │ 拓扑: NVSwitch第4代 → NVL72 (72 GPU全交换)   │
+  │ 新增: NV-HBI (双Die互联, 10 TB/s)            │
+  │ 首次使用: GB200 NVL72                        │
+  └─────────────────────────────────────────────┘
+</div>
+
+<h3 id="s2-2">1.2.2 NVLink vs PCIe</h3>
+
+<table>
+<tr><th>互联</th><th>速率/通道</th><th>x16带宽</th><th>延迟</th><th>特点</th></tr>
+<tr><td>PCIe 4.0</td><td>16 GT/s</td><td>63 GB/s</td><td>~1μs</td><td>通用总线</td></tr>
+<tr><td>PCIe 5.0</td><td>32 GT/s</td><td>126 GB/s</td><td>~1μs</td><td>通用总线</td></tr>
+<tr><td>PCIe 6.0</td><td>64 GT/s</td><td>242 GB/s</td><td>~1μs</td><td>通用总线(PAM4)</td></tr>
+<tr><td style="color:var(--accent)">NVLink 5.0</td><td style="color:var(--accent)">100 GT/s</td><td style="color:var(--accent)">1800 GB/s</td><td style="color:var(--accent)">~100ns</td><td style="color:var(--accent)">专用GPU互联</td></tr>
+</table>
+
+<div class="callout-important">
+<strong>NVLink 5.0是PCIe 6.0的7.4倍带宽、10倍低延迟。</strong>这就是为什么GPU间通信必须走NVLink而不是PCIe——对于需要频繁交换梯度的大模型训练，PCIe的带宽和延迟完全不够。
+</div>
+
+<h3 id="s2-3">1.2.3 NVLink信号技术演进</h3>
+
+<table>
+<tr><th>代际</th><th>信号技术</th><th>速率/通道</th><th>关键变化</th></tr>
+<tr><td>NVLink 1.0-3.0</td><td><strong>NRZ</strong> (Non-Return-to-Zero)</td><td>20-50 GT/s</td><td>传统二电平信号</td></tr>
+<tr><td>NVLink 4.0-5.0</td><td><strong>PAM4</strong> (Pulse Amplitude Modulation 4)</td><td>50-100 GT/s</td><td>四电平信号，每周期传2bit，速率翻倍</td></tr>
+</table>
+
+<div class="callout-tip">
+<strong>通俗理解：NRZ vs PAM4。</strong>
+<ul>
+<li><strong>NRZ</strong> = 用两种手势(举手/放手)传递信息，每个动作传1bit</li>
+<li><strong>PAM4</strong> = 用四种手势(举1指/2指/3指/4指)传递信息，每个动作传2bit</li>
+</ul>
+PAM4在同样的信号频率下，带宽翻倍。代价是信号间隔更小，更容易受噪声干扰，需要更精密的电路。
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s3">1.3 NVSwitch：全交叉交换机</h2>
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>类比：大型物流中心的“全自动分拣传送带”。映射关系：想象8个仓库（GPU），如果两两直接修路（NVLink点对点），需要28条路，成本极高。NVSwitch就像一个位于中心的全自动化分拣中心，任何仓库发出的包裹（数据）都能通过这个中心，以最高速度直接送达任何其他仓库，实现“任意两点”间的高速直连。</div>
+<div class="warn"><strong>常见误区：</strong>误区：以为NVSwitch只是连接更多GPU的“交换机”。误解来源：忽略了其“全交叉”特性。普通交换机在多对多通信时可能出现拥塞和带宽分享。NVSwitch采用全交叉（Crossbar）架构，保证任何两个GPU之间都有独占的、全线速的通信路径，即使所有GPU同时相互通信，每条路径的带宽也不会减少。这是实现大规模All-Reduce等操作线性加速的关键。</div>
+<div class="deep"><strong>深入探讨：</strong>深入：NVSwitch架构演进与数据。以第三代NVSwitch（用于H100 DGX）为例：1. 它是基于NVLink4协议的ASIC芯片。2. 单个NVSwitch拥有64个NVLink端口。3. 在DGX H100系统中，通过两块NVSwitch托盘（每块含4个NVSwitch芯片），将8个H100 GPU全连接成一个完整的8节点全交叉网络。4. 系统总通信带宽：8 GPU * 900 GB/s / 2 (双向) = 3.6 TB/s 的聚合双向带宽。关键设计：无缓存（Cut-through）交换，极低延迟（约100纳秒）。</div>
+<div class="ascii"><pre>        ┌───────────────────────┐
+        │      NVSwitch 芯片     │
+        │   (64端口全交叉矩阵)   │
+        └───┬───┬───┬───┬───┬───┘
+            │   │   │   │   │   (64个NVLink端口)
+            ▼   ▼   ▼   ▼   ▼
+     ┌─────┐ ┌─────┐     ┌─────┐
+     │GPU 0│ │GPU 1│ ... │GPU N│
+     └─────┘ └─────┘     └─────┘
+   任何GPU都可以通过NVSwitch
+   以全线速直连到任何其他GPU</pre></div>
+<table><tr><th>连接方式</th><th>所需物理链路数(8GPU)</th><th>通信路径</th><th>All-to-All带宽</th><th>扩展性</th></tr><tr><td>点对点NVLink</td><td>28条 (C(8,2))</td><td>直连，无中转</td><td>高，但布线复杂</td><td>差，链路数O(N²)</td></tr><tr><td>传统交换机</td><td>8条 (每个GPU连1条到交换机)</td><td>经过交换机中转，可能拥塞</td><td>共享交换机带宽</td><td>好，但带宽有瓶颈</td></tr><tr><td>NVSwitch全交叉</td><td>通过NVSwitch的64端口实现</td><td>经NVSwitch全交叉直通</td><td>全线速，无阻塞</td><td>依赖交换芯片端口数</td></tr></table>
+<table><tr><th>GPU</th><th>显存</th><th>FP16算力</th><th>显存带宽</th><th>适用</th></tr>
+<tr><td>A100</td><td>80GB</td><td>312 TFLOPS</td><td>2.0 TB/s</td><td>训练+推理</td></tr>
+<tr><td>H100</td><td>80GB</td><td>990 TFLOPS</td><td>3.35 TB/s</td><td>新一代训练</td></tr>
+<tr><td>H200</td><td>141GB</td><td>990 TFLOPS</td><td>4.8 TB/s</td><td>大模型推理</td></tr>
+<tr><td>L40S</td><td>48GB</td><td>362 TFLOPS</td><td>0.86 TB/s</td><td>推理/轻量训练</td></tr></table>
+
+<!-- ============================================================ -->
+
+<h3 id="s3-1">1.3.1 为什么需要NVSwitch？</h3>
+
+<div class="callout-tip">
+<strong>通俗理解：电话总机 vs 全交叉交换机。</strong>
+<ul>
+<li><strong>无NVSwitch (Mesh)</strong> = 8个人两两之间拉直通电话线。8人需要28条线(C(8,2))，每人最多7条线。链路数随GPU数平方增长。</li>
+<li><strong>有NVSwitch</strong> = 8个人都连到一个中央交换机。每人只需1条线(连到交换机)，交换机负责转发。N个GPU只需N条线。</li>
+</ul>
+NVSwitch让任何两个GPU之间都能以<strong>全带宽</strong>通信，不需要多跳转发。
+</div>
+
+<h3 id="s3-2">1.3.2 NVSwitch四代演进</h3>
+
+<table>
+<tr><th>代际</th><th>配套GPU</th><th>端口数</th><th>关键特性</th><th>首次使用</th></tr>
+<tr><td><strong>第1代</strong></td><td>V100 (NVLink 2.0)</td><td>18端口</td><td>首款NVSwitch，全交换</td><td>DGX-2 (16 GPU)</td></tr>
+<tr><td><strong>第2代</strong></td><td>A100 (NVLink 3.0)</td><td>-</td><td>更高带宽</td><td>DGX A100</td></tr>
+<tr><td><strong>第3代</strong></td><td>H100 (NVLink 4.0)</td><td>64端口</td><td><strong>SHARP硬件归约</strong>，分组交换</td><td>DGX H100</td></tr>
+<tr><td><strong>第4代</strong></td><td>B200 (NVLink 5.0)</td><td>更多</td><td>NVL72支持，更高带宽</td><td>GB200 NVL72</td></tr>
+</table>
+
+<h3 id="s3-3">1.3.3 NVSwitch内部架构</h3>
+
+<div class="ascii-box">
+NVSwitch 内部架构 (第3代, Hopper)
+
+┌───────────────────────────────────────────────┐
+│  NVSwitch 芯片                                  │
+│                                                 │
+│  ┌──────────────────────────────────────────┐  │
+│  │  分组交换矩阵 (Packet-Switched Crossbar)  │  │
+│  │                                            │  │
+│  │  32个双通道端口 (每端口106.25 GT/s)        │  │
+│  │  任意两个端口间全带宽交换                   │  │
+│  └──────────────────────────────────────────┘  │
+│                                                 │
+│  ┌──────────────────────────────────────────┐  │
+│  │  ★ SHARP 硬件归约引擎 ★                   │  │
+│  │                                            │  │
+│  │  在交换矩阵内直接执行:                      │  │
+│  │  · Reduce (求和/求最大值等)                 │  │
+│  │  · Broadcast (广播)                        │  │
+│  │  · 支持 FP16/BF16/FP32 数据类型            │  │
+│  │                                            │  │
+│  │  效果: AllReduce通信量减少约2×              │  │
+│  │  因为归约在"路过"时完成, 不需要先传到GPU     │  │
+│  └──────────────────────────────────────────┘  │
+│                                                 │
+│  64端口: 连接8个GPU × 8台服务器                 │
+│  或: 72个GPU (NVL72配置)                        │
+└───────────────────────────────────────────────┘
+</div>
+
+<div class="callout-important">
+<strong>SHARP是NVIDIA的独有杀手锏。</strong>传统AllReduce需要数据先传到一个GPU做归约，再把结果广播回去（来回两趟）。SHARP在交换机内部完成归约，数据"路过"交换机时就被累加了——<strong>省了一半的通信量，且不占用GPU计算资源</strong>。
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s4">1.4 NVL72：柜级超节点</h2>
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>类比：从“乐高积木”到“乐高城堡”。映射关系：单个GPU是基础乐高块，NVLink和NVSwitch将多块GPU拼成一个坚固的“GPU乐高板”（如DGX）。NVL72则是将这些乐高板、网络交换、存储、供电、散热全部集成在一个预先设计好的标准机柜中，形成一个出厂即用的、可无限扩展的“乐高城堡”基础单元。</div>
+<div class="warn"><strong>常见误区：</strong>误区：以为NVL72只是把更多服务器塞进一个机柜。误解来源：忽视了其“系统级”设计和“单一大内存域”目标。关键差异：1. **液冷是标配**，而非可选，因为功耗密度极高。2. **机柜本身就是一个完整的计算单元**，内部GPU通过NVLink/NVSwitch全连接，对外通过InfiniBand高速网络暴露。3. 其目标是让72个GPU像一个“超级GPU”一样被编程和调用。</div>
+<div class="deep"><strong>深入探讨：</strong>深入：NVL72架构与关键参数。以GB200 NVL72为例：1. **计算单元**：36个Grace CPU + 72个Blackwell GPU。每个GB200模块包含1个Grace CPU和2个B200 GPU，通过NVLink-C2C直连。2. **互联核心**：两层NVSwitch。第一层在模块内部连接2个GPU，第二层通过托盘上的NVSwitch芯片实现所有72个GPU的全交叉连接。3. **聚合带宽**：GPU间NVLink总带宽达到 **130 TB/s**（每GPU 1.8 TB/s * 72 / 2）。4. **对外网络**：每个GPU配有一个ConnectX-8网卡，总带宽 **576 Tb/s**。5. **功耗与散热**：整个机柜功耗超过 **120kW**，必须采用液冷。</div>
+<div class="ascii"><pre>┌─────────────────────────────────┐
+│          NVL72 机柜             │
+│  ┌───────────┐ ┌───────────┐   │
+│  │ 计算托盘  │ │ 计算托盘  │...│
+│  │ Grace+B200│ │ Grace+B200│   │
+│  └─────┬─────┘ └─────┬─────┘   │
+│        │ (NVLink)    │         │
+│  ┌─────┴─────────────┴─────┐   │
+│  │     NVSwitch 网络托盘     │   │
+│  │ (实现全72 GPU交叉连接)    │   │
+│  └───────────┬─────────────┘   │
+│              │ (InfiniBand NDR)│
+│  ┌───────────┴───────────┐     │
+│  │   计算网络交换机托盘    │     │
+│  └───────────────────────┘     │
+└─────────────────────────────────┘</pre></div>
+<table><tr><th>系统</th><th>GPU数量</th><th>关键互联技术</th><th>聚合双向GPU带宽</th><th>典型用途</th></tr><tr><td>DGX A100</td><td>8</td><td>NVLink 3 + 6x NVSwitch</td><td>4.8 TB/s</td><td>单节点多GPU训练/推理</td></tr><tr><td>DGX H100</td><td>8</td><td>NVLink 4 + 4x NVSwitch (2托盘)</td><td>7.2 TB/s</td><td>大模型训练</td></tr><tr><td>GB200 NVL72</td><td>72</td><td>NVLink 5 + 两层NVSwitch</td><td>~130 TB/s</td><td>万亿参数模型训练，AI工厂</td></tr><tr><td>DGX SuperPOD (256 GPU)</td><td>256+</td><td>NVL72单元 + InfiniBand NDR</td><td>节点间800Gb/s</td><td>超大规模集群</td></tr></table>
+<table><tr><th>GPU</th><th>显存</th><th>FP16算力</th><th>显存带宽</th><th>适用</th></tr>
+<tr><td>A100</td><td>80GB</td><td>312 TFLOPS</td><td>2.0 TB/s</td><td>训练+推理</td></tr>
+<tr><td>H100</td><td>80GB</td><td>990 TFLOPS</td><td>3.35 TB/s</td><td>新一代训练</td></tr>
+<tr><td>H200</td><td>141GB</td><td>990 TFLOPS</td><td>4.8 TB/s</td><td>大模型推理</td></tr>
+<tr><td>L40S</td><td>48GB</td><td>362 TFLOPS</td><td>0.86 TB/s</td><td>推理/轻量训练</td></tr></table>
+
+<!-- ============================================================ -->
+
+<h3 id="s4-1">1.4.1 NVL72系统架构</h3>
+
+<div class="ascii-box">
+GB200 NVL72 系统架构
+
+┌─────────────────────────────────────────────────────────┐
+│                    NVL72 机柜                              │
+│                                                           │
+│  ┌─────────────────────────────────────────────────────┐ │
+│  │  计算托盘 (Compute Tray) × 18                        │ │
+│  │  每个托盘: 2× GB200 (每个GB200 = 1 Grace CPU +       │ │
+│  │           2× Blackwell GPU)                          │ │
+│  │  = 每托盘 4 GPU + 2 CPU                              │ │
+│  └─────────────────────────────────────────────────────┘ │
+│                                                           │
+│  ┌─────────────────────────────────────────────────────┐ │
+│  │  NVSwitch 托盘 × 9                                   │ │
+│  │  每个托盘: NVSwitch芯片                               │ │
+│  │  全交叉连接所有72个GPU                                │ │
+│  │  任意两个GPU间: 1.8 TB/s (双向)                       │ │
+│  └─────────────────────────────────────────────────────┘ │
+│                                                           │
+│  系统参数:                                                │
+│  · 72× Blackwell GPU                                     │
+│  · 36× Grace CPU                                         │
+│  · 1.8 TB/s NVLink带宽/GPU                              │
+│  · 130 TB/s 系统互联带宽                                 │
+│  · 13.8 TB HBM总容量                                     │
+│  · 180 PFLOPs (BF16)                                     │
+│  · ~145 kW 功耗                                          │
+└─────────────────────────────────────────────────────────┘
+</div>
+
+<h3 id="s4-2">1.4.2 NV-HBI：双Die互联</h3>
+
+<p>Blackwell B200采用<strong>双Die封装</strong>（两个GPU Die在一个封装上），通过<strong>NV-HBI (NV-High Bandwidth Interface)</strong>互联：</p>
+
+<table>
+<tr><th>参数</th><th>值</th><th>说明</th></tr>
+<tr><td>NV-HBI带宽</td><td><strong>10 TB/s</strong></td><td>Die间互联，远超NVLink</td></tr>
+<tr><td>协议</td><td>NVLink 7协议</td><td>Die间专用，非外部NVLink</td></tr>
+<tr><td>缓存一致性</td><td>完全一致</td><td>两个Die的L2 Cache统一视图</td></tr>
+<tr><td>封装技术</td><td>TSMC CoWoS-L</td><td>2.5D封装，硅中介层</td></tr>
+<tr><td>总晶体管</td><td>2080亿</td><td>两个Die合计</td></tr>
+</table>
+
+<div class="callout">
+<strong>10 TB/s的Die间带宽意味着什么？</strong>NVLink 5.0的外部带宽是1.8 TB/s，而Die间是10 TB/s——内部带宽是外部的5.5倍。这确保了双Die在逻辑上可以被视为一个统一的GPU，不会因为Die间通信成为瓶颈。
+</div>
+
+<h3 id="s4-3">1.4.3 NVLink-C2C：CPU-GPU直连</h3>
+
+<p>Grace Hopper超级芯片引入<strong>NVLink-C2C (Chip-to-Chip)</strong>，直接连接CPU和GPU：</p>
+
+<table>
+<tr><th>参数</th><th>值</th><th>对比PCIe</th></tr>
+<tr><td>带宽</td><td>900 GB/s</td><td>PCIe 5.0 x16: 126 GB/s (7倍)</td></tr>
+<tr><td>缓存一致性</td><td>✅ 完全一致</td><td>PCIe不保证一致性</td></tr>
+<tr><td>内存统一</td><td>CPU和GPU共享地址空间</td><td>PCIe需要显式拷贝</td></tr>
+<tr><td>功耗</td><td>更低(无PCIe PHY)</td><td>PCIe需要额外功耗</td></tr>
+</table>
+
+<div class="callout-tip">
+<strong>NVLink-C2C的意义：</strong>传统架构中，CPU和GPU通过PCIe通信（126 GB/s），GPU间通过NVLink通信（900 GB/s），两者差距7倍。NVLink-C2C让CPU-GPU通信和GPU-GPU通信达到同一量级，消除了这个瓶颈。对于需要CPU参与的数据预处理、梯度聚合等操作，性能提升巨大。
+</div>
+
+<!-- ============================================================ -->
+<h2 id="s5">1.5 与昇腾硬件架构对比</h2>
+<h3>与昇腾硬件架构对比</h3>><strong>通俗类比：</strong>类比：“西式模块化厨房” vs “中式中央厨房”。映射关系：NVIDIA体系像先进的西式厨房，标准化（CUDA）、模块化（GPU-NVLink-NVSwitch）、生态开放（第三方软件丰富），通过不断升级组件（更强GPU、更快NVLink）来提升性能。华为昇腾像高效的中央厨房，强调整体设计（昇腾处理器+达芬奇架构+HCCS互联）、软件栈深度整合（MindSpore），旨在提供端到端的高效AI解决方案。</div>
+<div class="warn"><strong>常见误区：</strong>误区：陷入“唯参数论”或“生态决定论”的非此即彼思维。误解来源：忽略了技术路线的选择与场景的适配。1. **参数对比陷阱**：直接比较TFLOPS、带宽等数字无意义，因为两者架构（如昇腾的Da Vinci Cube vs NVIDIA的Tensor Core）和指令集完全不同。2. **生态误解**：认为CUDA生态“不可撼动”，但在特定行业和国产化场景下，华为的MindSpore+昇腾栈已形成闭环能力。选择应基于具体业务场景、数据安全要求和供应链考量。</div>
+<div class="deep"><strong>深入探讨：</strong>深入：核心架构差异。1. **计算单元**：NVIDIA GPU基于通用流处理器（CUDA Core）和专用张量核（Tensor Core），编程模型（CUDA）灵活。昇腾处理器基于Da Vinci架构，核心是**AI Core**，其设计围绕矩阵计算单元（Cube Unit）和向量/标量单元，更专用化，能效比突出。2. **互联技术**：NVIDIA使用高带宽、低延迟的NVLink/NVSwitch进行GPU间直连，对外使用InfiniBand。华为使用**HCCS (Huawei Cache Coherent System)** 进行处理器间缓存一致性互联，并结合**HCCS-HD (High Density)** 等技术构建超节点网络，实现类似NVLink的池化效果。3. **关键论文**：可参考华为发布的《Ascend 910 Technical Whitepaper》。</div>
+<div class="ascii"><pre>┌──────────────────┐     ┌──────────────────┐
+│  NVIDIA GPU方案   │     │  华为昇腾方案     │
+│                  │     │                  │
+│ ┌─────┐  NVLink  │     │ ┌─────┐  HCCS   │
+│ │H100 │══════════│     │ │910B │══════════│
+│ └─────┘    │     │     │ └─────┘    │     │
+│     NVSwitch  │     │     HCCS-HD网络 │     │
+│     (全交叉) │     │     (超节点互联)│     │
+└────────┬─────┘     └────────┬─────────┘
+         │ (InfiniBand)       │ (RoCEv2/HCCS)
+         ▼                    ▼
+┌──────────────────┐   ┌──────────────────┐
+│ 标准数据中心网络  │   │ 华为云/一体化方案 │
+└──────────────────┘   └──────────────────┘</pre></div>
+<table><tr><th>对比维度</th><th>NVIDIA (以H100/NVL72为例)</th><th>华为昇腾 (以Ascend 910B为例)</th><th>差异简析</th></tr><tr><td>核心计算架构</td><td>CUDA Core + Tensor Core (通用性与专用性结合)</td><td>Da Vinci AI Core (围绕Cube/Vector/Scalar单元设计，更专用)</td><td>NVIDIA灵活，昇腾能效优化极致</td></tr><tr><td>片间高速互联</td><td>NVLink 4/5, 带宽高达900GB/s/链路</td><td>HCCS (缓存一致性), HCCS-HD (高速总线)</td><td>技术路线不同，目标相似（低延迟高带宽）</td></tr><tr><td>网络拓扑</td><td>NVSwitch全交叉 + InfiniBand构建超节点/集群</td><td>HCCS构建超节点 + RoCEv2/自研网络构建集群</td><td>NVIDIA生态更开放，昇腾垂直整合更深</td></tr><tr><td>软件生态</td><td>CUDA, cuDNN, NCCL, 成熟丰富</td><td>CANN, MindSpore, 快速发展，闭环</td><td>CUDA是事实标准，MindSpore+昇腾栈在自主生态中优势明显</td></tr><tr><td>典型超节点</td><td>GB200 NVL72 (72 GPU)</td><td>昇腾Atlas 900 PoD (256处理器)</td><td>均旨在提供“单一系统镜像”的强大算力</td></tr></table>
+<table><tr><th>GPU</th><th>显存</th><th>FP16算力</th><th>显存带宽</th><th>适用</th></tr>
+<tr><td>A100</td><td>80GB</td><td>312 TFLOPS</td><td>2.0 TB/s</td><td>训练+推理</td></tr>
+<tr><td>H100</td><td>80GB</td><td>990 TFLOPS</td><td>3.35 TB/s</td><td>新一代训练</td></tr>
+<tr><td>H200</td><td>141GB</td><td>990 TFLOPS</td><td>4.8 TB/s</td><td>大模型推理</td></tr>
+<tr><td>L40S</td><td>48GB</td><td>362 TFLOPS</td><td>0.86 TB/s</td><td>推理/轻量训练</td></tr></table>
+
+<!-- ============================================================ -->
+
+<table>
+<tr><th>维度</th><th>NVIDIA H100</th><th>昇腾910C</th></tr>
+<tr><td>计算架构</td><td>SIMT + Tensor Core (硬件缓存)</td><td>数据流 + DaVinci (软件Scratchpad)</td></tr>
+<tr><td>矩阵单元</td><td>Tensor Core 4×4×4~8×8×8</td><td>Cube Unit 16×16×16 MAC阵列</td></tr>
+<tr><td>存储管理</td><td>硬件Cache (L1/L2自动)</td><td>软件Scratchpad (MTE显式搬运)</td></tr>
+<tr><td>编程模型</td><td>CUDA (SIMT线程模型)</td><td>Ascend C (Tiling+MTE调度)</td></tr>
+<tr><td>FP16 TFLOPS</td><td>989</td><td>~320-400</td></tr>
+<tr><td>HBM</td><td>80 GB, 3.35 TB/s</td><td>128 GB, 3.2 TB/s</td></tr>
+<tr><td>GPU-NPU互联</td><td>NVLink 4.0 (900 GB/s)</td><td>UB灵衢 (392 GB/s)</td></tr>
+<tr><td>Scale-Up域</td><td>72 GPU (NVL72)</td><td>384 NPU (CloudMatrix)</td></tr>
+<tr><td>硬件归约</td><td>✅ SHARP (NVSwitch内置)</td><td>❌ 无</td></tr>
+<tr><td>Die间互联</td><td>NV-HBI 10 TB/s (双Die)</td><td>硅中介层 (双Die)</td></tr>
+</table>
+
+<div class="callout">
+<strong>核心差异总结：</strong>
+<ul>
+<li><strong>NVIDIA</strong>：硬件缓存 + Tensor Core + NVLink高带宽 + SHARP硬件归约 → 单卡效率极高</li>
+<li><strong>昇腾</strong>：软件Scratchpad + DaVinci Cube + UB大规模域 → 域规模更大，单卡效率较低</li>
+<li>两种路线的<strong>根本差异</strong>在于：NVIDIA用硬件自动化换取开发效率，昇腾用软件控制换取可预测性</li>
+</ul>
+</div>
+
+<p class="source">
+来源: Wikipedia NVLink/Nvidia Blackwell, ServeTheHome NVL72 teardown, NVIDIA Hopper/Blackwell白皮书,<br>
+NVIDIA Developer Blog "Grace Hopper Architecture In-Depth", TechPowerUp NVLink Specs
+</p>
+
+</div>
+
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+  <li>请用自己的话解释<strong>1 NVIDIA GPU内部架构</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>2 NVLink：GPU间高速互联</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>3 NVSwitch：全交叉交换机</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>4 NVL72：柜级超节点</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>5 与昇腾硬件架构对比</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+1 NVIDIA GPU内部架构的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习1 NVIDIA GPU内部架构建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+<div class="footer"><p><a href="00-资料索引.html">返回NVIDIA集合通信目录</a> | <a href="../index.html">返回学习目录</a></p></div>
+</body>
+</html>

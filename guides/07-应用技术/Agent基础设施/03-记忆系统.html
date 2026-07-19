@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 记忆系统 | Agent 基础设施</title>
+<style>:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--heading:#f0f6fc;--blue:#58a6ff;--green:#3fb950;--yellow:#d29922;--red:#f85149;--purple:#a371f7;--cyan:#39d2c0}*{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.8;font-size:16px}.container{max-width:900px;margin:0 auto;padding:2rem 1.5rem}h1{color:var(--blue);font-size:2rem;margin:1rem 0 .5rem}h2{color:var(--heading);font-size:1.5rem;margin:2rem 0 .8rem;padding-left:.8rem;border-left:4px solid var(--blue)}h3{color:var(--cyan);font-size:1.2rem;margin:1.5rem 0 .5rem}p{margin:.6rem 0}a{color:var(--blue);text-decoration:none}code{background:#21262d;color:#79c0ff;padding:.15em .4em;border-radius:4px;font-size:.9em}pre{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;overflow-x:auto;margin:1rem 0;font-size:.9em;line-height:1.6}pre code{background:none;padding:0}table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9em}th,td{border:1px solid var(--border);padding:.5rem .8rem;text-align:left}th{background:#161b22;color:var(--blue);font-weight:600}tr:nth-child(even){background:rgba(22,27,34,.5)}.nav{background:var(--card);border-bottom:1px solid var(--border);padding:.6rem 1.5rem;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.nav a{color:var(--blue);font-size:.9rem}.nav span{color:var(--heading);font-weight:600;font-size:.95rem}.footer{text-align:center;margin-top:3rem;padding:1.5rem;border-top:1px solid var(--border);color:#8b949e;font-size:.85rem}.tip,.warn,.exercise,.deep{border-radius:8px;padding:1rem 1.2rem;margin:1rem 0}.tip{background:#0d1d30;border-left:4px solid var(--blue)}.warn{background:#2d1b00;border-left:4px solid var(--yellow)}.exercise{background:#0d2818;border-left:4px solid var(--green)}.deep{background:#1a1024;border-left:4px solid var(--purple)}.ascii{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;font-family:monospace;font-size:.85em;line-height:1.5;overflow-x:auto;white-space:pre}.badge{display:inline-block;padding:.15em .6em;border-radius:12px;font-size:.75em;font-weight:600;margin:0 .3em}.badge-blue{background:rgba(88,166,255,.15);color:var(--blue)}.badge-green{background:rgba(63,185,80,.15);color:var(--green)}.badge-yellow{background:rgba(210,153,34,.15);color:var(--yellow)}.badge-purple{background:rgba(163,113,247,.15);color:var(--purple)}.badge-red{background:rgba(248,81,73,.15);color:var(--red)}.badge-cyan{background:rgba(57,210,192,.15);color:var(--cyan)}.formula{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1.2rem;margin:1rem 0;text-align:center;font-size:1.1em;color:var(--cyan);font-family:monospace}.next-prev{display:flex;justify-content:space-between;margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border)}ul,ol{margin:.5rem 0 .5rem 1.5rem}li{margin:.3rem 0}</style>
+</head>
+<body>
+<div class="nav"><a href="02-Tool-Calling实现.html">&larr; 02</a><span>模块 03 · 记忆系统</span><a href="04-规划与推理.html">04 &rarr;</a></div>
+<div class="container">
+
+<h1>🧠 03 · 记忆系统</h1>
+<p><span class="badge badge-blue">中级</span></p>
+
+<h2>1. 三种记忆类型</h2>
+<div class="ascii">Agent 记忆系统:
+
+  短期记忆 (Working Memory / Short-term)
+    ├── 对话上下文窗口 (Context Window)
+    ├── 当前任务的中间状态
+    ├── Scratchpad (临时笔记)
+    └── 生命周期: 单次会话
+
+  长期记忆 (Long-term Memory)
+    ├── 向量数据库存储的历史交互
+    ├── 知识图谱
+    ├── 持久化存储 (文件/数据库)
+    └── 生命周期: 跨会话持久
+
+  情景记忆 (Episodic Memory)
+    ├── 过去的成功经验
+    ├── 失败教训
+    ├── 可复用的工作流
+    └── 生命周期: 持续积累</div>
+
+<h2>2. 短期记忆实现</h2>
+<h3>2.1 上下文窗口管理</h3>
+<pre><code># 短期记忆: 上下文窗口管理
+class ContextWindow:
+    def __init__(self, max_tokens=8192):
+        self.max_tokens = max_tokens
+        self.messages = []
+
+    def add(self, role, content):
+        self.messages.append({"role": role, "content": content})
+        self._trim()
+
+    def _trim(self):
+        """当超出窗口时，移除最旧的消息"""
+        total = sum(count_tokens(m["content"]) for m in self.messages)
+        while total > self.max_tokens and len(self.messages) > 2:
+            removed = self.messages.pop(0)  # 移除最旧的
+            total -= count_tokens(removed["content"])
+
+    def get_messages(self):
+        return self.messages</code></pre>
+
+<h3>2.2 对话摘要压缩</h3>
+<pre><code># 当对话过长时，用 LLM 压缩历史
+def summarize_history(messages, model):
+    """用 LLM 将长对话压缩为摘要"""
+    prompt = f"""请将以下对话压缩为简洁的摘要，保留关键信息：
+
+{format_messages(messages)}
+
+摘要:"""
+
+    summary = model.generate(prompt)
+    return [
+        {"role": "system", "content": f"对话历史摘要: {summary}"},
+        messages[-1]  # 保留最近一条消息
+    ]</code></pre>
+
+<h2>3. 长期记忆实现</h2>
+<h3>3.1 向量数据库存储</h3>
+<pre><code># 长期记忆: 向量数据库
+import chromadb
+
+class LongTermMemory:
+    def __init__(self):
+        self.client = chromadb.Client()
+        self.collection = self.client.create_collection("agent_memory")
+
+    def store(self, content, metadata=None):
+        """存储一条记忆"""
+        embedding = embed_model.encode(content)
+        self.collection.add(
+            documents=[content],
+            embeddings=[embedding.tolist()],
+            ids=[str(uuid.uuid4())],
+            metadatas=[metadata or {}]
+        )
+
+    def retrieve(self, query, top_k=5):
+        """检索相关记忆"""
+        query_embedding = embed_model.encode(query)
+        results = self.collection.query(
+            query_embeddings=[query_embedding.tolist()],
+            n_results=top_k
+        )
+        return results["documents"][0]
+
+    def forget(self, older_than_days=30):
+        """遗忘过期记忆"""
+        cutoff = datetime.now() - timedelta(days=older_than_days)
+        # 删除旧记忆
+        pass</code></pre>
+
+<h3>3.2 记忆检索策略</h3>
+<table>
+<tr><th>策略</th><th>原理</th><th>适用场景</th><th>实现</th></tr>
+<tr><td>时间衰减</td><td>越近的记忆权重越高</td><td>对话历史</td><td>score *= exp(-λ·Δt)</td></tr>
+<tr><td>相关性</td><td>语义相似度匹配</td><td>知识检索</td><td>cosine_similarity</td></tr>
+<tr><td>重要性</td><td>LLM 评估记忆重要性</td><td>关键信息</td><td>LLM 打分</td></tr>
+<tr><td>混合</td><td>加权组合以上三种</td><td>通用场景</td><td>α·相关 + β·时间 + γ·重要</td></tr>
+</table>
+
+<pre><code># 混合检索策略
+def hybrid_retrieve(query, memory, alpha=0.5, beta=0.3, gamma=0.2):
+    """混合检索: 相关性 + 时间衰减 + 重要性"""
+    candidates = memory.get_all()
+
+    scores = []
+    for item in candidates:
+        # 相关性分数
+        relevance = cosine_similarity(embed(query), embed(item.content))
+        # 时间衰减分数
+        age_hours = (datetime.now() - item.timestamp).total_seconds() / 3600
+        recency = math.exp(-0.01 * age_hours)
+        # 重要性分数 (预计算)
+        importance = item.importance_score
+
+        score = alpha * relevance + beta * recency + gamma * importance
+        scores.append((item, score))
+
+    # 返回 Top-K
+    scores.sort(key=lambda x: x[1], reverse=True)
+    return [item for item, score in scores[:5]]</code></pre>
+
+<h2>4. Letta (MemGPT) 的自编辑记忆</h2>
+<p><a href="https://docs.letta.com">Letta</a> 实现了 Agent 自主读写自己的记忆：</p>
+<div class="svg-diagram"><svg viewBox="0 0 560 340" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:560px">
+<style>text{font-family:'Cascadia Code','Fira Code',monospace;font-size:11px;fill:#c9d1d9}</style>
+<!-- Outer Agent container -->
+<rect x="20" y="10" width="520" height="320" rx="10" fill="#0d1117" stroke="#30363d" stroke-width="1.5"/>
+<text x="280" y="32" text-anchor="middle" font-size="13" fill="#f0f6fc" font-weight="bold">Agent</text>
+<!-- Persona Memory Block -->
+<rect x="40" y="48" width="230" height="55" rx="6" fill="#0a1628" stroke="#a78bfa" stroke-width="1.5"/>
+<rect x="40" y="48" width="230" height="20" rx="6" fill="#2e1065"/>
+<text x="155" y="63" text-anchor="middle" font-size="11" fill="#a78bfa" font-weight="bold">Persona Memory Block</text>
+<text x="155" y="88" text-anchor="middle" font-size="10" fill="#8b949e">Agent 人设与角色</text>
+<!-- Human Memory Block -->
+<rect x="290" y="48" width="230" height="55" rx="6" fill="#0a1628" stroke="#a78bfa" stroke-width="1.5"/>
+<rect x="290" y="48" width="230" height="20" rx="6" fill="#2e1065"/>
+<text x="405" y="63" text-anchor="middle" font-size="11" fill="#a78bfa" font-weight="bold">Human Memory Block</text>
+<text x="405" y="88" text-anchor="middle" font-size="10" fill="#8b949e">用户相关信息</text>
+<!-- Custom Memory Block 1 -->
+<rect x="40" y="118" width="230" height="55" rx="6" fill="#0a1628" stroke="#a78bfa" stroke-width="1.5"/>
+<rect x="40" y="118" width="230" height="20" rx="6" fill="#2e1065"/>
+<text x="155" y="133" text-anchor="middle" font-size="11" fill="#a78bfa" font-weight="bold">Custom Memory Block</text>
+<text x="155" y="158" text-anchor="middle" font-size="10" fill="#8b949e">自定义记忆段</text>
+<!-- Custom Memory Block 2 -->
+<rect x="290" y="118" width="230" height="55" rx="6" fill="#0a1628" stroke="#a78bfa" stroke-width="1.5"/>
+<rect x="290" y="118" width="230" height="20" rx="6" fill="#2e1065"/>
+<text x="405" y="133" text-anchor="middle" font-size="11" fill="#a78bfa" font-weight="bold">Custom Memory Block</text>
+<text x="405" y="158" text-anchor="middle" font-size="10" fill="#8b949e">自定义记忆段</text>
+<!-- Agent 能力说明 -->
+<rect x="40" y="190" width="480" height="125" rx="6" fill="#161b22" stroke="#30363d" stroke-width="1"/>
+<text x="280" y="210" text-anchor="middle" font-size="11" fill="#fbbf24" font-weight="bold">Agent 可以主动操作记忆</text>
+<text x="70" y="232" font-size="10" fill="#22d3ee">core_memory_append</text><text x="280" y="232" font-size="10" fill="#8b949e">(block, content)</text>
+<text x="70" y="250" font-size="10" fill="#22d3ee">core_memory_replace</text><text x="280" y="250" font-size="10" fill="#8b949e">(block, old, new)</text>
+<text x="70" y="268" font-size="10" fill="#34d399">archival_memory_insert</text><text x="295" y="268" font-size="10" fill="#8b949e">(content)</text>
+<text x="70" y="286" font-size="10" fill="#34d399">archival_memory_search</text><text x="295" y="286" font-size="10" fill="#8b949e">(query)</text>
+</svg></div>
+
+<h2>5. RAG 作为记忆系统</h2>
+<p>RAG 本质上是 Agent 的「外部知识记忆」：</p>
+<div class="ascii">RAG 记忆模式:
+
+  用户问题 → Embedding → 向量搜索 → Top-K 文档
+                                        │
+                                        ▼
+  LLM: [问题 + 检索到的文档] → 生成答案
+
+  文档 = Agent 的「参考书」记忆
+
+  与传统记忆的区别:
+  - 短期记忆: 当前对话上下文
+  - 长期记忆: 历史交互记录
+  - RAG 记忆: 外部知识库 (文档、网页、数据库)</div>
+
+<h2>6. 记忆压缩技术</h2>
+<table>
+<tr><th>技术</th><th>原理</th><th>压缩比</th><th>信息损失</th></tr>
+<tr><td>对话摘要</td><td>LLM 总结历史对话</td><td>10-20x</td><td>中</td></tr>
+<tr><td>关键信息提取</td><td>提取实体、事实、决策</td><td>5-10x</td><td>低</td></tr>
+<tr><td>滑动窗口</td><td>只保留最近 N 轮</td><td>N/total</td><td>高</td></tr>
+<tr><td>分层压缩</td><td>近的详细，远的摘要</td><td>可变</td><td>低</td></tr>
+</table>
+
+<div class="tip"><strong>通俗类比：</strong>Agent 的记忆系统就像人脑的三层记忆：短期记忆像你的"工作台"——只放当前正在处理的东西，满了就清理；长期记忆像你的"笔记本"——记录重要的事情，需要时翻阅；情景记忆像你的"经验库"——记住上次踩过的坑，下次遇到类似情况就知道怎么处理。</div>
+
+<div class="warn"><strong>常见误区：</strong>1) 以为把所有历史对话都塞进上下文窗口就是"记忆"——token 有上限，成本也会飙升；2) 长期记忆只用向量检索，忽略了时间衰减和重要性加权，导致检索到过时或无关的记忆；3) 忘记设计"遗忘"机制，Agent 记住太多噪声信息反而干扰决策。</div>
+
+<div class="deep"><strong>深入探讨：</strong>Letta/MemGPT 的核心创新是让 Agent 自己决定"记什么、忘什么"。传统 RAG 是被动检索，而自编辑记忆是主动管理——Agent 可以调用 core_memory_append 把重要信息写入核心记忆，用 core_memory_replace 更新过时信息。这模拟了人类的"元认知"能力：不仅知道信息，还知道自己知道什么、不知道什么。在实际应用中，这种自编辑能力对长期对话和个性化 Agent 至关重要。</div>
+
+<div class="tip"><strong>向前串联：</strong>
+三种记忆类型的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+三种记忆类型与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+<div class="exercise">
+<p><strong>🧪 练习 1</strong>：用 ChromaDB 实现一个带长期记忆的 Agent：记住用户偏好，跨会话使用。</p>
+<p><strong>🧪 练习 2</strong>：实现一个混合检索策略：结合相关性、时间衰减和重要性。</p>
+</div>
+
+<h2>7. 记忆系统的工作机制与数学原理</h2>
+
+<h3>7.1 向量相似度的数学推导</h3>
+<p>记忆检索的核心是向量相似度计算。当用户提出查询时，系统需要从数万条记忆中找到最相关的几条。这个过程的数学原理基于余弦相似度（Cosine Similarity）。</p>
+<p>给定查询向量 q 和记忆向量 m，余弦相似度定义为：sim(q, m) = (q · m) / (||q|| × ||m||)。其中 q · m 是向量点积，||q|| 和 ||m|| 是向量的 L2 范数。这个公式的几何含义是两个向量夹角的余弦值——值越接近 1，两个向量越相似；值接近 0，两个向量正交（无关）。在高维空间（如 1536 维的 OpenAI Embedding），余弦相似度比欧氏距离更能捕捉语义相似性，因为它对向量的绝对大小不敏感，只关注方向。</p>
+
+<div class="deep"><strong>深入探讨：</strong> 向量数据库的高效检索依赖于近似最近邻（ANN）算法。暴力搜索的时间复杂度是 O(n×d)，其中 n 是记忆数量，d 是向量维度，对于百万级记忆来说太慢了。主流的 ANN 算法包括：(1) HNSW（Hierarchical Navigable Small World）——构建多层图结构，从顶层粗粒度搜索逐层细化，时间复杂度 O(log n)，是 ChromaDB 和 Qdrant 的默认算法；(2) IVF（Inverted File Index）——先将向量空间聚类，查询时只在最近的几个聚类中搜索；(3) PQ（Product Quantization）——将高维向量压缩为低维编码，减少内存占用。在实际应用中，HNSW 在召回率和速度之间取得了最佳平衡，通常能达到 95%+ 的召回率。</div>
+
+<h3>7.2 记忆权重的动态调整</h3>
+<p>记忆系统的核心挑战之一是如何为每条记忆动态分配权重。权重的计算需要综合考虑多个因素：相关性（与当前查询的语义匹配度）、时效性（记忆的创建时间）、重要性（记忆被访问的频率和关键程度）、以及上下文相关性（与当前对话主题的关联度）。这个多因素加权的数学模型可以表示为：score(m, q, t) = α · relevance(m, q) + β · recency(m, t) + γ · importance(m) + δ · context(m, current_topic)。其中 α, β, γ, δ 是可调节的超参数，需要根据具体应用场景进行调优。</p>
+
+<table>
+<tr><th>权重因子</th><th>计算方式</th><th>典型值</th><th>适用场景</th></tr>
+<tr><td>相关性 α</td><td>余弦相似度</td><td>0.4-0.6</td><td>知识检索</td></tr>
+<tr><td>时效性 β</td><td>指数衰减 exp(-λ·Δt)</td><td>0.2-0.3</td><td>对话历史</td></tr>
+<tr><td>重要性 γ</td><td>访问频率 + LLM评分</td><td>0.1-0.2</td><td>关键信息</td></tr>
+<tr><td>上下文 δ</td><td>主题模型匹配</td><td>0.1-0.2</td><td>多主题对话</td></tr>
+</table>
+
+<div class="tip"><strong>实践建议：</strong> 在实际部署中，建议使用"两阶段检索"策略：第一阶段用向量相似度快速召回 Top-20 候选记忆（粗筛），第二阶段用 LLM 对候选记忆进行精排（精筛），选择最相关的 Top-5 注入上下文。这种两阶段策略比纯向量检索的准确率高 20-30%，虽然增加了少量延迟，但显著提高了记忆质量。对于延迟敏感的场景，可以用交叉编码器（Cross-Encoder）替代 LLM 做精排，速度更快且准确率接近。</div>
+
+<div class="ascii">两阶段记忆检索架构:
+
+  用户查询: "上次我们讨论的数据库优化方案是什么？"
+       │
+       ▼
+  ┌─ 第一阶段: 向量召回 (Top-20) ──────────────────────┐
+  │                                                     │
+  │  记忆库 (10万条)                                     │
+  │  ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐     │
+  │  │m1    │ │m2    │ │m3    │ │...   │ │mN    │     │
+  │  │0.45  │ │0.82  │ │0.71  │ │      │ │0.38  │     │
+  │  └──────┘ └──────┘ └──────┘ └──────┘ └──────┘     │
+  │              ▼                                       │
+  │  候选集: [m2(0.82), m3(0.71), m7(0.69), ...]        │
+  └─────────────────────┬───────────────────────────────┘
+                        ▼
+  ┌─ 第二阶段: LLM 精排 (Top-5) ───────────────────────┐
+  │                                                     │
+  │  LLM 评估每条候选记忆与查询的相关性                    │
+  │  m2: "讨论了索引优化方案，建议添加复合索引" → 0.95    │
+  │  m3: "数据库连接池配置调整" → 0.78                    │
+  │  m7: "上周的会议纪要" → 0.45                         │
+  │                                                     │
+  │  最终选中: [m2, m3] 注入 LLM 上下文                  │
+  └─────────────────────────────────────────────────────┘</div>
+
+<h2>8. 记忆系统的常见问题与最佳实践</h2>
+
+<div class="warn"><strong>记忆污染警告：</strong> 记忆系统最大的风险是"记忆污染"——当Agent从外部数据源（网页、邮件、用户上传文件）获取信息时，恶意或错误的信息可能被存入长期记忆，并在后续对话中反复被检索使用。例如，如果Agent从一个不可靠的网页中学习到"Python的sorted函数是不稳定的"（实际是稳定的），这条错误信息会持续影响Agent的后续回答。防御策略包括：(1) 为每条记忆标注来源和可信度分数；(2) 对外部来源的记忆设置过期时间；(3) 定期用高可信度知识库校验记忆内容的正确性。</div>
+
+<div class="warn"><strong>隐私风险：</strong> 长期记忆系统存储了大量用户交互数据，这带来了严重的隐私风险。用户的个人信息、对话历史、偏好习惯都被持久化存储，如果被泄露或滥用后果严重。建议实施以下隐私保护措施：(1) 对敏感信息进行脱敏处理后再存储；(2) 实现用户级别的记忆隔离，不同用户的数据严格分开；(3) 提供记忆查看和删除功能，让用户控制自己的数据；(4) 遵循数据最小化原则，只存储必要的信息。</div>
+
+<div class="tip"><strong>架构选择：</strong> 对于不同的应用场景，记忆系统的架构选择至关重要。个人助手场景推荐使用 Letta/MemGPT 的自编辑记忆模式——Agent主动管理记忆，用户体验最好；企业知识库场景推荐使用 RAG + 向量数据库——外部文档作为记忆源，维护成本低；客服机器人场景推荐使用混合模式——短期记忆（对话历史）+ RAG（产品文档）+ 情景记忆（历史工单），覆盖面最广。每种架构都有其适用范围，选择时需要综合考虑数据量、更新频率、延迟要求和隐私约束。</div>
+
+<div class="deep"><strong>深入探讨：</strong> 记忆系统的"遗忘"机制同样值得深入研究。人类大脑的遗忘不是随机的，而是遵循艾宾浩斯遗忘曲线——新记忆的衰减速度随时间递减。受此启发，研究者提出了"可控遗忘"策略：为每条记忆维护一个"记忆强度"参数，初始强度为 1.0，每次未被检索时强度按公式 decay(t) = e^(-t/S) 衰减（t 是时间，S 是稳定性参数）。当记忆被成功检索并使用时，强度会提升（类似人类的"复习"效应）。这种机制确保了常用记忆持久保留，而很少用到的记忆自然消退，模拟了人类大脑的记忆巩固过程。在实现中，S 参数可以由 LLM 根据记忆的重要性自动设定——重要事件的 S 值大（不容易遗忘），琐碎细节的 S 值小（快速遗忘）。</div>
+
+<h2>9. 学习路径与进阶阅读</h2>
+
+<div class="ascii">记忆系统学习路径:
+
+  基础 (1-2周)
+  ├── 理解上下文窗口与 Token 管理
+  ├── 学习对话摘要压缩技术
+  └── 动手: 实现带滑动窗口的对话管理
+
+  进阶 (2周)
+  ├── 掌握向量数据库 (ChromaDB/Qdrant)
+  ├── 学习混合检索策略
+  ├── 了解 RAG 记忆模式
+  └── 动手: 实现跨会话长期记忆 Agent
+
+  高级 (2-3周)
+  ├── 研究 Letta/MemGPT 自编辑记忆
+  ├── 探索记忆压缩与可控遗忘
+  ├── 多模态记忆 (图像/音频)
+  └── 动手: 构建生产级记忆服务</div>
+
+<p>相关阅读推荐：(1) MemGPT 论文——理解自编辑记忆的核心原理；(2) LangChain Memory 模块文档——学习各种记忆实现；(3) ChromaDB/Qdrant 官方教程——掌握向量数据库实战；(4) RAG 最佳实践指南——优化检索增强生成效果。建议在掌握记忆系统后，继续深入学习<strong>规划与推理</strong>和<strong>多Agent编排</strong>模块，这些能力与记忆系统共同构成完整的Agent基础设施。</p>
+
+<div class="next-prev"><a href="02-Tool-Calling实现.html">&larr; 上一模块</a><a href="04-规划与推理.html">下一模块 &rarr;</a></div>
+</div>
+<div class="footer"><p><a href="index.html">返回总览</a></p></div>
+</body>
+</html>

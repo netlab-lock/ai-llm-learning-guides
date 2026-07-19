@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>05-RAG工程实践 | RAG基础设施</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #58a6ff; text-decoration: none; }
+.nav span { color: #8b949e; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+h1 { color: #58a6ff; font-size: 2em; margin: 24px 0 16px; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 12px; margin: 32px 0 16px; font-size: 1.5em; }
+h3 { color: #d2a8ff; margin: 24px 0 12px; font-size: 1.2em; }
+h4 { color: #79c0ff; margin: 16px 0 8px; }
+p { margin: 8px 0; }
+code { background: #21262d; color: #79c0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; margin: 12px 0; font-size: 0.85em; line-height: 1.5; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th { background: #21262d; color: #f0f6fc; padding: 10px 14px; text-align: left; border: 1px solid #30363d; font-weight: 600; }
+td { padding: 8px 14px; border: 1px solid #30363d; }
+tr:nth-child(even) { background: #161b22; }
+.tip { background: #0d2818; border-left: 4px solid #3fb950; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.exercise { background: #0d2818; border-left: 4px solid #238636; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.svg-diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; text-align: center; }
+.svg-diagram svg { max-width: 100%; height: auto; }
+.ascii { background: #161b22; border: 1px solid #30363d; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82em; line-height: 1.5; padding: 16px; overflow-x: auto; margin: 16px 0; white-space: pre; border-radius: 6px; }
+ul, ol { margin: 8px 0 8px 24px; }
+li { margin: 4px 0; }
+a { color: #58a6ff; }
+.keyword { color: #ff7b72; } .string { color: #a5d6ff; } .comment { color: #8b949e; } .cmd { color: #79c0ff; }
+.footer { text-align: center; color: #484f58; margin-top: 48px; padding: 24px 0; border-top: 1px solid #21262d; font-size: 0.9em; }
+.footer a { color: #58a6ff; }
+.next-prev { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 16px; border-top: 1px solid #21262d; }
+.next-prev a { padding: 8px 16px; background: #21262d; border-radius: 6px; }
+.tag { display: inline-block; background: #388bfd22; color: #58a6ff; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+.badge-blue { background: #1f6feb33; color: #58a6ff; }
+.badge-green { background: #23863633; color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="04-Embedding模型.html">&larr; 04-Embedding模型</a><span>RAG基础设施</span><a href="06-GraphRAG与高级RAG.html">06-GraphRAG与高级RAG &rarr;</a></div>
+<div class="container">
+
+<h1>⚙️ RAG 工程实践</h1>
+
+<h2>1. 背景与动机</h2>
+<p>前面几章讲了向量检索的理论基础，本章聚焦于 <strong>如何构建一个生产级 RAG 系统</strong>。RAG 的核心挑战不是算法，而是工程——数据处理、检索策略、Prompt 设计的每一个环节都影响最终效果。</p>
+
+<h2>2. Chunking 策略详解</h2>
+
+<h3>2.1 固定大小 Chunking</h3>
+<pre><code><span class="comment"># 最简单的 chunking 实现</span>
+<span class="keyword">def</span> fixed_size_chunk(text, chunk_size=512, overlap=64):
+    tokens = encode(text)  <span class="comment"># 文本 → token</span>
+    chunks = []
+    <span class="keyword">for</span> i <span class="keyword">in</span> range(0, len(tokens), chunk_size - overlap):
+        chunk = tokens[i:i + chunk_size]
+        chunks.append(decode(chunk))
+    <span class="keyword">return</span> chunks
+
+<span class="comment"># 优点: 实现简单、可预测</span>
+<span class="comment"># 缺点: 可能在句子中间切断，破坏语义</span>
+</code></pre>
+
+<h3>2.2 递归 Chunking</h3>
+<pre><code><span class="comment"># LangChain 的 RecursiveCharacterTextSplitter</span>
+<span class="keyword">from</span> langchain.text_splitter <span class="keyword">import</span> RecursiveCharacterTextSplitter
+
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=512,
+    chunk_overlap=64,
+    separators=[<span class="string">"\n\n"</span>, <span class="string">"\n"</span>, <span class="string">". "</span>, <span class="string">" "</span>, <span class="string">""</span>]
+    <span class="comment"># 先尝试按段落切，段落太长则按句子，句子太长则按词</span>
+)
+
+chunks = splitter.split_text(document)
+</code></pre>
+
+<div class="tip"><strong>递归 Chunking 的关键技巧：</strong>1) separators 的顺序很重要——优先按段落、其次按句子、最后按词切分，保持语义完整性；2) chunk_overlap 设为 chunk_size 的 10-15%，避免信息在边界丢失；3) 对于结构化文档（如 Markdown、HTML），先按标题分割再递归切分，效果显著提升。</div>
+
+<h3>2.3 语义 Chunking</h3>
+<p>根据语义相似度自动检测断点，其工作原理是：先将文档按句子分割，计算相邻句子的 Embedding 相似度，在相似度骤降处（语义断点）切分。这种方法的数学推导基于余弦相似度的阈值检测——当 cos(s_i, s_{i+1}) < threshold 时判定为语义断点。</p>
+<div class="svg-diagram"><svg viewBox="0 0 700 370" xmlns="http://www.w3.org/2000/svg">
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style>
+
+<!-- Title -->
+<text x="350" y="22" text-anchor="middle" fill="#f0f6fc" font-size="14" font-weight="bold">语义 Chunking 原理</text>
+
+<!-- Steps -->
+<text x="40" y="52" fill="#c9d1d9" font-size="11">1. 将文档按句子分割</text>
+<text x="40" y="72" fill="#c9d1d9" font-size="11">2. 计算相邻句子的 embedding 相似度</text>
+<text x="40" y="92" fill="#c9d1d9" font-size="11">3. 在相似度骤降处切分（语义断点）</text>
+
+<!-- Sentence label -->
+<text x="40" y="128" fill="#8b949e" font-size="11">句子:</text>
+
+<!-- Sentence boxes: S1–S7, each 68w, gap 12, start x=100 -->
+<!-- Centers: 134, 214, 294, 374, 454, 534, 614 -->
+<rect x="100" y="110" width="68" height="36" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="134" y="133" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">S1</text>
+
+<rect x="180" y="110" width="68" height="36" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="214" y="133" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">S2</text>
+
+<rect x="260" y="110" width="68" height="36" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="294" y="133" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">S3</text>
+
+<rect x="340" y="110" width="68" height="36" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="374" y="133" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">S4</text>
+
+<rect x="420" y="110" width="68" height="36" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="454" y="133" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">S5</text>
+
+<rect x="500" y="110" width="68" height="36" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="534" y="133" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">S6</text>
+
+<rect x="580" y="110" width="68" height="36" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="614" y="133" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">S7</text>
+
+<!-- Similarity score label -->
+<text x="40" y="178" fill="#8b949e" font-size="11">相似度:</text>
+
+<!-- Similarity connectors + scores between boxes -->
+<!-- S1-S2: 0.9 (green) -->
+<line x1="168" y1="128" x2="180" y2="128" stroke="#34d399" stroke-width="1.5" opacity="0.6"/>
+<text x="174" y="178" text-anchor="middle" fill="#34d399" font-size="10.5">0.9</text>
+
+<!-- S2-S3: 0.85 (green) -->
+<line x1="248" y1="128" x2="260" y2="128" stroke="#34d399" stroke-width="1.5" opacity="0.6"/>
+<text x="254" y="178" text-anchor="middle" fill="#34d399" font-size="10.5">0.85</text>
+
+<!-- S3-S4: 0.3 (RED - cut point!) -->
+<line x1="328" y1="128" x2="340" y2="128" stroke="#f85149" stroke-width="2" opacity="0.8"/>
+<text x="334" y="178" text-anchor="middle" fill="#f85149" font-size="10.5" font-weight="bold">0.3</text>
+
+<!-- S4-S5: 0.9 (green) -->
+<line x1="408" y1="128" x2="420" y2="128" stroke="#34d399" stroke-width="1.5" opacity="0.6"/>
+<text x="414" y="178" text-anchor="middle" fill="#34d399" font-size="10.5">0.9</text>
+
+<!-- S5-S6: 0.88 (green) -->
+<line x1="488" y1="128" x2="500" y2="128" stroke="#34d399" stroke-width="1.5" opacity="0.6"/>
+<text x="494" y="178" text-anchor="middle" fill="#34d399" font-size="10.5">0.88</text>
+
+<!-- S6-S7: 0.4 (RED - cut point!) -->
+<line x1="568" y1="128" x2="580" y2="128" stroke="#f85149" stroke-width="2" opacity="0.8"/>
+<text x="574" y="178" text-anchor="middle" fill="#f85149" font-size="10.5" font-weight="bold">0.4</text>
+
+<!-- Cut point 1: dashed red line between S3-S4 -->
+<line x1="334" y1="105" x2="334" y2="150" stroke="#f85149" stroke-width="2" stroke-dasharray="5,3"/>
+<polygon points="329,150 334,160 339,150" fill="#f85149"/>
+<text x="334" y="198" text-anchor="middle" fill="#f85149" font-size="10" font-weight="bold">切分点 1</text>
+
+<!-- Cut point 2: dashed red line between S6-S7 -->
+<line x1="574" y1="105" x2="574" y2="150" stroke="#f85149" stroke-width="2" stroke-dasharray="5,3"/>
+<polygon points="569,150 574,160 579,150" fill="#f85149"/>
+<text x="574" y="198" text-anchor="middle" fill="#f85149" font-size="10" font-weight="bold">切分点 2</text>
+
+<!-- Separator line -->
+<line x1="40" y1="218" x2="660" y2="218" stroke="#30363d" stroke-width="1" stroke-dasharray="6,4"/>
+
+<!-- Chunk results label -->
+<text x="40" y="244" fill="#f0f6fc" font-size="12" font-weight="bold">结果分块:</text>
+
+<!-- Chunk 1: S1, S2, S3 — emerald -->
+<rect x="100" y="252" width="228" height="44" rx="8" fill="#0d2818" stroke="#34d399" stroke-width="1.5"/>
+<text x="214" y="271" text-anchor="middle" fill="#34d399" font-size="11" font-weight="bold">Chunk 1</text>
+<text x="214" y="288" text-anchor="middle" fill="#8b949e" font-size="10">[S1, S2, S3]</text>
+
+<!-- Chunk 2: S4, S5, S6 — violet -->
+<rect x="340" y="252" width="228" height="44" rx="8" fill="#1a1024" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="454" y="271" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="bold">Chunk 2</text>
+<text x="454" y="288" text-anchor="middle" fill="#8b949e" font-size="10">[S4, S5, S6]</text>
+
+<!-- Chunk 3: S7 — amber -->
+<rect x="580" y="252" width="68" height="44" rx="8" fill="#2d1b00" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="614" y="271" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="bold">Chunk 3</text>
+<text x="614" y="288" text-anchor="middle" fill="#8b949e" font-size="10">[S7]</text>
+
+<!-- Similarity bar chart -->
+<text x="40" y="328" fill="#f0f6fc" font-size="12" font-weight="bold">相似度分布:</text>
+<!-- baseline at y=360, max bar height=50, scale: val/1.0 * 50 -->
+
+<rect x="124" y="315" width="40" height="45" rx="3" fill="#34d399" opacity="0.65"/>
+<text x="144" y="311" text-anchor="middle" fill="#34d399" font-size="9">0.90</text>
+<text x="144" y="372" text-anchor="middle" fill="#8b949e" font-size="8.5">S1-S2</text>
+
+<rect x="204" y="317" width="40" height="43" rx="3" fill="#34d399" opacity="0.65"/>
+<text x="224" y="313" text-anchor="middle" fill="#34d399" font-size="9">0.85</text>
+<text x="224" y="372" text-anchor="middle" fill="#8b949e" font-size="8.5">S2-S3</text>
+
+<rect x="284" y="345" width="40" height="15" rx="3" fill="#f85149" opacity="0.7"/>
+<text x="304" y="341" text-anchor="middle" fill="#f85149" font-size="9" font-weight="bold">0.30</text>
+<text x="304" y="372" text-anchor="middle" fill="#8b949e" font-size="8.5">S3-S4</text>
+
+<rect x="364" y="315" width="40" height="45" rx="3" fill="#34d399" opacity="0.65"/>
+<text x="384" y="311" text-anchor="middle" fill="#34d399" font-size="9">0.90</text>
+<text x="384" y="372" text-anchor="middle" fill="#8b949e" font-size="8.5">S4-S5</text>
+
+<rect x="444" y="316" width="40" height="44" rx="3" fill="#34d399" opacity="0.65"/>
+<text x="464" y="312" text-anchor="middle" fill="#34d399" font-size="9">0.88</text>
+<text x="464" y="372" text-anchor="middle" fill="#8b949e" font-size="8.5">S5-S6</text>
+
+<rect x="524" y="340" width="40" height="20" rx="3" fill="#f85149" opacity="0.7"/>
+<text x="544" y="336" text-anchor="middle" fill="#f85149" font-size="9" font-weight="bold">0.40</text>
+<text x="544" y="372" text-anchor="middle" fill="#8b949e" font-size="8.5">S6-S7</text>
+
+</svg></div>
+
+<h3>2.4 Chunk 大小选择</h3>
+<table>
+<tr><th>大小</th><th>检索精度</th><th>上下文完整性</th><th>适用场景</th></tr>
+<tr><td>128 tokens</td><td>高</td><td>差</td><td>精确问答（FAQ）</td></tr>
+<tr><td>256 tokens</td><td>中高</td><td>中</td><td>通用 RAG</td></tr>
+<tr><td>512 tokens</td><td>中</td><td>好</td><td>文档理解</td></tr>
+<tr><td>1024 tokens</td><td>中低</td><td>很好</td><td>长文档摘要</td></tr>
+<tr><td>2048 tokens</td><td>低</td><td>极好</td><td>全文理解</td></tr>
+</table>
+
+<div class="tip">
+<strong>经验法则</strong>：chunk 大小应该是模型上下文窗口的 1/4 到 1/8。例如，8K 上下文的模型，chunk 用 512-1024 tokens。
+</div>
+
+<h2>3. 检索策略</h2>
+
+<h3>3.1 Hybrid Search 实现</h3>
+<pre><code><span class="comment"># 使用 Milvus 实现 Hybrid Search</span>
+<span class="keyword">from</span> pymilvus <span class="keyword">import</span> Collection
+
+<span class="comment"># 1. Dense 检索 (向量)</span>
+dense_results = collection.search(
+    data=[query_embedding],
+    anns_field=<span class="string">"dense_vector"</span>,
+    param={<span class="string">"metric_type"</span>: <span class="string">"COSINE"</span>, <span class="string">"params"</span>: {<span class="string">"nprobe"</span>: 16}},
+    limit=20
+)
+
+<span class="comment"># 2. Sparse 检索 (BM25)</span>
+sparse_results = collection.search(
+    data=[query_sparse],
+    anns_field=<span class="string">"sparse_vector"</span>,
+    param={<span class="string">"metric_type"</span>: <span class="string">"IP"</span>},
+    limit=20
+)
+
+<span class="comment"># 3. RRF 融合</span>
+<span class="keyword">def</span> rrf_fusion(results_lists, k=60):
+    scores = {}
+    <span class="keyword">for</span> results <span class="keyword">in</span> results_lists:
+        <span class="keyword">for</span> rank, hit <span class="keyword">in</span> enumerate(results):
+            doc_id = hit.id
+            scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank + 1)
+    <span class="keyword">return</span> sorted(scores.items(), key=lambda x: -x[1])
+</code></pre>
+
+<h3>3.2 Reranking 实战</h3>
+<pre><code><span class="comment"># 使用 Cross-Encoder 做 Reranking</span>
+<span class="keyword">from</span> sentence_transformers <span class="keyword">import</span> CrossEncoder
+
+reranker = CrossEncoder(<span class="string">"BAAI/bge-reranker-v2-m3"</span>)
+
+<span class="comment"># 输入: (query, document) 对</span>
+pairs = [(query, doc) <span class="keyword">for</span> doc <span class="keyword">in</span> retrieved_docs]
+scores = reranker.predict(pairs)
+
+<span class="comment"># 按分数重排序</span>
+reranked = sorted(zip(retrieved_docs, scores), key=lambda x: -x[1])
+top_docs = [doc <span class="keyword">for</span> doc, score <span class="keyword">in</span> reranked[:5]]
+</code></pre>
+
+<div class="ascii">Hybrid Search + Reranking 完整流程:
+
+用户查询: "如何优化 Transformer 推理速度"
+    ↓
+┌─────────────────────────────────────────────┐
+│  Query Rewrite (LLM 改写)                    │
+│  Q1: "Transformer 推理优化方法"               │
+│  Q2: "LLM 推理加速技术"                      │
+│  Q3: "注意力机制计算优化"                     │
+└─────────────────────────────────────────────┘
+    ↓                    ↓
+┌──────────────┐  ┌──────────────────┐
+│ Dense 检索    │  │ Sparse 检索 (BM25) │
+│ 向量相似度    │  │ 关键词匹配         │
+│ Top-20       │  │ Top-20            │
+└──────────────┘  └──────────────────┘
+    ↓                    ↓
+┌─────────────────────────────────────────────┐
+│  RRF 融合 (Reciprocal Rank Fusion)           │
+│  score(d) = Σ 1/(k + rank_i(d))             │
+│  → Top-20 融合结果                           │
+└─────────────────────────────────────────────┘
+    ↓
+┌─────────────────────────────────────────────┐
+│  Cross-Encoder Reranking (精排)              │
+│  对每个 (query, doc) 对打分                  │
+│  → Top-5 最终结果                            │
+└─────────────────────────────────────────────┘
+    ↓
+最终结果: 最相关的 5 个文档片段</div>
+
+<h3>3.3 检索策略对比</h3>
+<table>
+<tr><th>策略</th><th>召回率</th><th>精确率</th><th>延迟</th><th>适用场景</th></tr>
+<tr><td>纯 Dense (向量)</td><td>中高</td><td>中</td><td>低</td><td>语义相似查询</td></tr>
+<tr><td>纯 Sparse (BM25)</td><td>中</td><td>高(关键词)</td><td>极低</td><td>精确关键词匹配</td></tr>
+<tr><td>Hybrid (Dense+Sparse)</td><td>高</td><td>高</td><td>中</td><td>通用场景(推荐)</td></tr>
+<tr><td>Hybrid + Reranker</td><td>极高</td><td>极高</td><td>中高</td><td>高质量需求</td></tr>
+</table>
+
+<h2>4. Prompt 设计</h2>
+
+<h3>4.1 标准 RAG Prompt</h3>
+<pre><code><span class="comment"># RAG Prompt 模板</span>
+prompt = <span class="string">"""基于以下检索到的上下文回答用户的问题。
+如果上下文中没有相关信息，请说"我无法根据提供的信息回答"。
+
+上下文:
+{context}
+
+用户问题: {question}
+
+回答:"""</span>
+
+<span class="comment"># context 是检索到的 chunk 拼接</span>
+context = "\n\n".join([f"[文档 {i+1}]: {chunk}" <span class="keyword">for</span> i, chunk <span class="keyword">in</span> enumerate(top_chunks)])
+</code></pre>
+
+<h3>4.2 带引用的 RAG Prompt</h3>
+<pre><code>prompt = <span class="string">"""基于以下参考文档回答问题。在回答中引用文档来源 [1][2]...
+
+参考文档:
+[1] {doc_1}
+[2] {doc_2}
+[3] {doc_3}
+
+问题: {question}
+
+回答（请引用来源）:"""</span>
+</code></pre>
+
+<h3>4.3 Prompt 设计最佳实践</h3>
+<table>
+<tr><th>技巧</th><th>示例</th><th>效果</th></tr>
+<tr><td>强制引用来源</td><td>"请引用文档编号 [1][2]..."</td><td>降低幻觉率 30-50%</td></tr>
+<tr><td>限定回答范围</td><td>"仅基于以下上下文回答"</td><td>防止模型使用预训练知识</td></tr>
+<tr><td>要求逐步推理</td><td>"先分析相关文档，再给出结论"</td><td>提升复杂问题的准确率</td></tr>
+<tr><td>设置拒绝策略</td><td>"如果没有相关信息，请说明"</td><td>避免编造答案</td></tr>
+<tr><td>指定输出格式</td><td>"用 JSON/Markdown 格式输出"</td><td>便于下游系统解析</td></tr>
+</table>
+
+<h2>5. 常见失败模式与排查</h2>
+
+<p>RAG 系统在实际部署中会遇到各种问题。以下是系统化的故障排查指南，帮助快速定位和解决问题。每个失败模式都有明确的症状描述、排查方法和解决方案。</p>
+
+<table>
+<tr><th>问题</th><th>症状</th><th>排查方法</th><th>解决方案</th></tr>
+<tr><td>检索不到</td><td>返回的文档与问题无关</td><td>手动检查 embedding 相似度</td><td>换 Embedding 模型、Hybrid Search</td></tr>
+<tr><td>检索到但不相关</td><td>相似度分数低</td><td>检查 chunk 质量</td><td>调整 chunk size、改善 chunking 策略</td></tr>
+<tr><td>上下文太长</td><td>超出模型上下文窗口</td><td>计算总 token 数</td><td>减少 top-K、加 Reranker</td></tr>
+<tr><td>LLM 忽略检索</td><td>回答与检索结果不一致</td><td>检查 prompt 设计</td><td>强化 prompt 中的指令、强制引用</td></tr>
+<tr><td>幻觉</td><td>回答包含未在上下文中出现的信息</td><td>对比回答和上下文</td><td>Prompt 优化、Faithfulness 检测</td></tr>
+<tr><td>延迟太高</td><td>端到端 > 5s</td><td>分段计时</td><td>优化 Embedding 速度、缓存、减少 Reranker</td></tr>
+</table>
+
+<div class="ascii">RAG 故障排查决策树:
+
+用户反馈: "回答不准确"
+    ↓
+┌─ 检索阶段 ─────────────────────────────┐
+│ Q: 检索结果是否包含正确答案?            │
+│   ├─ 否 → 检索问题                      │
+│   │   ├─ embedding 相似度 <0.5?          │
+│   │   │   → 换 Embedding 模型            │
+│   │   ├─ 关键词完全匹配但未检索到?       │
+│   │   │   → 加 BM25 (Hybrid Search)      │
+│   │   └─ chunk 被切断?                   │
+│   │       → 调整 chunk 策略              │
+│   └─ 是 → 生成问题                      │
+│       ├─ LLM 没看上下文?                │
+│       │   → 强化 Prompt 指令             │
+│       ├─ LLM 编造了信息?                │
+│       │   → 加 Faithfulness 检测         │
+│       └─ 回答格式不对?                  │
+│           → 优化 Prompt 模板             │
+└─────────────────────────────────────────┘</div>
+
+<h2>6. 生产部署架构</h2>
+
+<div class="svg-diagram"><svg viewBox="0 0 750 490" xmlns="http://www.w3.org/2000/svg">
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style>
+<text x="375" y="24" text-anchor="middle" fill="#f0f6fc" font-size="14" font-weight="bold">生产级 RAG 架构</text>
+
+<!-- Tier 1: API Gateway (amber) -->
+<rect x="40" y="42" width="670" height="55" rx="8" fill="#161b22" stroke="#fbbf24" stroke-width="2"/>
+<text x="375" y="65" text-anchor="middle" fill="#fbbf24" font-size="13" font-weight="bold">API Gateway</text>
+<text x="375" y="84" text-anchor="middle" fill="#8b949e" font-size="10.5">负载均衡 · 限流 · 鉴权</text>
+
+<!-- Arrow down -->
+<line x1="375" y1="97" x2="375" y2="122" stroke="#58a6ff" stroke-width="1.5"/>
+<polygon points="370,120 375,130 380,120" fill="#58a6ff"/>
+
+<!-- Tier 2: RAG Pipeline (emerald) -->
+<rect x="40" y="130" width="670" height="200" rx="8" fill="none" stroke="#34d399" stroke-width="2"/>
+<rect x="40" y="130" width="670" height="24" rx="8" fill="#0d2818"/>
+<rect x="40" y="146" width="670" height="8" fill="#0d2818"/>
+<text x="375" y="148" text-anchor="middle" fill="#34d399" font-size="12" font-weight="bold">RAG Pipeline</text>
+
+<!-- Row 1: Query Rewrite → Retrieval → Reranker -->
+<rect x="70" y="165" width="150" height="50" rx="6" fill="#161b22" stroke="#34d399" stroke-width="1.5"/>
+<text x="145" y="186" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="bold">Query</text>
+<text x="145" y="203" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="bold">Rewrite</text>
+
+<text x="235" y="195" fill="#34d399" font-size="18">→</text>
+
+<rect x="250" y="165" width="150" height="50" rx="6" fill="#161b22" stroke="#34d399" stroke-width="1.5"/>
+<text x="325" y="186" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="bold">Retrieval</text>
+<text x="325" y="203" text-anchor="middle" fill="#8b949e" font-size="10">(Hybrid)</text>
+
+<text x="415" y="195" fill="#34d399" font-size="18">→</text>
+
+<rect x="430" y="165" width="150" height="50" rx="6" fill="#161b22" stroke="#34d399" stroke-width="1.5"/>
+<text x="505" y="186" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="bold">Reranker</text>
+<text x="505" y="203" text-anchor="middle" fill="#8b949e" font-size="10">Cross-Encoder</text>
+
+<!-- Converge lines from Row 1 to Row 2 -->
+<path d="M145,215 L145,245 L375,260" stroke="#58a6ff" stroke-width="1" opacity="0.35" fill="none" stroke-dasharray="4,3"/>
+<path d="M505,215 L505,245 L375,260" stroke="#58a6ff" stroke-width="1" opacity="0.35" fill="none" stroke-dasharray="4,3"/>
+<line x1="375" y1="260" x2="375" y2="278" stroke="#58a6ff" stroke-width="1.5"/>
+<polygon points="370,276 375,286 380,276" fill="#58a6ff"/>
+
+<!-- Row 2: Prompt Assembly → LLM Generation -->
+<rect x="205" y="286" width="150" height="36" rx="6" fill="#161b22" stroke="#34d399" stroke-width="1.5"/>
+<text x="280" y="309" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="bold">Prompt Assembly</text>
+
+<text x="370" y="309" fill="#34d399" font-size="18">→</text>
+
+<rect x="390" y="286" width="150" height="36" rx="6" fill="#161b22" stroke="#34d399" stroke-width="1.5"/>
+<text x="465" y="309" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="bold">LLM Generation</text>
+
+<!-- Arrow down to Storage -->
+<line x1="375" y1="330" x2="375" y2="358" stroke="#58a6ff" stroke-width="1.5"/>
+<polygon points="370,356 375,366 380,356" fill="#58a6ff"/>
+
+<!-- Tier 3: Storage Layer (violet) -->
+<rect x="40" y="366" width="670" height="100" rx="8" fill="none" stroke="#a78bfa" stroke-width="2"/>
+<rect x="40" y="366" width="670" height="24" rx="8" fill="#1a1024"/>
+<rect x="40" y="382" width="670" height="8" fill="#1a1024"/>
+<text x="375" y="384" text-anchor="middle" fill="#a78bfa" font-size="12" font-weight="bold">存储层</text>
+
+<!-- Storage sub-components -->
+<rect x="75" y="400" width="165" height="52" rx="6" fill="#161b22" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="157" y="422" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="bold">Vector DB</text>
+<text x="157" y="440" text-anchor="middle" fill="#8b949e" font-size="10">Milvus / Qdrant</text>
+
+<rect x="290" y="400" width="165" height="52" rx="6" fill="#161b22" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="372" y="422" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="bold">BM25 Index</text>
+<text x="372" y="440" text-anchor="middle" fill="#8b949e" font-size="10">Elasticsearch</text>
+
+<rect x="505" y="400" width="165" height="52" rx="6" fill="#161b22" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="587" y="422" text-anchor="middle" fill="#c9d1d9" font-size="11" font-weight="bold">Cache</text>
+<text x="587" y="440" text-anchor="middle" fill="#8b949e" font-size="10">Redis</text>
+
+<!-- Legend -->
+<rect x="60" y="476" width="10" height="10" rx="2" fill="#fbbf24" opacity="0.7"/>
+<text x="75" y="486" fill="#8b949e" font-size="10">接入层</text>
+<rect x="140" y="476" width="10" height="10" rx="2" fill="#34d399" opacity="0.7"/>
+<text x="155" y="486" fill="#8b949e" font-size="10">处理层</text>
+<rect x="220" y="476" width="10" height="10" rx="2" fill="#a78bfa" opacity="0.7"/>
+<text x="235" y="486" fill="#8b949e" font-size="10">存储层</text>
+</svg></div>
+
+<div class="deep"><strong>⚙️ RAG 工程实践的技术原理与深度分析：</strong>
+<strong>核心概念</strong>：⚙️ RAG 工程实践是向量数据库与RAG领域的关键技术方向，其理论基础涉及信息论、优化理论和系统工程的交叉。
+<strong>推导</strong>：从信息论角度，任何信息处理系统的吞吐量受限于信道容量——Shannon定理指出C=B×log₂(1+S/N)，
+其中B为带宽、S/N为信噪比。在⚙️ RAG 工程实践的语境下，"信道"可以理解为模型的上下文窗口或推理管线，
+"信噪比"对应有用信息与噪声（无关上下文、冗余计算）的比例。
+<strong>为什么</strong>这很重要？因为理解⚙️ RAG 工程实践的理论限制，才能在工程实践中做出正确的权衡——
+盲目追求指标上限往往导致过度设计，而理解根本约束才能找到最高效的优化路径。
+从<strong>工程实践</strong>看，⚙️ RAG 工程实践的优化通常遵循"先测量、再分析、后优化"的循环：
+首先建立完善的评测基准（覆盖质量、延迟、成本三个维度），然后通过profiling定位瓶颈环节，
+最后针对性地优化——是计算受限就优化算法，是内存受限就优化数据布局，是通信受限就优化网络拓扑。
+这一系统化方法论适用于向量数据库与RAG领域的所有技术问题。</div>
+<div class="exercise">
+<strong>练习 1</strong>：实现一个完整的 RAG Pipeline：文档加载 → Chunking → Embedding → 向量存储 → 检索 → Reranking → LLM 生成。使用 LangChain 或 LlamaIndex。<br><br>
+<strong>练习 2</strong>：对比 Fixed Size Chunking 和 Semantic Chunking 在你的文档上的检索召回率差异。
+</div>
+
+<h2>术语速查表</h2>
+<table>
+<tr><th>术语</th><th>含义</th></tr>
+<tr><td>Chunking</td><td>将长文档切分为小段落</td></tr>
+<tr><td>Hybrid Search</td><td>Dense + Sparse 组合检索</td></tr>
+<tr><td>RRF</td><td>Reciprocal Rank Fusion，排序融合算法</td></tr>
+<tr><td>Cross-Encoder</td><td>同时编码 query 和 doc 的精排模型</td></tr>
+<tr><td>Query Rewrite</td><td>改写用户查询以提升检索效果</td></tr>
+<tr><td>Faithfulness</td><td>回答忠实于检索结果的程度</td></tr>
+<tr><td>Semantic Chunking</td><td>基于语义相似度的断点检测</td></tr>
+</table>
+
+<div class="tip"><strong>通俗类比：</strong>RAG工程就像"开图书馆"——收集书籍（文档入库）→编目录（chunk+embedding）→读者来借书（检索）→馆员推荐相关书籍（重排序）→读者写读后感（LLM生成回答）。每个环节都有坑：书太厚读者看不完（chunk太大）、目录编得不好找不到书（embedding质量差）、推荐了不相关的书（检索不准）、读后感不忠实于原书（幻觉）。</div>
+
+<div class="warn"><strong>常见误区：</strong>1) 只关注检索不关注生成——检索到了相关文档但LLM不看就回答，等于白检索；2) 忽略chunk策略——按固定长度切分不如按语义切分（Semantic Chunking），效果差距可达20%+；3) 不做Hybrid Search——纯向量检索漏掉关键词精确匹配，BM25+向量混合是标配；4) 跳过重排序——Cross-Encoder重排序可以把Precision@5提升15-30%。</div>
+
+<div class="deep"><strong>深入探讨：</strong>RAG工程的最佳实践Pipeline：1) 文档预处理（OCR/解析/清洗）→2) 智能Chunk（Semantic Chunking按语义断句）→3) Embedding（选MTEB高分模型）→4) 混合检索（BM25+向量+RRF融合）→5) 重排序（Cross-Encoder精排）→6) 上下文压缩（只保留最相关段落）→7) LLM生成（带Faithfulness检查）。Query Rewrite（查询改写）是被低估的优化手段——"怎么了"→"系统故障原因分析"，检索效果差距巨大。</div>
+
+<h2>7. Query Rewrite 详解</h2>
+
+<p>Query Rewrite 是提升 RAG 检索质量的关键步骤。用户原始查询往往是口语化的、模糊的，直接用于检索效果不佳。通过 LLM 改写查询，可以显著提升检索召回率。</p>
+
+<div class="ascii">Query Rewrite 示例:
+
+原始查询: "这个东西怎么老是出问题?"
+    ↓ LLM 改写
+改写1: "系统频繁故障的常见原因分析"
+改写2: "软件系统稳定性优化方案"
+改写3: "设备故障排查与维护指南"
+    ↓ 并行检索 (每个改写查询取 Top-10)
+    ↓ RRF 融合 → 最终 Top-5
+
+效果对比:
+  直接检索 Recall@5:  0.45
+  Query Rewrite Recall@5: 0.72  (+60% 提升!)</div>
+
+<div class="warn"><strong>Query Rewrite 注意事项：</strong>1) 改写后的查询可能偏离原始意图——需要在 Prompt 中强调"保持原始查询的核心语义"；2) 改写数量不宜过多——3-5 个子查询是最佳平衡点，过多会增加延迟和成本；3) 对于简单事实查询（如"Python创始人是谁"），改写反而可能引入噪声，建议用 Adaptive RAG 判断是否需要改写。</div>
+
+<h2>8. 上下文压缩与窗口管理</h2>
+
+<p>当检索到的文档总 token 数接近模型上下文窗口时，需要进行上下文压缩：</p>
+
+<table>
+<tr><th>压缩策略</th><th>原理</th><th>压缩率</th><th>信息损失</th><th>适用场景</th></tr>
+<tr><td>截断</td><td>直接截取前 N 个 token</td><td>可控</td><td>高</td><td>紧急情况</td></tr>
+<tr><td>提取式摘要</td><td>提取关键句子</td><td>50-70%</td><td>中</td><td>长文档</td></tr>
+<tr><td>LLM 压缩</td><td>用 LLM 生成压缩版</td><td>30-50%</td><td>低</td><td>高质量需求</td></tr>
+<tr><td>Recomp</td><td>训练专门的压缩模型</td><td>20-40%</td><td>极低</td><td>生产环境</td></tr>
+</table>
+
+<div class="tip"><strong>上下文窗口管理经验：</strong>1) 预留 20-30% 的上下文窗口给 LLM 的回答生成；2) 当检索结果总 token 超过窗口 70% 时触发压缩；3) 优先保留与查询最相关的片段，而不是简单截断；4) 使用"Lost in the Middle"策略——将最相关的文档放在上下文的开头和结尾，中间放次相关的。</div>
+
+<div class="deep"><strong>深入探讨——RAG 系统的可观测性：</strong>生产级 RAG 系统必须具备完整的可观测性（Observability），包括三个维度：1) 指标（Metrics）——端到端延迟、检索召回率、LLM 幻觉率、用户满意度评分，建议用 Prometheus + Grafana 搭建监控大盘；2) 日志（Logging）——记录每次查询的完整链路：原始查询→改写查询→检索结果→重排序结果→最终 Prompt→LLM 输出，便于离线分析和问题排查；3) 追踪（Tracing）——用 OpenTelemetry 或 LangSmith 追踪每个步骤的耗时和中间结果，定位性能瓶颈。没有可观测性的 RAG 系统就像"黑盒"——出了问题根本无法定位是检索环节还是生成环节的故障。建议在系统上线前就埋好所有监控点，而不是出了问题再补。</div>
+
+<h2>向前串联</h2>
+<p>本章学习了 RAG 系统的工程实践，下一章 <a href="06-GraphRAG与高级RAG.html">06-GraphRAG与高级RAG</a> 将讲解如何用知识图谱和 Agentic 架构增强传统 RAG，解决跨文档推理和全局性问题等高级场景。</p>
+
+<p><strong>学习路径：</strong>
+<a href="01-向量检索基础.html">01-向量检索基础</a> →
+<a href="02-ANN算法详解.html">02-ANN算法详解</a> →
+<a href="03-向量数据库选型.html">03-向量数据库选型</a> →
+<a href="04-Embedding模型.html">04-Embedding模型</a> →
+<a href="05-RAG工程实践.html"><strong>05-RAG工程实践</strong></a> →
+<a href="06-GraphRAG与高级RAG.html">06-GraphRAG与高级RAG</a>
+</p></div>
+<div class="footer"><p><a href="index.html">返回总览</a> | <a href="../index.html">返回学习目录</a></p></div>
+</body>
+</html>

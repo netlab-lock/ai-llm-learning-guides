@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03-算子融合策略 | 编译优化</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #58a6ff; text-decoration: none; }
+.nav span { color: #8b949e; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+h1 { color: #58a6ff; font-size: 2em; margin: 24px 0 16px; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 12px; margin: 32px 0 16px; font-size: 1.5em; }
+h3 { color: #d2a8ff; margin: 24px 0 12px; font-size: 1.2em; }
+h4 { color: #79c0ff; margin: 16px 0 8px; }
+p { margin: 8px 0; }
+code { background: #21262d; color: #79c0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; margin: 12px 0; font-size: 0.85em; line-height: 1.5; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th { background: #21262d; color: #f0f6fc; padding: 10px 14px; text-align: left; border: 1px solid #30363d; font-weight: 600; }
+td { padding: 8px 14px; border: 1px solid #30363d; }
+tr:nth-child(even) { background: #161b22; }
+.tip { background: #0d1d30; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.exercise { background: #0d2818; border-left: 4px solid #238636; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.svg-diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; text-align: center; }
+.svg-diagram svg { max-width: 100%; height: auto; }
+.ascii { background: #161b22; border: 1px solid #30363d; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82em; line-height: 1.5; padding: 16px; overflow-x: auto; margin: 16px 0; white-space: pre; border-radius: 6px; }
+ul, ol { margin: 8px 0 8px 24px; }
+li { margin: 4px 0; }
+a { color: #58a6ff; }
+.keyword { color: #ff7b72; } .string { color: #a5d6ff; } .comment { color: #8b949e; } .cmd { color: #79c0ff; }
+.footer { text-align: center; color: #484f58; margin-top: 48px; padding: 24px 0; border-top: 1px solid #21262d; font-size: 0.9em; }
+.footer a { color: #58a6ff; }
+.next-prev { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 16px; border-top: 1px solid #21262d; }
+.next-prev a { padding: 8px 16px; background: #21262d; border-radius: 6px; }
+.tag { display: inline-block; background: #388bfd22; color: #58a6ff; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+.badge-blue { background: #1f6feb33; color: #58a6ff; }
+.badge-green { background: #23863633; color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="02-torch-compile工作流.html">&larr; 02-torch-compile工作流</a><span>编译优化栈</span><a href="04-CUDA-Graphs.html">04-CUDA-Graphs &rarr;</a></div>
+<div class="container">
+
+<h1>🔗 算子融合策略</h1>
+
+<h2>1. 背景与动机</h2>
+<p>在 GPU 上执行深度学习模型时，<strong>内存带宽</strong>往往是瓶颈，而非计算能力。一个 H100 GPU 的 FP16 算力是 989 TFLOPS，但 HBM3 带宽只有 3.35 TB/s。这意味着：</p>
+
+<h3>1.1 Roofline 模型与内存瓶颈</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 580 200" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="290" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">算子融合动机：Roofline 模型</text>
+  <text x="290" y="42" text-anchor="middle" fill="#c9d1d9" font-size="10">算术强度 (Arithmetic Intensity) = FLOPs / Bytes Accessed</text>
+  <!-- Roofline diagram -->
+  <rect x="60" y="55" width="460" height="110" rx="6" fill="rgba(30,41,59,0.3)" stroke="#30363d" stroke-width="1"/>
+  <!-- Axes -->
+  <line x1="100" y1="150" x2="480" y2="150" stroke="#8b949e" stroke-width="1"/>
+  <line x1="100" y1="150" x2="100" y2="65" stroke="#8b949e" stroke-width="1"/>
+  <text x="290" y="165" text-anchor="middle" fill="#8b949e" font-size="8">算术强度 (FLOPs/Byte)</text>
+  <text x="85" y="110" text-anchor="end" fill="#8b949e" font-size="8" transform="rotate(-90,85,110)">性能 (TFLOPS)</text>
+  <!-- Roofline curve -->
+  <path d="M100,150 L250,80 L480,80" fill="none" stroke="#fbbf24" stroke-width="2"/>
+  <!-- Knee point -->
+  <circle cx="250" cy="80" r="4" fill="#fb7185"/>
+  <text x="250" y="75" text-anchor="middle" fill="#fb7185" font-size="8">AI_roof = 295</text>
+  <text x="250" y="95" text-anchor="middle" fill="#8b949e" font-size="7">H100: 989T/3.35T=295</text>
+  <!-- Memory-bound region -->
+  <rect x="105" y="85" width="140" height="60" rx="4" fill="rgba(136,19,55,0.1)" stroke="none"/>
+  <text x="175" y="110" text-anchor="middle" fill="#fb7185" font-size="8">Memory-bound</text>
+  <text x="175" y="125" text-anchor="middle" fill="#fb7185" font-size="7">LayerNorm, Softmax</text>
+  <text x="175" y="137" text-anchor="middle" fill="#fb7185" font-size="7">激活函数, 残差加法</text>
+  <!-- Compute-bound region -->
+  <rect x="255" y="85" width="200" height="60" rx="4" fill="rgba(6,78,59,0.1)" stroke="none"/>
+  <text x="355" y="110" text-anchor="middle" fill="#34d399" font-size="8">Compute-bound</text>
+  <text x="355" y="125" text-anchor="middle" fill="#34d399" font-size="7">MatMul (GEMM)</text>
+  <text x="355" y="137" text-anchor="middle" fill="#34d399" font-size="7">Tensor Core 密集</text>
+  <!-- Key insight -->
+  <text x="290" y="190" text-anchor="middle" fill="#fbbf24" font-size="9">融合 memory-bound 操作 → 减少 HBM 访问 → 接近 compute-bound</text>
+</svg>
+</div>
+
+<p>LLM 推理中的大部分操作（LayerNorm、激活函数、softmax、element-wise 加法）都是 <strong>memory-bound</strong>——它们的计算量很小，但需要从 HBM 读写大量数据。算子融合的核心思想是：<strong>将多个 memory-bound 操作合并为一个 kernel，减少 HBM 访问次数</strong>。</p>
+
+<h3>1.2 工厂流水线类比</h3>
+<div class="ascii">算子融合 = 工厂流水线优化（类比）
+
+未融合的工厂（每道工序独立车间）：
+  原料仓库(HBM) → 车间A(加bias) → 成品仓库(HBM)
+  成品仓库(HBM) → 车间B(ReLU)  → 成品仓库(HBM)
+  成品仓库(HBM) → 车间C(Dropout)→ 成品仓库(HBM)
+
+  问题：每道工序都要"从仓库取原料 → 加工 → 送回仓库"
+  → 大量时间浪费在搬运上（HBM 读写），而非加工（计算）
+
+融合后的工厂（流水线车间）：
+  原料仓库(HBM) → [加bias → ReLU → Dropout] → 成品仓库(HBM)
+
+  优势：只搬运一次，中间半成品在车间内部传递（SRAM/寄存器）
+  → 搬运次数减少 67%，加工效率大幅提升
+
+技术映射：
+  原料仓库    = HBM（GPU 全局内存，慢但大）
+  成品仓库    = HBM
+  车间内部    = SRAM/寄存器（快但小）
+  搬运        = 内存读写（带宽瓶颈）
+  加工        = 计算（FLOPs）
+  流水线合并  = 算子融合（多个 kernel → 一个 kernel）</div>
+
+<h3>1.3 为什么 LLM 特别需要算子融合</h3>
+<p>Transformer 架构中有大量 memory-bound 操作。以一个标准 Transformer 层为例：</p>
+<pre><code><span class="comment"># Transformer 层中的操作分类</span>
+<span class="comment"># Compute-bound（计算密集）:</span>
+<span class="comment">#   - Q/K/V 的线性投影: GEMM (矩阵乘法)</span>
+<span class="comment">#   - Attention Score × V: GEMM</span>
+<span class="comment">#   - FFN 的两个线性层: GEMM</span>
+
+<span class="comment"># Memory-bound（内存密集）:</span>
+<span class="comment">#   - LayerNorm (2次): mean, var, normalize</span>
+<span class="comment">#   - Softmax: exp, sum, div</span>
+<span class="comment">#   - GELU/SiLU 激活函数</span>
+<span class="comment">#   - 残差连接 (element-wise add)</span>
+<span class="comment">#   - Dropout</span>
+
+<span class="comment"># 一个 Transformer 层中:</span>
+<span class="comment">#   Compute-bound 操作: ~6 个 GEMM</span>
+<span class="comment">#   Memory-bound 操作: ~15+ 个 element-wise/reduction</span>
+<span class="comment"># → 融合这 15+ 个 memory-bound 操作是关键！</span>
+</code></pre>
+
+<h2>2. 算子融合的分类</h2>
+
+<h3>2.1 Pointwise 融合 (水平融合)</h3>
+<p>将多个独立的 element-wise 操作合并为一个 kernel：</p>
+
+<div class="ascii">
+融合前 (3 次 HBM 读写):
+  y1 = x + bias        → HBM R: x, bias | HBM W: y1
+  y2 = relu(y1)        → HBM R: y1      | HBM W: y2
+  y3 = dropout(y2)     → HBM R: y2      | HBM W: y3
+
+融合后 (1 次 HBM 读写):
+  y3 = dropout(relu(x + bias))
+  → HBM R: x, bias    | HBM W: y3
+</div>
+
+<p><strong>收益</strong>：从 6 次 HBM 访问减少到 2 次，内存带宽节省 67%。</p>
+
+<h3>2.2 Reduction 融合</h3>
+<p>将 reduction 操作（均值、方差、softmax）与前后操作融合：</p>
+
+<div class="ascii">
+LayerNorm 的标准实现:
+  mean  = mean(x)           → HBM R: x   | HBM W: mean
+  var   = var(x)            → HBM R: x    | HBM W: var
+  norm  = (x - mean)/√var   → HBM R: x,mean,var | HBM W: norm
+  out   = norm * w + b      → HBM R: norm,w,b   | HBM W: out
+
+融合后:
+  out = LayerNorm(x, w, b)  → HBM R: x,w,b     | HBM W: out
+  (mean 和 var 在寄存器/SRAM 中计算，不写回 HBM)
+</div>
+
+<h3>2.3 Vertical 融合 (垂直融合)</h3>
+<p>将计算链上的操作合并，特别是 Matmul + Bias + Activation：</p>
+
+<pre><code><span class="comment"># 融合前：3 个 kernel</span>
+hidden = torch.matmul(input, weight.T)   <span class="comment"># kernel 1: GEMM</span>
+hidden = hidden + bias                    <span class="comment"># kernel 2: element-wise</span>
+hidden = torch.nn.functional.gelu(hidden) <span class="comment"># kernel 3: element-wise</span>
+
+<span class="comment"># 融合后：1 个 kernel（通过 Inductor 的 epilogue fusion）</span>
+hidden = torch.matmul(input, weight.T)    <span class="comment"># GEMM + bias + GELU 融合</span>
+</code></pre>
+
+<h3>2.4 FlashAttention 式融合</h3>
+<p>FlashAttention 是最著名的融合案例——将整个注意力计算（Q·K^T → softmax → ·V）融合为一个 kernel：</p>
+
+<div class="ascii">
+标准 Attention (多次 HBM 访问):
+  S = Q @ K^T        → HBM R/W: Q, K, S
+  P = softmax(S)     → HBM R/W: S, P
+  O = P @ V          → HBM R/W: P, V, O
+
+FlashAttention (Tiling + 融合):
+  for each tile:
+    S_tile = Q_tile @ K_tile^T    ← SRAM 中
+    P_tile = softmax(S_tile)      ← SRAM 中
+    O_tile += P_tile @ V_tile     ← SRAM 中
+  → HBM 只读写 Q, K, V, O（不写中间矩阵 S, P）
+</div>
+
+<div class="tip">
+<strong>FlashAttention 的工厂类比</strong>：标准 Attention 就像"先做半成品 S，存仓库；再取 S 做 P，存仓库；最后取 P 做 O"。FlashAttention 就像"在一条流水线上，逐批处理原料，中间半成品不入库，直接在流水线上传递"。关键是"分块（tiling）"——每次只处理一小块数据，保证能放进 SRAM（车间内部空间），处理完再取下一块。
+</div>
+
+<h2>3. TorchInductor 的融合规则</h2>
+
+<h3>3.1 Pattern Matching 机制</h3>
+<p>Inductor 使用 <strong>pattern matching</strong>（模式匹配）来识别可融合的操作组合：</p>
+
+<table>
+<tr><th>融合模式</th><th>包含操作</th><th>触发条件</th></tr>
+<tr><td>Linear + Activation</td><td>mm → add → gelu/silu/relu</td><td>连续的 linear + 激活函数</td></tr>
+<tr><td>LayerNorm 融合</td><td>mean → var → normalize → affine</td><td>完整的 LayerNorm 计算链</td></tr>
+<tr><td>Softmax 融合</td><td>max → exp → sum → div</td><td>标准 softmax 实现</td></tr>
+<tr><td>Bias + Dropout</td><td>add → dropout</td><td>连续的 bias 加法和 dropout</td></tr>
+<tr><td>Residual Add</td><td>add → LayerNorm</td><td>残差连接 + 归一化</td></tr>
+</table>
+
+<h3>3.2 融合决策流程</h3>
+<div class="ascii">TorchInductor 的融合决策流程（工厂排产类比）
+
+FX Graph（订单列表）:
+  op1: matmul(x, w)     ← 大订单（GEMM），独立车间处理
+  op2: add(result, b)   ← 小订单（element-wise），考虑合并
+  op3: gelu(result)     ← 小订单（element-wise），考虑合并
+  op4: matmul(result,w2)← 大订单（GEMM），独立车间处理
+  op5: softmax(result)  ← 中等订单（reduction），考虑合并
+
+融合决策:
+  ┌─────────────────────────────────────────────┐
+  │  1. 识别 pattern: op1+op2+op3 匹配          │
+  │     "Linear + Bias + Activation" 模式        │
+  │  2. 检查约束:                                 │
+  │     - SRAM 够用？ ✓                          │
+  │     - 寄存器压力可接受？ ✓                    │
+  │     - 无不可融合的依赖？ ✓                    │
+  │  3. 执行融合:                                 │
+  │     op1+op2+op3 → fused_gemm_bias_gelu      │
+  │  4. 继续匹配: op4+op5 不匹配（GEMM+softmax）│
+  │     → 不融合（保持独立）                      │
+  └─────────────────────────────────────────────┘
+
+结果: 5 个 kernel → 3 个 kernel (fused + matmul + softmax)</div>
+
+<h3>3.3 Inductor 生成的 Triton 代码示例</h3>
+<pre><code><span class="comment"># TorchInductor 自动生成的 Triton kernel（简化）</span>
+<span class="comment"># 融合了: add_bias + GELU</span>
+
+<span class="keyword">import</span> triton
+<span class="keyword">import</span> triton.language <span class="keyword">as</span> tl
+
+@triton.jit
+<span class="keyword">def</span> fused_add_bias_gelu_kernel(
+    in_ptr0, in_ptr1, out_ptr,  <span class="comment"># 输入、bias、输出</span>
+    BLOCK_SIZE: tl.constexpr
+):
+    pid = tl.program_id(0)
+    offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    
+    <span class="comment"># 一次 HBM 读取</span>
+    x = tl.load(in_ptr0 + offsets)
+    b = tl.load(in_ptr1 + offsets)
+    
+    <span class="comment"># 融合计算（全部在 SRAM/寄存器中）</span>
+    x = x + b                          <span class="comment"># add bias</span>
+    x = x * 0.5 * (1.0 + tl.erf(x / 1.4142135))  <span class="comment"># GELU 近似</span>
+    
+    <span class="comment"># 一次 HBM 写入</span>
+    tl.store(out_ptr + offsets, x)
+</code></pre>
+
+<h2>4. 融合的收益量化</h2>
+
+<h3>4.1 典型操作的 HBM 访问减少</h3>
+<table>
+<tr><th>操作</th><th>未融合 (HBM 访问)</th><th>融合后 (HBM 访问)</th><th>节省</th></tr>
+<tr><td>LayerNorm</td><td>5 次 (R: x,mean,var,w,b; W: out)</td><td>3 次 (R: x,w,b; W: out)</td><td>40%</td></tr>
+<tr><td>Linear + GELU</td><td>4 次 (R: x,w; W: hidden; R: hidden; W: out)</td><td>3 次 (R: x,w,b; W: out)</td><td>25%</td></tr>
+<tr><td>Attention (Full)</td><td>~8 次</td><td>~4 次 (FlashAttention)</td><td>50%</td></tr>
+<tr><td>Residual + Norm</td><td>6 次</td><td>4 次</td><td>33%</td></tr>
+</table>
+
+<h3>4.2 端到端性能影响</h3>
+<pre><code><span class="comment"># 测量算子融合的端到端收益</span>
+<span class="keyword">import</span> torch
+<span class="keyword">import</span> torch.nn <span class="keyword">as</span> nn
+
+<span class="comment"># 定义一个典型的 Transformer 块</span>
+<span class="keyword">class</span> TransformerBlock(nn.Module):
+    <span class="keyword">def</span> __init__(self, d_model=4096):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.qkv = nn.Linear(d_model, d_model * 3)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * 4),
+            nn.GELU(),
+            nn.Linear(d_model * 4, d_model)
+        )
+    
+    <span class="keyword">def</span> forward(self, x):
+        x = x + self.qkv(self.norm1(x))  <span class="comment"># 融合: LN + QKV</span>
+        x = x + self.ffn(self.norm2(x))  <span class="comment"># 融合: LN + FFN</span>
+        <span class="keyword">return</span> x
+
+<span class="comment"># 对比编译前后的 kernel 数量</span>
+model = TransformerBlock().cuda()
+compiled_model = torch.compile(model)
+
+<span class="comment"># 用 profiler 观察</span>
+<span class="keyword">with</span> torch.profiler.profile() <span class="keyword">as</span> prof:
+    compiled_model(torch.randn(1, 128, 4096, device=<span class="string">"cuda"</span>))
+
+<span class="keyword">print</span>(prof.key_averages().table(sort_by=<span class="string">"cuda_time_total"</span>))
+<span class="comment"># 未编译: ~15+ 个 kernel</span>
+<span class="comment"># 编译后: ~5-8 个 kernel（融合生效）</span>
+</code></pre>
+
+<div class="deep">
+<strong>融合收益的数学分析</strong>：假设一个 memory-bound 操作需要读写 N 字节数据，HBM 带宽为 B GB/s，则执行时间为 N/B 秒。如果将 K 个这样的操作融合，中间结果不写回 HBM，节省的访问量为 2(K-1) × M 字节（M 为中间张量大小），时间节省为 2(K-1) × M / B 秒。以 LayerNorm 为例：K=4（mean, var, normalize, affine），M=128×4096×2=1MB（FP16），B=3.35TB/s，单次融合节省约 0.6μs。看似很小，但 80 层 × 2 个 LN = 160 次融合，累计节省约 96μs。这就是为什么"微秒级"的优化在 LLM 推理中很重要——参见 <a href="04-CUDA-Graphs.html">CUDA Graphs</a> 中对 launch overhead 的分析。
+</div>
+
+<h2>5. 融合的限制</h2>
+
+<h3>5.1 硬件资源约束</h3>
+<div class="warn">
+<strong>融合不是万能的</strong>，以下情况可能导致融合失败或收益降低：
+<ul>
+<li><strong>共享内存不足</strong>：融合后的 kernel 需要更多 SRAM，可能超出 SM 容量</li>
+<li><strong>寄存器压力</strong>：过多的中间变量导致寄存器溢出（register spilling）</li>
+<li><strong>依赖关系</strong>：如果两个操作之间有数据依赖且无法在 SRAM 中完成，就无法融合</li>
+<li><strong>第三方库</strong>：cuDNN/cuBLAS 的 kernel 是预编译的，无法与自定义操作融合</li>
+</ul>
+</div>
+
+<h3>5.2 融合失败的常见模式</h3>
+<div class="ascii">哪些操作"天生"无法融合？
+
+可融合                    不可融合
+─────────────────────     ─────────────────────
+element-wise + element-wise   GEMM + GEMM（需要全局归约）
+GEMM + element-wise (epilogue) 跨层依赖（必须同步）
+reduction + element-wise      cuDNN kernel（预编译）
+同一数据流的连续操作         数据依赖且超出 SRAM 容量
+
+判断准则（工厂类比）：
+  可融合 = 两道工序可以用同一批半成品，不需要入库
+  不可融合 = 第二道工序需要等第一批全部完成才能开始
+            （如 GEMM 的输出是另一个 GEMM 的输入，必须完整计算）</div>
+
+<h3>5.3 融合与 CUDA Graphs 的关系</h3>
+<p>算子融合和 <a href="04-CUDA-Graphs.html">CUDA Graphs</a> 是互补的优化策略：</p>
+<ul>
+<li><strong>融合</strong>减少 HBM 访问（内存带宽优化）</li>
+<li><strong>CUDA Graphs</strong>减少 kernel launch 次数（CPU-GPU 通信优化）</li>
+<li>两者可以同时使用：先融合减少 kernel 数，再用 CUDA Graphs 消除剩余 launch overhead</li>
+</ul>
+
+<h2>6. 实战：观察 Inductor 的融合效果</h2>
+
+<h3>6.1 使用 torch.compile 观察融合</h3>
+<pre><code><span class="keyword">import</span> torch
+
+<span class="comment"># 启用融合日志</span>
+torch._inductor.config.debug = <span class="keyword">True</span>
+
+<span class="comment"># 编译模型</span>
+model = torch.compile(model, mode=<span class="string">"reduce-overhead"</span>)
+
+<span class="comment"># 查看融合后的代码</span>
+<span class="comment"># 输出在 ~/.cache/torch_inductor/ 下的 .py 文件</span>
+<span class="comment"># 搜索 "triton" 查看生成的 Triton kernel</span>
+
+<span class="comment"># 使用 torch.profiler 观察 kernel</span>
+<span class="keyword">with</span> torch.profiler.profile(
+    activities=[torch.profiler.ProfilerActivity.CUDA]
+) <span class="keyword">as</span> prof:
+    model(input_ids)
+
+<span class="keyword">print</span>(prof.key_averages().table(sort_by=<span class="string">"cuda_time_total"</span>))
+</code></pre>
+
+<h3>6.2 手动优化：哪些融合值得手动实现</h3>
+<pre><code><span class="comment"># 手动融合 vs 编译器自动融合</span>
+
+<span class="comment"># 场景 1: 编译器能自动处理的（不需要手动）</span>
+<span class="comment">#   - Linear + Bias + GELU → Inductor 自动 epilogue fusion</span>
+<span class="comment">#   - LayerNorm 内部操作 → Inductor 自动 reduction fusion</span>
+
+<span class="comment"># 场景 2: 需要手动实现的</span>
+<span class="comment">#   - FlashAttention → 需要手写 Triton/CUDA kernel</span>
+<span class="comment">#   - 跨层融合（如 Residual + LN + QKV）→ 编译器可能无法识别</span>
+
+<span class="comment"># 使用 torch.compile 的自定义融合</span>
+<span class="keyword">from</span> torch._inductor.pattern_matcher <span class="keyword">import</span> register_graph_pattern
+
+<span class="comment"># 注册自定义融合模式</span>
+<span class="comment"># 当 Inductor 识别到这个 pattern 时，自动替换为融合 kernel</span>
+</code></pre>
+
+<div class="tip">
+<strong>实用建议</strong>：大多数情况下，<code>torch.compile</code> 的自动融合已经足够好。只有在以下场景才考虑手动实现：(1) 你需要 FlashAttention 这样的"tiled reduction"融合（编译器无法自动生成）；(2) 你的模型有特殊的操作组合，编译器的 pattern 匹配没有覆盖；(3) 你追求极致性能，需要手动控制 tiling 策略和寄存器分配。对于大多数 LLM 推理场景，使用 <code>torch.nn.functional.scaled_dot_product_attention</code>（自动调用 FlashAttention）+ <code>torch.compile</code> 就足够了。
+</div>
+
+<h2>7. 思考题</h2>
+
+<div class="deep"><strong>深入探讨背景与动机的核心机制：</strong>
+从<strong>底层原理</strong>看，背景与动机的设计<strong>为什么</strong>如此高效？<strong>推导</strong>其关键在于将计算复杂度和通信开销进行了巧妙的平衡。从<strong>数学本质</strong>角度，这一技术的核心<strong>工作机制</strong>可以用信息论的基本定理来解释。，负责将计算映射到具体的
+硬件单元（GPU SM、Tensor Core等）；中间是调度层，负责任务分配和资源管理；上层是应用接口层，
+提供用户友好的API。这种分层设计的数学本质是将一个复杂的优化问题分解为多个子问题，
+每一层独立优化，最终通过协同工作达到全局最优。根据Amdahl定律，系统的整体加速比
+S = 1 / ((1-p) + p/s)，其中 p 为可并行化比例，s 为并行加速倍数。
+当 p=0.95 且 s=100 时，理论加速比约为 16.8 倍。
+</div>
+<div class="exercise">
+<strong>练习 1</strong>：编写一个包含 Linear → LayerNorm → GELU 的模型，用 <code>torch.compile</code> 编译后，查看 Inductor 生成的融合 kernel 代码。统计融合前后的 kernel 数量。<br><br>
+<strong>练习 2</strong>：对比 <code>torch.nn.functional.scaled_dot_product_attention</code>（使用 FlashAttention）和手动实现的 Attention 的 kernel 数量和延迟。<br><br>
+<strong>思考题 1</strong>：为什么 FlashAttention 需要"分块（tiling）"才能融合？如果不分块，直接将整个注意力计算写成一个 kernel，会有什么问题？（提示：考虑 SRAM 容量和序列长度的关系）<br><br>
+<strong>思考题 2</strong>：算子融合减少了 HBM 访问，但可能增加寄存器压力。在什么情况下融合反而会导致性能下降？如何判断一个融合是否"值得"？<br><br>
+<strong>思考题 3</strong>：<a href="05-XLA编译.html">XLA</a> 的融合策略与 TorchInductor 有何不同？纯函数式 IR（HLO）给 XLA 的融合带来了哪些优势？（提示：考虑跨操作的重排自由度）
+</div>
+
+<div class="tip"><strong>向前串联：</strong>算子融合是"减少 kernel 数量"的第一步。融合之后，下一个问题是"减少 kernel launch 次数"——这正是 <a href="04-CUDA-Graphs.html">CUDA Graphs</a> 要解决的问题。两者结合可以将一个 Transformer 层的执行开销降到最低。更进一步，<a href="05-XLA编译.html">XLA 编译器</a> 从编译器层面提供了更激进的全图优化。</div>
+
+<div class="deep"><strong>跨文件交叉引用：</strong>本节讨论的融合策略与 <a href="../推理框架/02-内存管理/00-总览.html">内存管理</a> 密切相关——融合减少了 HBM 访问，相当于降低了对内存带宽的需求。而 <a href="../推理框架/02-内存管理/01-GPU内存层次.html">GPU 内存层次</a> 中的 SRAM 容量直接决定了融合的上限。理解这些关联，才能设计出真正高效的推理系统。</div>
+
+<h2>术语速查表</h2>
+<table>
+<tr><th>术语</th><th>含义</th></tr>
+<tr><td>算子融合</td><td>将多个小 kernel 合并为一个大 kernel</td></tr>
+<tr><td>Pointwise 融合</td><td>独立 element-wise 操作的水平合并</td></tr>
+<tr><td>Reduction 融合</td><td>reduction 操作与前后操作的合并</td></tr>
+<tr><td>Vertical 融合</td><td>计算链上操作的垂直合并（如 Matmul + Bias + Act）</td></tr>
+<tr><td>Epilogue Fusion</td><td>GEMM 后的 bias/activation 融合（CUTLASS 术语）</td></tr>
+<tr><td>Pattern Matching</td><td>编译器识别可融合操作组合的模式匹配</td></tr>
+<tr><td>Register Spilling</td><td>寄存器不够用时溢出到共享内存/全局内存</td></tr>
+<tr><td>Arithmetic Intensity</td><td>算术强度 = FLOPs / Bytes Accessed</td></tr>
+<tr><td>Roofline Model</td><td>性能模型，区分 memory-bound 和 compute-bound</td></tr>
+<tr><td>Tiling</td><td>分块计算，使数据能放入 SRAM</td></tr>
+</table>
+
+</div>
+<div class="footer"><p><a href="index.html">返回编译优化总览</a> | <a href="../index.html">返回学习目录</a></p></div>
+<p><strong>学习路径：</strong>学习背景与动机需要前置知识：Transformer注意力机制、GPU内存管理基础。掌握后可继续深入推理框架实战和性能调优。</p>
+</body>
+</html>

@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02-Disaggregated-Prefill-Decode | 推理服务架构</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #58a6ff; text-decoration: none; }
+.nav span { color: #8b949e; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+h1 { color: #58a6ff; font-size: 2em; margin: 24px 0 16px; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 12px; margin: 32px 0 16px; font-size: 1.5em; }
+h3 { color: #d2a8ff; margin: 24px 0 12px; font-size: 1.2em; }
+h4 { color: #79c0ff; margin: 16px 0 8px; }
+p { margin: 8px 0; }
+code { background: #21262d; color: #79c0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; margin: 12px 0; font-size: 0.85em; line-height: 1.5; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th { background: #21262d; color: #f0f6fc; padding: 10px 14px; text-align: left; border: 1px solid #30363d; font-weight: 600; }
+td { padding: 8px 14px; border: 1px solid #30363d; }
+tr:nth-child(even) { background: #161b22; }
+.tip { background: #0d1d30; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.exercise { background: #0d2818; border-left: 4px solid #238636; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.svg-diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; text-align: center; }
+.svg-diagram svg { max-width: 100%; height: auto; }
+.ascii { background: #161b22; border: 1px solid #30363d; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82em; line-height: 1.5; padding: 16px; overflow-x: auto; margin: 16px 0; white-space: pre; border-radius: 6px; }
+ul, ol { margin: 8px 0 8px 24px; }
+li { margin: 4px 0; }
+a { color: #58a6ff; }
+.keyword { color: #ff7b72; } .string { color: #a5d6ff; } .comment { color: #8b949e; } .cmd { color: #79c0ff; }
+.footer { text-align: center; color: #484f58; margin-top: 48px; padding: 24px 0; border-top: 1px solid #21262d; font-size: 0.9em; }
+.footer a { color: #58a6ff; }
+.next-prev { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 16px; border-top: 1px solid #21262d; }
+.next-prev a { padding: 8px 16px; background: #21262d; border-radius: 6px; }
+.tag { display: inline-block; background: #388bfd22; color: #58a6ff; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+.badge-blue { background: #1f6feb33; color: #58a6ff; }
+.badge-green { background: #23863633; color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="01-推理服务架构总览.html">&larr; 01-推理服务架构总览</a><span>推理服务架构</span><a href="03-KV-Cache调度与路由.html">03-KV-Cache调度与路由 &rarr;</a></div>
+<div class="container">
+
+<h1>🔀 Disaggregated Prefill-Decode</h1>
+
+<h2>1. 背景与动机</h2>
+<h3>背景与动机</h3><div class="tip"><strong>💡 通俗类比：</strong>Prefill和Decode混合部署就像一个厨师同时负责备菜和上菜——当他专心切一大盆菜(处理长prompt的Prefill)时，已经点菜的顾客只能干等(被阻塞的Decode请求)。分离架构就是把备菜间和前厅分开，各司其职，互不干扰。</div>
+"><strong>通俗类比：</strong>背景与动机</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>在一体架构中，Prefill 和 Decode 共享同一组 GPU。这导致一个根本问题：<strong>阶段干扰 (Phase Interference)</strong>。</p>
+
+<div class="ascii">
+阶段干扰示意:
+
+时间 →
+GPU 0: [====Prefill====][--Decode--][====Prefill====][--Decode--]
+GPU 1: [--Decode--][====Prefill====][--Decode--][====Prefill====]
+        ↑ Prefill 抢占 Decode 的 GPU 资源
+        ↑ Decode 的低效使用拖累 Prefill
+
+问题:
+- Prefill 突发: 长 prompt 的 Prefill 会阻塞正在 Decode 的请求
+- Decode 空闲: Decode 阶段 GPU 利用率低，但占着显存
+- 资源竞争: Prefill (compute-bound) 和 Decode (memory-bound) 争抢不同资源
+</div>
+
+<h2>2. 分离架构的原理</h2>
+<h3>分离架构的原理</h3>
+
+
+
+
+<div class="warn"><strong>⚠️ 常见误区：</strong>分离架构的核心成本不是GPU，而是KV Cache传输。以Llama-3-70B为例，seq_len=1024时KV Cache约2.6GB，通过InfiniBand NDR(400Gb/s)传输需要约52ms。如果Prefill计算本身只需30ms，传输就成了瓶颈。务必评估你的网络条件再决定是否采用分离架构。</div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 640 280" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <defs>
+    <marker id="arr-pd" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#fbbf24"/></marker>
+    <marker id="arr-pd2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#34d399"/></marker>
+  </defs>
+  <text x="320" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">Disaggregated Prefill-Decode 分离架构</text>
+  <!-- Prefill Pool -->
+  <rect x="30" y="40" width="240" height="120" rx="10" fill="rgba(8,51,68,0.2)" stroke="#22d3ee" stroke-width="2"/>
+  <text x="150" y="62" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="bold">Prefill GPU Pool</text>
+  <text x="150" y="78" text-anchor="middle" fill="#8b949e" font-size="8">高算力配置（Tensor Core 密集）</text>
+  <rect x="50" y="88" width="200" height="55" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="150" y="108" text-anchor="middle" fill="#c9d1d9" font-size="9">Prefill 请求（并行处理）</text>
+  <text x="150" y="125" text-anchor="middle" fill="#8b949e" font-size="7">Compute-bound · 大 batch · 高 Tensor Core 利用率</text>
+  <!-- KV Cache transfer -->
+  <line x1="270" y1="100" x2="350" y2="100" stroke="#fbbf24" stroke-width="2.5" marker-end="url(#arr-pd)"/>
+  <rect x="280" y="75" width="80" height="20" rx="4" fill="rgba(120,53,15,0.4)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="320" y="89" text-anchor="middle" fill="#fbbf24" font-size="8" font-weight="bold">KV Cache</text>
+  <text x="320" y="118" text-anchor="middle" fill="#fbbf24" font-size="7">RDMA 传输</text>
+  <!-- Decode Pool -->
+  <rect x="350" y="40" width="260" height="120" rx="10" fill="rgba(6,78,59,0.2)" stroke="#34d399" stroke-width="2"/>
+  <text x="480" y="62" text-anchor="middle" fill="#34d399" font-size="11" font-weight="bold">Decode GPU Pool</text>
+  <text x="480" y="78" text-anchor="middle" fill="#8b949e" font-size="8">高带宽配置（HBM 密集）</text>
+  <rect x="370" y="88" width="220" height="55" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1"/>
+  <text x="480" y="108" text-anchor="middle" fill="#c9d1d9" font-size="9">Decode 生成（逐 token）</text>
+  <text x="480" y="125" text-anchor="middle" fill="#8b949e" font-size="7">Memory-bound · 小 batch · 高 HBM 带宽利用率</text>
+  <!-- Request flow -->
+  <line x1="10" y1="100" x2="30" y2="100" stroke="#c9d1d9" stroke-width="1.5" marker-end="url(#arr-pd2)"/>
+  <text x="15" y="90" fill="#c9d1d9" font-size="7">请求</text>
+  <line x1="610" y1="100" x2="630" y2="100" stroke="#c9d1d9" stroke-width="1.5" marker-end="url(#arr-pd2)"/>
+  <text x="620" y="90" fill="#c9d1d9" font-size="7">输出</text>
+  <!-- Advantages -->
+  <rect x="30" y="175" width="580" height="90" rx="8" fill="rgba(6,78,59,0.1)" stroke="#34d399" stroke-width="1"/>
+  <text x="320" y="195" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">分离架构优势</text>
+  <text x="320" y="215" text-anchor="middle" fill="#c9d1d9" font-size="9">① Prefill GPU 优化 batch 大小 · ② Decode GPU 优化 KV Cache 管理</text>
+  <text x="320" y="233" text-anchor="middle" fill="#c9d1d9" font-size="9">③ 独立扩缩：根据负载动态调整 Prefill/Decode GPU 比例</text>
+  <text x="320" y="253" text-anchor="middle" fill="#fbbf24" font-size="9">代表系统: Splitwise(MS) · DistServe(PKU) · Mooncake(Moonshot) · DistServe(OSDI'24)</text>
+</svg>
+</div>
+
+<h2>3. 三大分离架构论文</h2>
+
+
+
+
+
+
+<div class="tip"><strong>💡 通俗类比：</strong>三大分离架构论文的关系就像同一道菜的三种做法——Splitwise(微软)是"分灶做饭"(硬件级分离)，DistServe(北大)是"按客人满意度优化"(Goodput优化)，Mooncake(月之暗面)是"把食材放公共冰箱"(KV Cache为中心)。三者殊途同归，都证明了分离架构的价值。</div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>3.1 Splitwise (Microsoft, 2024)</h3>
+<p><strong>核心思想</strong>：将 LLM 推理集群分为 Prefill 机器和 Decode 机器，通过高速网络传输 KV Cache。</p>
+<ul>
+<li><strong>机器配置</strong>：Prefill 机器用高算力 GPU（如 H100 SXM），Decode 机器用高带宽 GPU</li>
+<li><strong>KV Cache 传输</strong>：通过 RDMA（远程直接内存访问）传输，延迟约 1-5ms</li>
+<li><strong>调度器</strong>：根据请求的输入/输出长度预估，路由到合适的机器</li>
+</ul>
+
+<h3>3.2 DistServe (Peking University, OSDI 2024)</h3>
+<p><strong>核心思想</strong>：以 Goodput（满足 SLA 的有效吞吐）为优化目标，而非单纯的吞吐量。</p>
+<ul>
+<li><strong>Goodput 定义</strong>：在 TTFT SLA 和 TPS SLA 约束下，系统能稳定服务的请求速率</li>
+<li><strong>核心发现</strong>：分离架构比一体架构提升最高 2x Goodput</li>
+<li><strong>调度策略</strong>：根据 SLA 约束动态分配 Prefill/Decode 资源</li>
+</ul>
+
+<h3>3.3 Mooncake (Moonshot AI, 2024)</h3>
+<p><strong>核心思想</strong>：以 KV Cache 为中心的架构，将 KV Cache 视为一等公民。</p>
+<ul>
+<li><strong>KV Cache Pool</strong>：分布式 KV Cache 存储池，跨 GPU/节点共享</li>
+<li><strong>KV Cache 路由</strong>：根据缓存命中率路由请求，减少重复 Prefill</li>
+<li><strong>KV Cache 传输优化</strong>：异步传输、流水线传输、增量传输</li>
+</ul>
+
+<h2>4. KV Cache 传输的挑战</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>4.1 传输量分析</h3>
+<div class="ascii">
+KV Cache 大小估算 (Llama-3-70B, FP16):
+
+每层 KV Cache: 2 × hidden_dim × seq_len × 2 bytes
+             = 2 × 8192 × seq_len × 2 bytes
+
+80 层总计: 80 × 2 × 8192 × seq_len × 2 bytes
+         = 2.56 MB × seq_len
+
+seq_len=128:   ~328 MB
+seq_len=1024:  ~2.6 GB
+seq_len=8192:  ~21 GB
+seq_len=128K:  ~328 GB  (!!!)
+</div>
+
+<h3>4.2 传输延迟</h3>
+<table>
+<tr><th>互联方式</th><th>带宽</th><th>传输 2.6GB (seq=1K)</th><th>适用场景</th></tr>
+<tr><td>NVLink 5.0</td><td>900 GB/s</td><td>~3ms</td><td>同节点 GPU</td></tr>
+<tr><td>NVLink 4.0</td><td>450 GB/s</td><td>~6ms</td><td>同节点 GPU</td></tr>
+<tr><td>InfiniBand NDR</td><td>400 Gb/s</td><td>~52ms</td><td>跨节点</td></tr>
+<tr><td>RoCE 400G</td><td>400 Gb/s</td><td>~52ms</td><td>跨节点 (以太网)</td></tr>
+<tr><td>100GbE</td><td>100 Gb/s</td><td>~208ms</td><td>普通数据中心</td></tr>
+</table>
+
+<div class="warn">
+<strong>关键瓶颈</strong>：KV Cache 传输延迟必须小于 Prefill 计算时间才有收益。对于短 prompt（< 100 token），传输延迟可能超过 Prefill 时间，此时分离架构反而更慢。
+</div>
+
+<h2>5. vLLM 的分离架构支持</h2>
+vLLM 的分离架构支持的工作原理，有助于在实际工程中做出更合理的技术选择和优化决策。</p>
+
+<h3>vLLM 的分离架构支持</h3>
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>vLLM 从 v0.6 开始支持 disaggregated prefill：</p>
+<pre><code><span class="comment"># vLLM 分离架构配置</span>
+<span class="comment"># Prefill 实例</span>
+python -m vllm.entrypoints.openai.api_server     --model meta-llama/Llama-3-70B     --port 8100     --enable-prefill-disaggregation     --kv-transfer-config '{"kv_connector":"PyNcclConnector"}'
+
+<span class="comment"># Decode 实例</span>
+python -m vllm.entrypoints.openai.api_server     --model meta-llama/Llama-3-70B     --port 8200     --enable-prefill-disaggregation     --kv-transfer-config '{"kv_connector":"PyNcclConnector"}'
+</code></pre>
+
+<h2>6. 分离架构的选型建议</h2>
+</p>
+
+<h3>分离架构的选型建议</h3>
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="ascii">
+何时使用分离架构？
+
+├─ 请求特征
+│   ├─ 长 prompt (> 1K tokens) → 分离有收益
+│   └─ 短 prompt (< 100 tokens) → 一体架构更优
+│
+├─ 规模
+│   ├─ 单节点 (8 GPU) → 一体架构足够
+│   └─ 多节点 (32+ GPU) → 分离架构收益明显
+│
+├─ SLA 要求
+│   ├─ TTFT < 200ms + TPS > 50 → 分离 + 专用 Prefill GPU
+│   └─ 宽松 SLA → 一体架构即可
+│
+└─ 预算
+    ├─ 充足 → 分离 + 高速互联 (IB NDR)
+    └─ 有限 → 一体架构 + CUDA Graphs
+</div>
+
+<div class="deep"><strong>背景与动机的技术原理与数学推导：</strong>
+从<strong>底层</strong>硬件角度分析，背景与动机的性能瓶颈通常在于内存带宽而非计算能力。
+<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
+因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
+这一<strong>数学本质</strong>决定了背景与动机的所有优化策略都应围绕减少内存访问展开。
+从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
+是提升算术强度的两大核心手段。
+</div>
+<div class="deep"><strong>背景与动机的系统架构分析：</strong>
+从系统设计的<strong>原理</strong>出发，背景与动机采用分层架构来管理复杂性。
+<strong>为什么</strong>分层是主流选择？<strong>推导</strong>如下：
+设系统有N个组件，全连接交互复杂度为O(N²)，分层后降低到O(N·L)，L为层数。
+<strong>数学本质</strong>上，这是用少量层间通信开销换取大幅降低的组件间耦合。
+在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过标准接口解耦——
+这类似于TCP/IP协议栈的设计<strong>原理</strong>，每层独立优化，层内改动不影响整体。
+</div>
+<pre><code class="language-python"># 背景与动机 - 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    """测量推理延迟和吞吐"""
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    print(f"Throughput: {1/elapsed:.0f} req/s")
+    return elapsed
+</code></pre>
+<div class="tip"><strong>相关章节：</strong>
+背景与动机与以下内容密切相关：<a href="01-推理服务架构总览.html">01-推理服务架构总览</a> | <a href="03-KV-Cache调度与路由.html">03-KV-Cache调度与路由</a> | <a href="04-多模型与Serverless推理.html">04-多模型与Serverless推理</a>。
+建议结合这些章节一起学习，形成完整的知识体系。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+在学习背景与动机时，建议先建立整体认知框架，再深入细节。
+用最小化实验验证核心概念——比如用小模型+短序列跑通完整流程，
+确认理解正确后再扩展到生产规模。记录每一步的性能数据，
+建立自己的"优化知识库"，这些经验在后续项目中会反复用到。
+</div>
+<div class="exercise">
+<strong>练习 1</strong>：计算你常用的模型（如 Llama-3-8B）在 seq_len=2048 时的 KV Cache 大小。评估在你的网络条件下，传输这些 KV Cache 需要多长时间。<br><br>
+<strong>练习 2</strong>：在 vLLM 中配置 disaggregated prefill，对比一体架构和分离架构在长 prompt 场景下的 TTFT。
+</div>
+
+<h2>术语速查表</h2>
+<h3>术语速查表</h3>
+<p></pass="tip"><strong>通俗类比：</strong>背景与动机</div>
+
+<div class="deep"><strong>深入探讨：</strong>从系统设计的<strong>底层原理</strong>看，背景与动机的核心挑战是在性能、精度和资源三者之间寻找最优平衡。<strong>为什么</strong>不能同时最大化三者？因为提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），减少资源又会降低性能。理解这个三角约束，就能推导出大多数技术选择背后的逻辑。</div>
+<div class="ascii"><pre>LLM 推理全流程
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
+│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
+└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
+                                       └──────────────┘    └────┬─────┘
+                     ┌──────────────┐    ┌──────────────┐      │
+                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
+                     │  "你好！..." │    │  解码        │
+                     └──────────────┘    └──────────────┘</pre></div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+<tr><th>术语</th><th>含义</th></tr>
+<tr><td>Disaggregated Serving</td><td>将 Prefill 和 Decode 分离到不同 GPU</td></tr>
+<tr><td>Phase Interference</td><td>Prefill 和 Decode 混合部署时的资源竞争</td></tr>
+<tr><td>Goodput</td><td>满足 SLA 的有效吞吐量</td></tr>
+<tr><td>KV Cache Transfer</td><td>从 Prefill GPU 到 Decode GPU 的 KV Cache 传输</td></tr>
+<tr><td>RDMA</td><td>Remote Direct Memory Access，远程直接内存访问</td></tr>
+</table>
+
+</div>
+<div class="footer"><p><a href="index.html">返回推理服务架构总览</a> | <a href="../index.html">返回学习目录</a></p></div>
+
+<div class="tip"><strong>向前串联：</strong>
+背景与动机的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习背景与动机建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+
+<div class="tip"><strong>📚 前置知识：</strong>学习本章内容前，建议先掌握Transformer注意力机制原理、KV Cache的基本概念、GPU内存层次结构(HBM/L2/SRAM)。这些基础知识是理解后续优化策略的前提。</div>
+</body>
+</html>

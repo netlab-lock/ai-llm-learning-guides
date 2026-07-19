@@ -1,0 +1,2033 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>模块11: Agent系统中的KV Cache优化</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --bg-card: #1c2128;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --text-muted: #6e7681;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-purple: #bc8cff;
+            --accent-orange: #d29922;
+            --accent-red: #f85149;
+            --accent-cyan: #39d2c0;
+            --accent-pink: #f778ba;
+            --border-color: #30363d;
+            --code-bg: #0d1117;
+            --shadow: 0 4px 24px rgba(0,0,0,0.4);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.8;
+            font-size: 16px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+
+        /* Header */
+        .module-header {
+            background: linear-gradient(135deg, #1a1040 0%, #0d1117 50%, #0a1628 100%);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 48px;
+            margin-bottom: 32px;
+            position: relative;
+            overflow: hidden;
+        }
+        .module-header::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -20%;
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, rgba(88,166,255,0.08) 0%, transparent 70%);
+            pointer-events: none;
+        }
+        .module-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, var(--accent-purple), var(--accent-blue));
+            color: #fff;
+            font-size: 13px;
+            font-weight: 700;
+            padding: 4px 14px;
+            border-radius: 20px;
+            margin-bottom: 16px;
+            letter-spacing: 1px;
+        }
+        .module-header h1 {
+            font-size: 2.4em;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple), var(--accent-cyan));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 12px;
+        }
+        .module-header .subtitle {
+            font-size: 1.15em;
+            color: var(--text-secondary);
+            max-width: 800px;
+        }
+        .header-stats {
+            display: flex;
+            gap: 32px;
+            margin-top: 24px;
+            flex-wrap: wrap;
+        }
+        .header-stat {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+        .header-stat .icon { font-size: 18px; }
+
+        /* Navigation */
+        .toc {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px 32px;
+            margin-bottom: 32px;
+        }
+        .toc h3 {
+            color: var(--accent-blue);
+            margin-bottom: 16px;
+            font-size: 1.1em;
+        }
+        .toc-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 8px;
+        }
+        .toc a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 14px;
+            padding: 6px 12px;
+            border-radius: 6px;
+            transition: all 0.2s;
+            display: block;
+        }
+        .toc a:hover {
+            background: var(--bg-tertiary);
+            color: var(--accent-blue);
+        }
+        .toc a .num {
+            color: var(--accent-purple);
+            font-weight: 700;
+            margin-right: 8px;
+        }
+
+        /* Sections */
+        .section {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 36px;
+            margin-bottom: 28px;
+        }
+        .section h2 {
+            font-size: 1.6em;
+            color: var(--accent-blue);
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .section h2 .sec-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            flex-shrink: 0;
+        }
+        .section h3 {
+            font-size: 1.2em;
+            color: var(--accent-purple);
+            margin: 24px 0 12px;
+        }
+        .section h4 {
+            font-size: 1.05em;
+            color: var(--accent-cyan);
+            margin: 16px 0 8px;
+        }
+        .section p, .section li {
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+        .section ul, .section ol {
+            padding-left: 24px;
+            margin-bottom: 16px;
+        }
+        .section strong { color: var(--text-primary); }
+
+        /* Layered explanation */
+        .layer-tabs {
+            display: flex;
+            gap: 4px;
+            margin-bottom: 0;
+        }
+        .layer-tab {
+            padding: 8px 20px;
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-bottom: none;
+            border-radius: 8px 8px 0 0;
+            color: var(--text-secondary);
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+        .layer-tab.active {
+            background: var(--bg-card);
+            color: var(--accent-blue);
+            border-color: var(--accent-blue);
+            border-bottom-color: var(--bg-card);
+        }
+        .layer-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 0 12px 12px 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+        }
+        .layer-content > div { display: none; }
+        .layer-content > div.active { display: block; }
+        .layer-beginner { border-left: 3px solid var(--accent-green); }
+        .layer-intermediate { border-left: 3px solid var(--accent-orange); }
+        .layer-advanced { border-left: 3px solid var(--accent-red); }
+
+        /* Diagrams */
+        .diagram-container {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+        .diagram-container svg {
+            display: block;
+            margin: 0 auto;
+        }
+        .diagram-caption {
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 13px;
+            margin-top: 12px;
+            font-style: italic;
+        }
+
+        /* Code blocks */
+        .code-block {
+            background: var(--code-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 20px;
+            margin: 16px 0;
+            overflow-x: auto;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            color: #c9d1d9;
+        }
+        .code-block .comment { color: #8b949e; }
+        .code-block .keyword { color: #ff7b72; }
+        .code-block .string { color: #a5d6ff; }
+        .code-block .func { color: #d2a8ff; }
+        .code-block .number { color: #79c0ff; }
+        .code-block .class { color: #ffa657; }
+
+        /* Tables */
+        .table-wrapper {
+            overflow-x: auto;
+            margin: 16px 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        th {
+            background: var(--bg-tertiary);
+            color: var(--accent-blue);
+            font-weight: 600;
+            text-align: left;
+            padding: 12px 16px;
+            border-bottom: 2px solid var(--accent-blue);
+        }
+        td {
+            padding: 10px 16px;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-secondary);
+        }
+        tr:hover td { background: rgba(88,166,255,0.04); }
+
+        /* Callout boxes */
+        .callout {
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin: 16px 0;
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+        }
+        .callout-icon { font-size: 20px; flex-shrink: 0; margin-top: 2px; }
+        .callout-info {
+            background: rgba(88,166,255,0.08);
+            border: 1px solid rgba(88,166,255,0.2);
+        }
+        .callout-warn {
+            background: rgba(210,153,34,0.08);
+            border: 1px solid rgba(210,153,34,0.2);
+        }
+        .callout-critical {
+            background: rgba(248,81,73,0.08);
+            border: 1px solid rgba(248,81,73,0.2);
+        }
+        .callout-success {
+            background: rgba(63,185,80,0.08);
+            border: 1px solid rgba(63,185,80,0.2);
+        }
+        .callout p { margin: 0; }
+
+        /* Metric cards */
+        .metric-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 16px;
+            margin: 20px 0;
+        }
+        .metric-card {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+        }
+        .metric-card .value {
+            font-size: 2em;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .metric-card .label {
+            color: var(--text-secondary);
+            font-size: 13px;
+            margin-top: 4px;
+        }
+
+        /* Flow steps */
+        .flow-steps {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin: 16px 0;
+        }
+        .flow-step {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 16px;
+            font-size: 13px;
+            color: var(--text-primary);
+        }
+        .flow-arrow {
+            color: var(--accent-blue);
+            font-size: 18px;
+        }
+
+        /* Comparison */
+        .compare-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16px;
+            margin: 16px 0;
+        }
+        .compare-card {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 20px;
+        }
+        .compare-card h4 {
+            color: var(--accent-blue);
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .compare-card.bad { border-color: rgba(248,81,73,0.3); }
+        .compare-card.bad h4 { color: var(--accent-red); }
+        .compare-card.good { border-color: rgba(63,185,80,0.3); }
+        .compare-card.good h4 { color: var(--accent-green); }
+
+        /* Footer */
+        .module-footer {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 32px;
+            margin-top: 32px;
+            text-align: center;
+        }
+        .module-footer p { color: var(--text-secondary); font-size: 14px; }
+        .nav-links {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 16px;
+        }
+        .nav-links a {
+            color: var(--accent-blue);
+            text-decoration: none;
+            padding: 8px 20px;
+            border: 1px solid var(--accent-blue);
+            border-radius: 8px;
+            font-size: 14px;
+            transition: all 0.2s;
+        }
+        .nav-links a:hover {
+            background: rgba(88,166,255,0.1);
+        }
+
+        @media (max-width: 768px) {
+            .container { padding: 12px; }
+            .module-header { padding: 24px; }
+            .module-header h1 { font-size: 1.6em; }
+            .section { padding: 20px; }
+            .compare-grid { grid-template-columns: 1fr; }
+            .metric-grid { grid-template-columns: repeat(2, 1fr); }
+        }
+    
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<nav class="nav-bar">
+  <a href="00-index.html">← 目录</a>
+  <span style="opacity:0.4">|</span>
+  <a href="10-KV-Cache与集合通信.html">← 集合通信</a>
+  <span class="title">模块11: Agent系统</span>
+  <a href="12-推理框架KV-Cache实现对比.html">框架对比 →</a>
+  <a href="00-index.html">目录 →</a>
+</nav>
+<div class="container">
+
+<!-- ==================== HEADER ==================== -->
+<div class="module-header">
+    <span class="module-badge">MODULE 11 / 12</span>
+    <h1>Agent系统中的KV Cache优化</h1>
+    <p class="subtitle">从单Agent到Multi-Agent系统——如何利用Prefix Caching、共享缓存、Copy-on-Write等技术，解决Agent场景下KV Cache的内存爆炸与延迟瓶颈</p>
+    <div class="header-stats">
+        <div class="header-stat"><span class="icon">⏱️</span> 预计阅读 40 分钟</div>
+        <div class="header-stat"><span class="icon">📊</span> 难度: 高级</div>
+        <div class="header-stat"><span class="icon">🎯</span> 关键技术: Prefix Caching · Multi-Agent · Copy-on-Write</div>
+        <div class="header-stat"><span class="icon">🔗</span> 前置: 模块01-10</div>
+    </div>
+</div>
+
+<!-- ==================== TOC ==================== -->
+<div class="toc">
+    <h3>📑 目录导航</h3>
+    <div class="toc-grid">
+        <a href="#sec1"><span class="num">01</span>Agent系统的推理特征</a>
+        <a href="#sec2"><span class="num">02</span>Prefix Caching在Agent场景的价值</a>
+        <a href="#sec3"><span class="num">03</span>Multi-Turn对话的KV Cache管理</a>
+        <a href="#sec4"><span class="num">04</span>工具调用中的KV Cache</a>
+        <a href="#sec5"><span class="num">05</span>Multi-Agent系统的KV Cache挑战</a>
+        <a href="#sec6"><span class="num">06</span>Multi-Agent KV Cache优化方案</a>
+        <a href="#sec7"><span class="num">07</span>结构化输出与KV Cache</a>
+        <a href="#sec8"><span class="num">08</span>Agent推理服务架构设计</a>
+        <a href="#sec9"><span class="num">09</span>实际案例与代码</a>
+    </div>
+</div>
+
+<!-- ==================== SECTION 1 ==================== -->
+<div class="section" id="sec1">
+    <h2><span class="sec-icon" style="background:rgba(88,166,255,0.15)">🤖</span> 1. Agent系统的推理特征</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>Agent推理像经营连锁餐厅：中央厨房（训练）成本高且耗时，而分店（推理）每单出餐必须快速（延迟敏感）。中央厨房的食谱研发费用是一次性的，但分店日常运营（推理）的能耗和效率决定了盈利。</div>
+<div class="warn"><strong>常见误区：</strong>切忌将Agent视为普通聊天API调用。Agent的‘思考-行动’循环意味着单次用户请求可能触发多次模型推理，直接使用默认KV Cache管理会导致严重内存碎片和延迟叠加。</div>
+<div class="deep"><strong>深入探讨：</strong>Agent典型流程：`[系统提示 + 工具描述 + 用户查询] -> [LLM推理1(生成工具调用)] -> [执行工具] -> [结果 + 历史 -> LLM推理2(生成回复)]`。一次用户交互可能消耗2-4次完整的Prefill+Decode过程，KV Cache总大小随工具调用深度线性增长。</div>
+<div class="ascii"><pre>    User Query
+        |
+   [Prompt Cache]
+        |
+   [LLM Agent] --(Calls Tool)--> [Tool Env]
+        |<--(Tool Result)--|
+        |
+   [LLM Agent] --> Final Response</pre></div>
+<table><tr><th>特征</th><th>普通聊天</th><th>Agent系统</th></tr><tr><td>单次交互推理次数</td><td>1次</td><td>通常2-4次+</td></tr><tr><td>Prompt组成</td><td>相对固定</td><td>动态变化(含工具、历史)</td></tr><tr><td>KV Cache生命周期</td><td>单次对话</td><td>可能跨多个思考步骤</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>1.1 Agent推理 vs 普通对话</h3>
+    <p>Agent系统的推理模式与普通对话有本质区别。理解这些差异是优化KV Cache的前提。</p>
+
+    <div class="table-wrapper">
+        <table>
+            <tr>
+                <th>特征</th>
+                <th>普通对话</th>
+                <th>Agent系统</th>
+                <th>KV Cache影响</th>
+            </tr>
+            <tr>
+                <td><strong>上下文长度</strong></td>
+                <td>2-8K tokens</td>
+                <td>10-128K tokens</td>
+                <td>Cache容量需求10-50x</td>
+            </tr>
+            <tr>
+                <td><strong>前缀重复度</strong></td>
+                <td>低 (偶尔共享system)</td>
+                <td>极高 (system+tools固定)</td>
+                <td>Prefix caching命中率 >90%</td>
+            </tr>
+            <tr>
+                <td><strong>轮次数</strong></td>
+                <td>1-5轮</td>
+                <td>5-50轮 (含工具调用)</td>
+                <td>KV Cache累积增长</td>
+            </tr>
+            <tr>
+                <td><strong>工具调用</strong></td>
+                <td>无</td>
+                <td>每轮1-5次</td>
+                <td>工具结果无法缓存</td>
+            </tr>
+            <tr>
+                <td><strong>并发模型</strong></td>
+                <td>独立请求</td>
+                <td>Multi-Agent共享</td>
+                <td>Cache隔离与共享</td>
+            </tr>
+            <tr>
+                <td><strong>输出格式</strong></td>
+                <td>自由文本</td>
+                <td>JSON/Function call</td>
+                <td>Constrained decoding</td>
+            </tr>
+        </table>
+    </div>
+
+    <h3>1.2 Agent请求的典型结构</h3>
+    <p>一个Agent请求的token组成可以分解为以下几个部分：</p>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 1000 280" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+                <linearGradient id="sysGrad" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stop-color="#58a6ff"/>
+                    <stop offset="100%" stop-color="#388bfd"/>
+                </linearGradient>
+                <linearGradient id="toolGrad" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stop-color="#bc8cff"/>
+                    <stop offset="100%" stop-color="#a371f7"/>
+                </linearGradient>
+                <linearGradient id="histGrad" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stop-color="#3fb950"/>
+                    <stop offset="100%" stop-color="#2ea043"/>
+                </linearGradient>
+                <linearGradient id="newGrad" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0%" stop-color="#d29922"/>
+                    <stop offset="100%" stop-color="#bb8009"/>
+                </linearGradient>
+            </defs>
+
+            <!-- Title -->
+            <text x="500" y="30" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="700">Agent请求Token组成 (典型: 20K tokens)</text>
+
+            <!-- Token bar -->
+            <rect x="50" y="50" width="200" height="50" rx="6" fill="url(#sysGrad)" opacity="0.9"/>
+            <text x="150" y="80" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">System Prompt</text>
+            <text x="150" y="95" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="11">3-5K tokens (固定)</text>
+
+            <rect x="255" y="50" width="180" height="50" rx="6" fill="url(#toolGrad)" opacity="0.9"/>
+            <text x="345" y="80" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">Tools Definition</text>
+            <text x="345" y="95" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="11">2-5K tokens (固定)</text>
+
+            <rect x="440" y="50" width="280" height="50" rx="6" fill="url(#histGrad)" opacity="0.9"/>
+            <text x="580" y="80" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">历史消息 (可复用Cache)</text>
+            <text x="580" y="95" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="11">5-80K tokens (增量)</text>
+
+            <rect x="725" y="50" width="225" height="50" rx="6" fill="url(#newGrad)" opacity="0.9"/>
+            <text x="837" y="80" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">新输入 (不可缓存)</text>
+            <text x="837" y="95" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="11">500-5K tokens</text>
+
+            <!-- Cache hit indicator -->
+            <rect x="50" y="120" width="430" height="30" rx="4" fill="rgba(63,185,80,0.15)" stroke="#3fb950" stroke-width="1"/>
+            <text x="265" y="140" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="600">✅ Prefix Cache 可命中区域 (System + Tools + 历史)</text>
+
+            <rect x="485" y="120" width="465" height="30" rx="4" fill="rgba(248,81,73,0.15)" stroke="#f85149" stroke-width="1"/>
+            <text x="717" y="140" text-anchor="middle" fill="#f85149" font-size="12" font-weight="600">❌ 需要重新计算区域</text>
+
+            <!-- Agent loop visualization -->
+            <text x="500" y="185" text-anchor="middle" fill="#8b949e" font-size="13">Agent工具调用循环中的KV Cache增长:</text>
+
+            <text x="80" y="215" fill="#58a6ff" font-size="12">Round 1:</text>
+            <rect x="155" y="200" width="100" height="24" rx="4" fill="url(#sysGrad)" opacity="0.7"/>
+            <rect x="260" y="200" width="80" height="24" rx="4" fill="url(#toolGrad)" opacity="0.7"/>
+            <rect x="345" y="200" width="60" height="24" rx="4" fill="url(#histGrad)" opacity="0.7"/>
+
+            <text x="80" y="245" fill="#58a6ff" font-size="12">Round 5:</text>
+            <rect x="155" y="230" width="100" height="24" rx="4" fill="url(#sysGrad)" opacity="0.7"/>
+            <rect x="260" y="230" width="80" height="24" rx="4" fill="url(#toolGrad)" opacity="0.7"/>
+            <rect x="345" y="230" width="300" height="24" rx="4" fill="url(#histGrad)" opacity="0.7"/>
+            <text x="495" y="247" text-anchor="middle" fill="#fff" font-size="10">累积历史 KV Cache ←</text>
+
+            <text x="80" y="275" fill="#58a6ff" font-size="12">Round 20:</text>
+            <rect x="155" y="260" width="100" height="24" rx="4" fill="url(#sysGrad)" opacity="0.7"/>
+            <rect x="260" y="260" width="80" height="24" rx="4" fill="url(#toolGrad)" opacity="0.7"/>
+            <rect x="345" y="260" width="560" height="24" rx="4" fill="url(#histGrad)" opacity="0.5"/>
+            <text x="625" y="277" text-anchor="middle" fill="#fff" font-size="10">历史KV Cache持续增长 → 可能触发上下文窗口限制</text>
+        </svg>
+        <div class="diagram-caption">图11-1: Agent请求的Token组成与Prefix Cache命中区域</div>
+    </div>
+
+    <h3>1.3 Multi-Turn对话的KV Cache增长模式</h3>
+
+    <div class="layer-tabs">
+        <div class="layer-tab active" onclick="switchLayer(this, 'l1')">🟢 初学者</div>
+        <div class="layer-tab" onclick="switchLayer(this, 'l1')">🟡 中级</div>
+        <div class="layer-tab" onclick="switchLayer(this, 'l1')">🔴 高级</div>
+    </div>
+    <div class="layer-content layer-beginner">
+        <div class="active">
+            <p><strong>简单理解：</strong>想象你在和AI助手对话。每次你说一句话，AI都需要"记住"之前所有说过的话。Agent系统更复杂——它还要记住工具的用法、调用过哪些工具、工具返回了什么结果。所以Agent的记忆（KV Cache）增长得特别快。</p>
+            <p>就像一个会议记录员，普通对话只需记录2-3页笔记，而Agent系统可能需要记录20-50页。而且每次开会时，前面几页的内容都是一样的（system prompt + 工具定义），所以可以把这些"通用页"预先准备好（Prefix Caching）。</p>
+        </div>
+        <div>
+            <p><strong>KV Cache增长公式：</strong></p>
+            <p>对于一个经过N轮工具调用的Agent请求：</p>
+            <p><code>KV_total = KV_system + KV_tools + Σ(i=1..N) [KV_user_i + KV_assistant_i + KV_tool_result_i]</code></p>
+            <p>其中 <code>KV_system</code> 和 <code>KV_tools</code> 在每轮都保持不变，是Prefix Caching的理想候选。而每轮新增的 <code>KV_user_i + KV_assistant_i + KV_tool_result_i</code> 则需要新的prefill计算。</p>
+            <p><strong>关键观察：</strong>随着轮次增加，可复用的KV Cache比例越来越高（固定前缀占比变小，历史累积占比变大），这意味着历史KV Cache的管理变得越来越重要。</p>
+        </div>
+        <div>
+            <p><strong>量化分析模型：</strong></p>
+            <p>设 system_prompt=S, tool_defs=T, 平均每轮新增=R, 总轮次=N</p>
+            <p>第k轮的总tokens: <code>L(k) = S + T + k × R</code></p>
+            <p>Prefix cache命中的tokens: <code>S + T + (k-1) × R</code> (假设历史已缓存)</p>
+            <p>Cache命中率: <code>η(k) = [S + T + (k-1) × R] / [S + T + k × R]</code></p>
+            <p>当 S+T=8K, R=2K 时: η(1)=80%, η(5)=90%, η(20)=95.2%</p>
+            <p><strong>GPU内存占用:</strong> <code>M(k) = 2 × L(k) × n_layers × d_model × bytes_per_param</code></p>
+            <p>对于Llama-70B(fp16): 每token约1.8MB, 20K上下文需要36GB——单个Agent就可能消耗大量显存。</p>
+        </div>
+    </div>
+</div>
+
+<!-- ==================== SECTION 2 ==================== -->
+<div class="section" id="sec2">
+    <h2><span class="sec-icon" style="background:rgba(63,185,80,0.15)">⚡</span> 2. Prefix Caching在Agent场景的价值</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>Prefix Caching像是餐厅的“常备配料”。对于‘系统提示’和‘工具描述’这类每次点单（推理）都要用的固定配料，提前备好（缓存）就能省去反复洗切（计算）的时间，大幅加快出餐速度。</div>
+<div class="warn"><strong>常见误区：</strong>不要期望缓存无限期有效。当更新了系统提示词（换了菜单）或增加了新工具（新菜品），相关的Prefix Cache会立即失效，需要重新计算。必须设计好版本管理。</div>
+<div class="deep"><strong>深入探讨：</strong>假设系统提示(P)1000 tokens，工具描述(T)500 tokens。每次推理前若重新Prefill需计算1500 tokens。启用Prefix Caching后，首次计算后缓存，后续请求仅需计算变化的用户查询部分(Q, e.g. 200 tokens)，理论上Prefill时间可降低85%以上。缓存键通常为`Hash(P+T)`。</div>
+<div class="ascii"><pre>  传统方式: [P+T+Q1] -> Prefill 1500 -> Decode
+  Prefix Cache: 
+    请求1: [P+T] -> Prefill 1500 -> Cache
+           [Q1] -> Prefill 200 -> Decode
+    请求2: [Q2] -> Prefill 200 -> Decode  (命中缓存)</pre></div>
+<table><tr><th>缓存策略</th><th>首次请求</th><th>后续同类请求</th><th>适用场景</th></tr><tr><td>无缓存</td><td>高延迟</td><td>高延迟</td><td>提示词完全随机</td></tr><tr><td>Prefix Caching</td><td>中延迟(计算+缓存)</td><td>低延迟</td><td>固定系统提示/工具描述</td></tr><tr><td>完整对话缓存</td><td>高延迟</td><td>中延迟(加载历史)</td><td>需要完整对话历史的Agent</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>2.1 为什么Agent是Prefix Caching的"杀手级应用"</h3>
+
+    <div class="metric-grid">
+        <div class="metric-card">
+            <div class="value">90%+</div>
+            <div class="label">Agent Prefix Cache命中率</div>
+        </div>
+        <div class="metric-card">
+            <div class="value">3-10x</div>
+            <div class="label">首Token延迟降低</div>
+        </div>
+        <div class="metric-card">
+            <div class="value">50-80%</div>
+            <div class="label">GPU计算节省</div>
+        </div>
+        <div class="metric-card">
+            <div class="value">5-10K</div>
+            <div class="label">典型固定前缀(tokens)</div>
+        </div>
+    </div>
+
+    <p>Agent场景中，system prompt和tool definitions构成了一个<strong>大而稳定的前缀</strong>。这个前缀的特点是：</p>
+    <ul>
+        <li><strong>长度大：</strong>system prompt (3-5K) + tool definitions (2-5K) = 5-10K tokens</li>
+        <li><strong>完全相同：</strong>同一个Agent的每次请求，前缀内容完全一致</li>
+        <li><strong>频率高：</strong>Agent每轮工具调用都会产生新请求，全部携带相同前缀</li>
+        <li><strong>命中率极高：</strong>在vLLM的automatic prefix caching下，命中率通常>95%</li>
+    </ul>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 1000 350" xmlns="http://www.w3.org/2000/svg">
+            <text x="500" y="25" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="700">Prefix Caching 在Agent请求中的命中机制</text>
+
+            <!-- Request 1 -->
+            <text x="30" y="65" fill="#58a6ff" font-size="12" font-weight="600">请求1:</text>
+            <rect x="90" y="50" width="180" height="30" rx="5" fill="#58a6ff" opacity="0.8"/>
+            <text x="180" y="70" text-anchor="middle" fill="#fff" font-size="11">System + Tools (5K)</text>
+            <rect x="275" y="50" width="100" height="30" rx="5" fill="#d29922" opacity="0.8"/>
+            <text x="325" y="70" text-anchor="middle" fill="#fff" font-size="11">User Msg</text>
+            <rect x="380" y="50" width="200" height="30" rx="5" fill="#3fb950" opacity="0.8"/>
+            <text x="480" y="70" text-anchor="middle" fill="#fff" font-size="11">Assistant Response</text>
+            <rect x="585" y="50" width="160" height="30" rx="5" fill="#f85149" opacity="0.6"/>
+            <text x="665" y="70" text-anchor="middle" fill="#fff" font-size="11">Tool Result</text>
+
+            <!-- Cache indicator -->
+            <text x="800" y="70" fill="#58a6ff" font-size="11">💾 存入Cache</text>
+            <line x1="750" y1="65" x2="795" y2="65" stroke="#58a6ff" stroke-width="1.5" stroke-dasharray="4"/>
+
+            <!-- Request 2 -->
+            <text x="30" y="115" fill="#58a6ff" font-size="12" font-weight="600">请求2:</text>
+            <rect x="90" y="100" width="180" height="30" rx="5" fill="#58a6ff" opacity="0.3" stroke="#58a6ff" stroke-width="2" stroke-dasharray="6"/>
+            <text x="180" y="120" text-anchor="middle" fill="#58a6ff" font-size="11">⚡ Cache Hit!</text>
+            <rect x="275" y="100" width="80" height="30" rx="5" fill="#6e7681" opacity="0.5"/>
+            <text x="315" y="120" text-anchor="middle" fill="#8b949e" font-size="10">R1 History</text>
+            <rect x="360" y="100" width="100" height="30" rx="5" fill="#d29922" opacity="0.8"/>
+            <text x="410" y="120" text-anchor="middle" fill="#fff" font-size="11">User Msg 2</text>
+            <rect x="465" y="100" width="200" height="30" rx="5" fill="#3fb950" opacity="0.8"/>
+            <text x="565" y="120" text-anchor="middle" fill="#fff" font-size="11">Assistant Response 2</text>
+
+            <text x="800" y="120" fill="#3fb950" font-size="11">✅ 节省 ~5K tokens prefill</text>
+
+            <!-- Request 3 (tool call) -->
+            <text x="30" y="165" fill="#58a6ff" font-size="12" font-weight="600">请求3:</text>
+            <rect x="90" y="150" width="180" height="30" rx="5" fill="#58a6ff" opacity="0.3" stroke="#58a6ff" stroke-width="2" stroke-dasharray="6"/>
+            <text x="180" y="170" text-anchor="middle" fill="#58a6ff" font-size="11">⚡ Cache Hit!</text>
+            <rect x="275" y="150" width="240" height="30" rx="5" fill="#6e7681" opacity="0.5"/>
+            <text x="395" y="170" text-anchor="middle" fill="#8b949e" font-size="10">R1+R2 History (Cache Hit)</text>
+            <rect x="520" y="150" width="160" height="30" rx="5" fill="#f85149" opacity="0.6"/>
+            <text x="600" y="170" text-anchor="middle" fill="#fff" font-size="11">Tool Result 2 (新)</text>
+
+            <text x="800" y="170" fill="#3fb950" font-size="11">✅ 节省 ~12K tokens</text>
+
+            <!-- Cumulative savings graph -->
+            <text x="500" y="215" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">累积Prefill节省量</text>
+
+            <line x1="100" y1="330" x2="900" y2="330" stroke="#30363d" stroke-width="1"/>
+            <line x1="100" y1="230" x2="100" y2="330" stroke="#30363d" stroke-width="1"/>
+
+            <!-- Y axis labels -->
+            <text x="90" y="235" text-anchor="end" fill="#6e7681" font-size="10">50K</text>
+            <text x="90" y="285" text-anchor="end" fill="#6e7681" font-size="10">25K</text>
+            <text x="90" y="335" text-anchor="end" fill="#6e7681" font-size="10">0</text>
+
+            <!-- Bars -->
+            <rect x="140" y="310" width="50" height="20" rx="3" fill="#58a6ff" opacity="0.6"/>
+            <text x="165" y="305" text-anchor="middle" fill="#58a6ff" font-size="10">5K</text>
+
+            <rect x="240" y="290" width="50" height="40" rx="3" fill="#58a6ff" opacity="0.7"/>
+            <text x="265" y="285" text-anchor="middle" fill="#58a6ff" font-size="10">12K</text>
+
+            <rect x="340" y="270" width="50" height="60" rx="3" fill="#58a6ff" opacity="0.8"/>
+            <text x="365" y="265" text-anchor="middle" fill="#58a6ff" font-size="10">20K</text>
+
+            <rect x="440" y="250" width="50" height="80" rx="3" fill="#3fb950" opacity="0.8"/>
+            <text x="465" y="245" text-anchor="middle" fill="#3fb950" font-size="10">30K</text>
+
+            <rect x="540" y="240" width="50" height="90" rx="3" fill="#3fb950" opacity="0.85"/>
+            <text x="565" y="235" text-anchor="middle" fill="#3fb950" font-size="10">38K</text>
+
+            <rect x="640" y="235" width="50" height="95" rx="3" fill="#3fb950" opacity="0.9"/>
+            <text x="665" y="230" text-anchor="middle" fill="#3fb950" font-size="10">42K</text>
+
+            <!-- X axis labels -->
+            <text x="165" y="345" text-anchor="middle" fill="#6e7681" font-size="10">R1</text>
+            <text x="265" y="345" text-anchor="middle" fill="#6e7681" font-size="10">R2</text>
+            <text x="365" y="345" text-anchor="middle" fill="#6e7681" font-size="10">R3</text>
+            <text x="465" y="345" text-anchor="middle" fill="#6e7681" font-size="10">R5</text>
+            <text x="565" y="345" text-anchor="middle" fill="#6e7681" font-size="10">R10</text>
+            <text x="665" y="345" text-anchor="middle" fill="#6e7681" font-size="10">R20</text>
+            <text x="500" y="355" text-anchor="middle" fill="#6e7681" font-size="11">请求轮次</text>
+        </svg>
+        <div class="diagram-caption">图11-2: Prefix Caching在Agent多轮请求中的命中与累积节省</div>
+    </div>
+
+    <h3>2.2 vLLM Automatic Prefix Caching配置</h3>
+
+    <div class="code-block">
+<span class="comment"># vLLM 启用 automatic prefix caching for Agent</span>
+<span class="keyword">from</span> vllm <span class="keyword">import</span> LLM, SamplingParams
+
+<span class="comment"># 关键配置: enable_prefix_caching=True</span>
+llm = LLM(
+    model=<span class="string">"meta-llama/Llama-3.1-70B-Instruct"</span>,
+    enable_prefix_caching=<span class="keyword">True</span>,   <span class="comment"># 启用前缀缓存</span>
+    max_model_len=<span class="number">32768</span>,           <span class="comment"># 最大上下文长度</span>
+    gpu_memory_utilization=<span class="number">0.90</span>,   <span class="comment"># GPU显存利用率</span>
+    block_size=<span class="number">16</span>,                 <span class="comment"># KV Cache块大小</span>
+    max_num_seqs=<span class="number">64</span>,               <span class="comment"># 最大并发序列数</span>
+)
+
+<span class="comment"># Agent的system prompt (固定前缀)</span>
+system_prompt = <span class="string">"""You are a helpful AI assistant with access to the following tools:
+[... 大量工具定义 ...]"""</span>
+
+<span class="comment"># 每次Agent请求都携带相同的system prompt</span>
+<span class="comment"># vLLM会自动检测并复用前缀的KV Cache</span>
+<span class="keyword">for</span> agent_request <span class="keyword">in</span> agent_requests:
+    messages = [
+        {<span class="string">"role"</span>: <span class="string">"system"</span>, <span class="string">"content"</span>: system_prompt},  <span class="comment"># 固定前缀</span>
+        *history_messages,                               <span class="comment"># 历史消息</span>
+        {<span class="string">"role"</span>: <span class="string">"user"</span>, <span class="string">"content"</span>: new_user_msg},      <span class="comment"># 新输入</span>
+    ]
+    output = llm.generate(messages, sampling_params)
+    </div>
+
+    <div class="callout callout-success">
+        <span class="callout-icon">💡</span>
+        <div>
+            <p><strong>实战经验：</strong>vLLM的automatic prefix caching基于token级别的hash匹配。只要两个请求的前N个token完全相同，就能命中缓存。对于Agent场景，system prompt + tool definitions通常在前5-10K tokens完全一致，命中率极高。建议将不变的内容（system prompt + tools）放在消息列表的最前面。</p>
+        </div>
+    </div>
+
+    <h3>2.3 Prefix Caching的延迟收益</h3>
+
+    <div class="table-wrapper">
+        <table>
+            <tr>
+                <th>场景</th>
+                <th>前缀长度</th>
+                <th>无Cache TTFT</th>
+                <th>有Cache TTFT</th>
+                <th>降低比例</th>
+            </tr>
+            <tr>
+                <td>轻量Agent (GPT-4级别)</td>
+                <td>3K tokens</td>
+                <td>450ms</td>
+                <td>50ms</td>
+                <td><strong style="color:#3fb950">89%</strong></td>
+            </tr>
+            <tr>
+                <td>标准Agent (含5个工具)</td>
+                <td>8K tokens</td>
+                <td>1200ms</td>
+                <td>80ms</td>
+                <td><strong style="color:#3fb950">93%</strong></td>
+            </tr>
+            <tr>
+                <td>复杂Agent (含20+工具)</td>
+                <td>15K tokens</td>
+                <td>2400ms</td>
+                <td>100ms</td>
+                <td><strong style="color:#3fb950">96%</strong></td>
+            </tr>
+            <tr>
+                <td>Multi-Agent (共享前缀)</td>
+                <td>10K tokens</td>
+                <td>1600ms</td>
+                <td>60ms</td>
+                <td><strong style="color:#3fb950">96%</strong></td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+<!-- ==================== SECTION 3 ==================== -->
+<div class="section" id="sec3">
+    <h2><span class="sec-icon" style="background:rgba(188,140,255,0.15)">🔄</span> 3. Multi-Turn对话的KV Cache管理</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>管理多轮对话的KV Cache，就像管理外卖订单的历史记录。每一轮对话（订单）都依赖之前的记录（地址、口味偏好）。系统需要高效地保留这些关键信息，同时及时清理已完成订单的无用数据，防止内存（柜台）被堆满。</div>
+<div class="warn"><strong>常见误区：</strong>易犯“内存只增不减”的错误。随着对话轮次增加，KV Cache线性增长，极易耗尽显存。必须设定明确的驱逐（Eviction）或压缩（Compression）策略，而不是天真地保留所有历史Token的KV。</div>
+<div class="deep"><strong>深入探讨：</strong>典型策略有：1) **滑动窗口**：仅保留最近N轮对话的KV。2) **重要性保留**：用Attention分数或启发式规则标记重要Token，优先保留其KV。3) **压缩**：对旧KV进行量化（如INT8）或低秩分解，以空间换质量。一个20轮对话，每轮200 Token，需缓存4000 Token的KV，在128k模型上约占数十MB显存。</div>
+<div class="ascii"><pre>  Turn 1: KV_1
+  Turn 2: KV_1 + KV_2
+  Turn 3: KV_1 + KV_2 + KV_3
+  ...
+  Turn N: [!] 驱逐KV_1~K， 保留KV_K+1~N</pre></div>
+<table><tr><th>管理策略</th><th>原理</th><th>优点</th><th>缺点</th></tr><tr><td>滑动窗口</td><td>仅保留最近N个Token的KV</td><td>实现简单，延迟固定</td><td>丢失早期重要上下文</td></tr><tr><td>基于Attention的驱逐</td><td>定期驱逐Attention分数低的Token KV</td><td>保留重要上下文</td><td>计算开销大，策略复杂</td></tr><tr><td>KV压缩</td><td>对旧KV进行量化或低秩近似</td><td>在保真与显存间平衡</td><td>会引入精度损失</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>3.1 增量KV Cache复用</h3>
+    <p>在Agent的multi-turn对话中，每一轮新请求都会比上一轮多出新的user message和assistant response。理想情况下，我们希望复用所有历史轮次的KV Cache。</p>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 1000 300" xmlns="http://www.w3.org/2000/svg">
+            <text x="500" y="25" text-anchor="middle" fill="#e6edf3" font-size="15" font-weight="700">Multi-Turn KV Cache增量复用示意</text>
+
+            <!-- Timeline -->
+            <line x1="60" y1="50" x2="60" y2="280" stroke="#30363d" stroke-width="2"/>
+
+            <!-- Round 1 -->
+            <circle cx="60" cy="70" r="6" fill="#58a6ff"/>
+            <text x="80" y="75" fill="#58a6ff" font-size="12" font-weight="600">Round 1</text>
+            <rect x="180" y="55" width="120" height="28" rx="4" fill="#58a6ff" opacity="0.7"/>
+            <text x="240" y="74" text-anchor="middle" fill="#fff" font-size="10">Prefill 全部</text>
+            <text x="320" y="74" fill="#8b949e" font-size="10">S+T+U1 = 8K</text>
+            <text x="450" y="74" fill="#3fb950" font-size="10">→ Cache: [S+T+U1+A1]</text>
+
+            <!-- Round 2 -->
+            <circle cx="60" cy="110" r="6" fill="#58a6ff"/>
+            <text x="80" y="115" fill="#58a6ff" font-size="12" font-weight="600">Round 2</text>
+            <rect x="180" y="95" width="50" height="28" rx="4" fill="#58a6ff" opacity="0.3" stroke="#58a6ff" stroke-dasharray="4"/>
+            <text x="205" y="114" text-anchor="middle" fill="#58a6ff" font-size="9">Hit</text>
+            <rect x="235" y="95" width="70" height="28" rx="4" fill="#d29922" opacity="0.8"/>
+            <text x="270" y="114" text-anchor="middle" fill="#fff" font-size="10">Prefill新</text>
+            <text x="320" y="114" fill="#8b949e" font-size="10">U2+A2 = 2K</text>
+            <text x="450" y="114" fill="#3fb950" font-size="10">→ Cache: [...+U2+A2]</text>
+
+            <!-- Round 3 -->
+            <circle cx="60" cy="150" r="6" fill="#58a6ff"/>
+            <text x="80" y="155" fill="#58a6ff" font-size="12" font-weight="600">Round 3</text>
+            <rect x="180" y="135" width="60" height="28" rx="4" fill="#58a6ff" opacity="0.3" stroke="#58a6ff" stroke-dasharray="4"/>
+            <text x="210" y="154" text-anchor="middle" fill="#58a6ff" font-size="9">Hit</text>
+            <rect x="245" y="135" width="60" height="28" rx="4" fill="#d29922" opacity="0.8"/>
+            <text x="275" y="154" text-anchor="middle" fill="#fff" font-size="10">Prefill</text>
+            <text x="320" y="154" fill="#8b949e" font-size="10">U3+A3 = 2K</text>
+            <text x="450" y="154" fill="#3fb950" font-size="10">→ Cache: [...+U3+A3]</text>
+
+            <!-- ... -->
+            <text x="80" y="195" fill="#6e7681" font-size="14">...</text>
+
+            <!-- Round N -->
+            <circle cx="60" cy="230" r="6" fill="#f85149"/>
+            <text x="80" y="235" fill="#f85149" font-size="12" font-weight="600">Round N</text>
+            <rect x="180" y="215" width="80" height="28" rx="4" fill="#f85149" opacity="0.3" stroke="#f85149" stroke-dasharray="4"/>
+            <text x="220" y="234" text-anchor="middle" fill="#f85149" font-size="9">⚠ 部分Hit</text>
+            <rect x="265" y="215" width="60" height="28" rx="4" fill="#d29922" opacity="0.8"/>
+            <text x="295" y="234" text-anchor="middle" fill="#fff" font-size="10">Prefill</text>
+            <text x="340" y="234" fill="#8b949e" font-size="10">N×R tokens</text>
+            <text x="450" y="234" fill="#f85149" font-size="10">⚠ 上下文窗口满! 需要驱逐</text>
+
+            <!-- Window limit -->
+            <line x1="170" y1="260" x2="800" y2="260" stroke="#f85149" stroke-width="1" stroke-dasharray="8"/>
+            <text x="810" y="264" fill="#f85149" font-size="11">上下文窗口限制 (如32K)</text>
+
+            <!-- KV Cache size indicator -->
+            <text x="650" y="70" fill="#8b949e" font-size="11">KV Cache: ~8K tokens</text>
+            <text x="650" y="110" fill="#8b949e" font-size="11">KV Cache: ~10K tokens</text>
+            <text x="650" y="150" fill="#8b949e" font-size="11">KV Cache: ~12K tokens</text>
+            <text x="650" y="230" fill="#f85149" font-size="11">KV Cache: ~32K tokens (满!)</text>
+        </svg>
+        <div class="diagram-caption">图11-3: Multi-Turn对话中的KV Cache增量复用与窗口限制</div>
+    </div>
+
+    <h3>3.2 上下文窗口满时的处理策略</h3>
+
+    <div class="compare-grid">
+        <div class="compare-card bad">
+            <h4>❌ 简单截断</h4>
+            <ul>
+                <li>丢弃最早的对话轮次</li>
+                <li>KV Cache整体失效，需要重新prefill</li>
+                <li>Agent可能丢失关键上下文</li>
+                <li>实现简单但代价高昂</li>
+            </ul>
+        </div>
+        <div class="compare-card good">
+            <h4>✅ Sliding Window + 保留前缀</h4>
+            <ul>
+                <li>始终保留system prompt + tools前缀</li>
+                <li>只驱逐中间的历史轮次</li>
+                <li>前缀KV Cache持续命中</li>
+                <li>需要智能选择驱逐哪些轮次</li>
+            </ul>
+        </div>
+    </div>
+
+    <h3>3.3 KV Cache驱逐策略</h3>
+    <div class="code-block">
+<span class="keyword">class</span> <span class="class">AgentKVCacheManager</span>:
+    <span class="keyword">def</span> <span class="func">__init__</span>(self, max_context_tokens=<span class="number">32768</span>, prefix_reserve=<span class="number">8192</span>):
+        self.max_context = max_context_tokens
+        self.prefix_reserve = prefix_reserve  <span class="comment"># 为system+tools预留</span>
+        self.available = max_context_tokens - prefix_reserve
+
+    <span class="keyword">def</span> <span class="func">evict_for_new_turn</span>(self, cached_turns, new_turn_tokens):
+        <span class="string">"""当需要添加新轮次但空间不足时，驱逐旧轮次"""</span>
+        <span class="comment"># 策略1: 驱逐最早的轮次 (FIFO)</span>
+        <span class="comment"># 策略2: 驱逐信息量最低的轮次 (Smart)</span>
+        <span class="comment"># 策略3: 压缩历史 (Summary)</span>
+
+        freed = <span class="number">0</span>
+        evicted = []
+        <span class="keyword">while</span> freed < new_turn_tokens <span class="keyword">and</span> cached_turns:
+            <span class="comment"># 优先驱逐工具调用的中间结果 (信息密度低)</span>
+            victim = self.<span class="func">select_victim</span>(cached_turns)
+            freed += victim.token_count
+            evicted.append(victim)
+            cached_turns.remove(victim)
+
+        <span class="keyword">return</span> evicted
+
+    <span class="keyword">def</span> <span class="func">select_victim</span>(self, turns):
+        <span class="string">"""选择最佳驱逐候选"""</span>
+        <span class="comment"># 优先级: 工具结果 > 中间assistant消息 > 早期user消息</span>
+        <span class="comment"># 保护: 最近3轮 + 所有user消息</span>
+        tool_results = [t <span class="keyword">for</span> t <span class="keyword">in</span> turns <span class="keyword">if</span> t.type == <span class="string">"tool_result"</span>]
+        <span class="keyword">if</span> tool_results:
+            <span class="keyword">return</span> tool_results[<span class="number">0</span>]  <span class="comment"># 最早的工具结果</span>
+        <span class="keyword">return</span> turns[<span class="number">0</span>]  <span class="comment"># 最早的轮次</span>
+    </div>
+</div>
+
+<!-- ==================== SECTION 4 ==================== -->
+<div class="section" id="sec4">
+    <h2><span class="sec-icon" style="background:rgba(210,153,34,0.15)">🔧</span> 4. 工具调用中的KV Cache</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>工具调用就像外卖骑手接单：订单（LLM请求）上必须清晰写明“去哪家店取什么货（工具名）”和“送到哪里（参数）”。骑手（模型）需要快速、准确地解析这些结构化信息，而不是重新回忆所有店铺和路线（重复计算）。</div>
+<div class="warn"><strong>常见误区：</strong>警惕工具描述（Tool Description）的Prompt膨胀。每个工具描述都可能长达数百Token。如果将所有可能工具的描述都塞进Prompt，会极大地挤占可用于推理的KV Cache空间，甚至超出上下文窗口。</div>
+<div class="deep"><strong>深入探讨：</strong>优化方案：1) **动态工具检索**：仅在Prompt中放入与当前查询最相关的工具描述。使用嵌入模型(Embedding)将用户查询和工具描述向量化，计算相似度，只选Top-K。这可以将工具描述部分从(10000 tokens)减少到(500 tokens)。2) **工具描述缓存**：将所有工具描述向量存入向量数据库，请求时进行快速近似最近邻(ANN)搜索。</div>
+<div class="ascii"><pre>  所有工具描述池 (向量化)
+      |
+  用户查询 (向量化)
+      |
+  [ANN检索] -> Top-K 相关工具
+      |
+  [动态Prompt] = 系统提示 + Top-K工具描述 + 用户查询</pre></div>
+<table><tr><th>方法</th><th>Prompt中工具描述量</th><th>检索延迟</th><th>Agent能力上限</th></tr><tr><td>全量嵌入</td><td>极高(全部)</td><td>无</td><td>高(但受限于窗口)</td></tr><tr><td>无动态检索</td><td>低(固定子集)</td><td>无</td><td>低</td></tr><tr><td>动态向量检索</td><td>低(Top-K)</td><td>有(毫秒级)</td><td>高(且可扩展)</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>4.1 工具定义的Token开销</h3>
+    <p>Agent系统中的工具定义（function/tool definitions）是KV Cache优化的关键部分：</p>
+
+    <div class="table-wrapper">
+        <table>
+            <tr>
+                <th>工具复杂度</th>
+                <th>Token数</th>
+                <th>示例</th>
+                <th>可缓存?</th>
+            </tr>
+            <tr>
+                <td>简单工具 (1-2个参数)</td>
+                <td>100-300</td>
+                <td>get_weather(city)</td>
+                <td>✅ 完全可缓存</td>
+            </tr>
+            <tr>
+                <td>中等工具 (5-10个参数)</td>
+                <td>300-800</td>
+                <td>search_database(query, filters...)</td>
+                <td>✅ 完全可缓存</td>
+            </tr>
+            <tr>
+                <td>复杂工具 (嵌套schema)</td>
+                <td>800-2000</td>
+                <td>create_chart(config: ChartConfig)</td>
+                <td>✅ 完全可缓存</td>
+            </tr>
+            <tr>
+                <td>工具集 (10-30个工具)</td>
+                <td>3000-8000</td>
+                <td>完整API definitions</td>
+                <td>✅ 完全可缓存</td>
+            </tr>
+            <tr>
+                <td>工具返回结果</td>
+                <td>200-5000</td>
+                <td>API response / DB rows</td>
+                <td>❌ 每次不同</td>
+            </tr>
+        </table>
+    </div>
+
+    <h3>4.2 优化：将不变内容放在前缀</h3>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 1000 220" xmlns="http://www.w3.org/2000/svg">
+            <text x="500" y="25" text-anchor="middle" fill="#e6edf3" font-size="15" font-weight="700">消息排列顺序对Prefix Cache命中的影响</text>
+
+            <!-- Good ordering -->
+            <text x="50" y="60" fill="#3fb950" font-size="13" font-weight="600">✅ 推荐顺序:</text>
+            <rect x="50" y="70" width="150" height="35" rx="5" fill="#58a6ff" opacity="0.8"/>
+            <text x="125" y="92" text-anchor="middle" fill="#fff" font-size="11">System Prompt</text>
+            <rect x="205" y="70" width="150" height="35" rx="5" fill="#bc8cff" opacity="0.8"/>
+            <text x="280" y="92" text-anchor="middle" fill="#fff" font-size="11">Tool Definitions</text>
+            <rect x="360" y="70" width="180" height="35" rx="5" fill="#3fb950" opacity="0.8"/>
+            <text x="450" y="92" text-anchor="middle" fill="#fff" font-size="11">History (可缓存)</text>
+            <rect x="545" y="70" width="130" height="35" rx="5" fill="#d29922" opacity="0.8"/>
+            <text x="610" y="92" text-anchor="middle" fill="#fff" font-size="11">New Input</text>
+            <rect x="680" y="70" width="150" height="35" rx="5" fill="#f85149" opacity="0.6"/>
+            <text x="755" y="92" text-anchor="middle" fill="#fff" font-size="11">Tool Result (新)</text>
+
+            <text x="900" y="92" fill="#3fb950" font-size="12">Prefix→</text>
+
+            <!-- Bad ordering -->
+            <text x="50" y="135" fill="#f85149" font-size="13" font-weight="600">❌ 错误顺序:</text>
+            <rect x="50" y="145" width="150" height="35" rx="5" fill="#58a6ff" opacity="0.8"/>
+            <text x="125" y="167" text-anchor="middle" fill="#fff" font-size="11">System Prompt</text>
+            <rect x="205" y="145" width="130" height="35" rx="5" fill="#d29922" opacity="0.8"/>
+            <text x="270" y="167" text-anchor="middle" fill="#fff" font-size="11">New Input</text>
+            <rect x="340" y="145" width="150" height="35" rx="5" fill="#f85149" opacity="0.6"/>
+            <text x="415" y="167" text-anchor="middle" fill="#fff" font-size="11">Tool Result (新)</text>
+            <rect x="495" y="145" width="150" height="35" rx="5" fill="#bc8cff" opacity="0.8"/>
+            <text x="570" y="167" text-anchor="middle" fill="#fff" font-size="11">Tool Definitions</text>
+            <rect x="650" y="145" width="180" height="35" rx="5" fill="#3fb950" opacity="0.8"/>
+            <text x="740" y="167" text-anchor="middle" fill="#fff" font-size="11">History</text>
+
+            <text x="900" y="167" fill="#f85149" font-size="12">断裂!</text>
+
+            <!-- Explanation -->
+            <text x="50" y="205" fill="#8b949e" font-size="12">Prefix Caching要求前缀完全相同。将变化内容插入中间会导致缓存断裂，所有后续tokens都无法命中。</text>
+        </svg>
+        <div class="diagram-caption">图11-4: 消息排列顺序对Prefix Cache命中的关键影响</div>
+    </div>
+
+    <div class="callout callout-warn">
+        <span class="callout-icon">⚠️</span>
+        <div>
+            <p><strong>关键原则：</strong>始终将不变的内容（system prompt + tool definitions）放在消息列表的最前面。有些框架会将tool result插入到assistant message之后、下一轮user message之前——这是正确的。但要避免将动态内容（如RAG检索结果）放在system prompt和tool definitions之间。</p>
+        </div>
+    </div>
+</div>
+
+<!-- ==================== SECTION 5 ==================== -->
+<div class="section" id="sec5">
+    <h2><span class="sec-icon" style="background:rgba(248,81,73,0.15)">🔥</span> 5. Multi-Agent系统的KV Cache挑战</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>多Agent系统像一场大型活动的策划团队：有总控、分项负责人、执行人员。他们都需要参考同一份基础方案（模型）和共享资料（共享KV Cache），但各自负责不同任务（独立上下文）。协调不好就会重复劳动、资源冲突或信息不一致。</div>
+<div class="warn"><strong>常见误区：</strong>最大的错误是让每个Agent完全独立地加载完整模型和缓存。这会在线性扩展Agent数量时，导致显存占用呈指数级爆炸（N个Agent ≈ N份完整KV Cache），系统很快无法承载。</div>
+<div class="deep"><strong>深入探讨：</strong>核心挑战在于**共享Prefix**与**独立后续**的平衡。例如，所有Agent共享同一套系统提示和角色定义（可缓存），但各自有不同的子任务和对话历史。设计需要支持：`[共享缓存层 + 独立缓存层]`的混合模式，以及跨Agent的KV状态传递（如当一个Agent需要向另一个Agent汇报时）。</div>
+<div class="ascii"><pre>    [共享系统提示Prefix Cache]
+          /        |         \  
+     Agent A    Agent B    Agent C
+     (独立KV)   (独立KV)   (独立KV)
+          \        |         /
+       [协调器/消息总线]</pre></div>
+<table><tr><th>挑战</th><th>单Agent系统</th><th>Multi-Agent系统</th></tr><tr><td>资源需求</td><td>线性，固定</td><td>随Agent数增长，易爆炸</td></tr><tr><td>上下文管理</td><td>单一线程历史</td><td>多个并行历史，需同步</td></tr><tr><td>状态一致性</td><td>自洽</td><td>需要解决信息共享与隔离</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>5.1 内存爆炸问题</h3>
+    <p>Multi-Agent系统是KV Cache的"最坏场景"——多个Agent同时活跃，每个都有独立的system prompt和长上下文。</p>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 1000 400" xmlns="http://www.w3.org/2000/svg">
+            <text x="500" y="25" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="700">Multi-Agent KV Cache 内存占用模型</text>
+
+            <!-- GPU Memory Bar -->
+            <rect x="80" y="50" width="840" height="60" rx="8" fill="#21262d" stroke="#30363d"/>
+            <text x="500" y="45" text-anchor="middle" fill="#8b949e" font-size="12">GPU HBM (80GB)</text>
+
+            <!-- Model weights -->
+            <rect x="85" y="55" width="140" height="50" rx="5" fill="#58a6ff" opacity="0.8"/>
+            <text x="155" y="85" text-anchor="middle" fill="#fff" font-size="11" font-weight="600">模型权重 14GB</text>
+
+            <!-- Agent KV Caches -->
+            <rect x="230" y="55" width="90" height="50" rx="5" fill="#3fb950" opacity="0.8"/>
+            <text x="275" y="75" text-anchor="middle" fill="#fff" font-size="10">Agent1</text>
+            <text x="275" y="90" text-anchor="middle" fill="#fff" font-size="9">8GB</text>
+
+            <rect x="325" y="55" width="90" height="50" rx="5" fill="#d29922" opacity="0.8"/>
+            <text x="370" y="75" text-anchor="middle" fill="#fff" font-size="10">Agent2</text>
+            <text x="370" y="90" text-anchor="middle" fill="#fff" font-size="9">12GB</text>
+
+            <rect x="420" y="55" width="90" height="50" rx="5" fill="#bc8cff" opacity="0.8"/>
+            <text x="465" y="75" text-anchor="middle" fill="#fff" font-size="10">Agent3</text>
+            <text x="465" y="90" text-anchor="middle" fill="#fff" font-size="9">6GB</text>
+
+            <rect x="515" y="55" width="90" height="50" rx="5" fill="#f778ba" opacity="0.8"/>
+            <text x="560" y="75" text-anchor="middle" fill="#fff" font-size="10">Agent4</text>
+            <text x="560" y="90" text-anchor="middle" fill="#fff" font-size="9">10GB</text>
+
+            <rect x="610" y="55" width="90" height="50" rx="5" fill="#39d2c0" opacity="0.8"/>
+            <text x="655" y="75" text-anchor="middle" fill="#fff" font-size="10">Agent5</text>
+            <text x="655" y="90" text-anchor="middle" fill="#fff" font-size="9">14GB</text>
+
+            <!-- OOM indicator -->
+            <rect x="705" y="55" width="210" height="50" rx="5" fill="#f85149" opacity="0.3" stroke="#f85149" stroke-width="2"/>
+            <text x="810" y="78" text-anchor="middle" fill="#f85149" font-size="11" font-weight="600">💥 OOM!</text>
+            <text x="810" y="93" text-anchor="middle" fill="#f85149" font-size="9">超出80GB限制</text>
+
+            <!-- Formula -->
+            <text x="500" y="145" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="600">总KV Cache = Σ(Agent_i × 上下文长度_i)</text>
+
+            <!-- Detailed breakdown -->
+            <text x="100" y="180" fill="#58a6ff" font-size="13" font-weight="600">单Agent KV Cache计算 (Llama-70B, fp16):</text>
+
+            <rect x="100" y="195" width="800" height="180" rx="8" fill="#0d1117" stroke="#30363d"/>
+            <text x="130" y="220" fill="#8b949e" font-size="12">每token KV Cache = 2(K+V) × n_layers(80) × d_head(128) × n_heads(8/GQA) × 2bytes</text>
+            <text x="130" y="240" fill="#8b949e" font-size="12">= 2 × 80 × 128 × 8 × 2 = 327,680 bytes ≈ 320KB per token</text>
+
+            <text x="130" y="270" fill="#3fb950" font-size="12" font-weight="600">单Agent (20K上下文): 20,000 × 320KB = 6.4GB</text>
+            <text x="130" y="290" fill="#d29922" font-size="12" font-weight="600">5个Agent (各20K): 5 × 6.4GB = 32GB</text>
+            <text x="130" y="310" fill="#f85149" font-size="12" font-weight="600">10个Agent (各32K): 10 × 10.24GB = 102.4GB → 超出单卡!</text>
+
+            <text x="130" y="340" fill="#bc8cff" font-size="12">模型权重(fp16): 14GB | 模型权重(4bit): 3.5GB</text>
+            <text x="130" y="360" fill="#bc8cff" font-size="12">80GB GPU: 可用KV Cache空间 = 80 - 14(权重) - 5(系统) = 61GB → 最多支撑 ~3个32K Agent</text>
+        </svg>
+        <div class="diagram-caption">图11-5: Multi-Agent系统中的KV Cache内存爆炸问题</div>
+    </div>
+
+    <h3>5.2 Multi-Agent的三大挑战</h3>
+
+    <div class="callout callout-critical">
+        <span class="callout-icon">🚨</span>
+        <div>
+            <p><strong>挑战1: 内存爆炸</strong> — N个Agent × M tokens上下文 = N×M tokens的KV Cache。5个Agent各用32K上下文就需要约32GB的KV Cache，加上模型权重轻松超出单卡容量。</p>
+        </div>
+    </div>
+    <div class="callout callout-warn">
+        <span class="callout-icon">⚡</span>
+        <div>
+            <p><strong>挑战2: 频繁请求</strong> — Multi-Agent系统中Agent间消息传递会产生大量短请求。每个Agent的每次工具调用或消息接收都是一次独立的推理请求，请求频率比单Agent高5-10倍。</p>
+        </div>
+    </div>
+    <div class="callout callout-info">
+        <span class="callout-icon">🔀</span>
+        <div>
+            <p><strong>挑战3: Cache隔离</strong> — 不同Agent的KV Cache需要隔离（不同的system prompt、不同的对话历史），但又可能共享部分前缀（如共同的base model instructions）。如何在隔离与共享间取得平衡是核心难题。</p>
+        </div>
+    </div>
+</div>
+
+<!-- ==================== SECTION 6 ==================== -->
+<div class="section" id="sec6">
+    <h2><span class="sec-icon" style="background:rgba(57,210,192,0.15)">🏗️</span> 6. Multi-Agent KV Cache优化方案</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>优化多Agent KV Cache，就像管理共享办公空间：每个团队（Agent）有独立工位（独立KV Cache），但会议室、打印机（系统提示、通用工具描述）共享使用。通过智能预约系统（调度器）和存储柜（池化缓存），最大化空间和设备利用率。</div>
+<div class="warn"><strong>常见误区：</strong>在实现KV Cache共享时，要注意“并发写入”问题。当多个Agent同时尝试生成响应并更新共享缓存时，需要加锁或采用写时复制(Copy-on-Write)机制，避免数据竞争导致缓存损坏。</div>
+<div class="deep"><strong>深入探讨：</strong>方案一：**Prefix Sharing Pool**。创建一个全局缓存池存放最常被多个Agent共用的前缀（如系统提示、角色设定）。Agent启动时，直接从池中加载此共享KV，只创建和维护自己后续对话的私有KV。这能将N个Agent的系统提示KV存储从O(N)降为O(1)。</div>
+<div class="ascii"><pre>  全局KV缓存池
+  [系统提示KV] [工具集A KV] [工具集B KV]
+        |
+   Agent 1 (加载[系统提示KV])
+   Agent 2 (加载[系统提示KV])
+   Agent 3 (加载[工具集A KV])</pre></div>
+<table><tr><th>方案</th><th>核心思想</th><th>节省效果</th><th>实现复杂度</th></tr><tr><td>前缀共享池</td><td>所有Agent共享公共前缀KV</td><td>极高(消除N倍冗余)</td><td>中(需设计缓存索引)</td></tr><tr><td>按需加载与驱逐</td><td>仅为活跃Agent保留完整KV</td><td>高(降低常驻显存)</td><td>高(需复杂状态机)</td></tr><tr><td>KV状态快照与恢复</td><td>将非活跃Agent的KV序列化到内存/磁盘</td><td>极高(理论上可无限扩展)</td><td>高(序列化/反序列化开销)</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>6.1 共享基础KV Cache + Agent特定KV Cache</h3>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 1000 380" xmlns="http://www.w3.org/2000/svg">
+            <text x="500" y="25" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="700">Multi-Agent KV Cache 分层共享架构</text>
+
+            <!-- Shared base layer -->
+            <rect x="100" y="50" width="800" height="60" rx="8" fill="#58a6ff" opacity="0.2" stroke="#58a6ff" stroke-width="2"/>
+            <text x="500" y="75" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="600">共享基础KV Cache Layer (Base Instructions + Common Tools)</text>
+            <text x="500" y="95" text-anchor="middle" fill="#58a6ff" font-size="11">所有Agent共享 · Copy-on-Write · 3-5K tokens · 只读</text>
+
+            <!-- Arrow down -->
+            <line x1="300" y1="110" x2="300" y2="130" stroke="#30363d" stroke-width="1.5"/>
+            <line x1="500" y1="110" x2="500" y2="130" stroke="#30363d" stroke-width="1.5"/>
+            <line x1="700" y1="110" x2="700" y2="130" stroke="#30363d" stroke-width="1.5"/>
+
+            <!-- Agent-specific layers -->
+            <rect x="60" y="130" width="250" height="50" rx="6" fill="#3fb950" opacity="0.2" stroke="#3fb950"/>
+            <text x="185" y="152" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="600">Agent1 特定 Cache</text>
+            <text x="185" y="170" text-anchor="middle" fill="#8b949e" font-size="10">System prompt + 专用工具 (2K)</text>
+
+            <rect x="375" y="130" width="250" height="50" rx="6" fill="#d29922" opacity="0.2" stroke="#d29922"/>
+            <text x="500" y="152" text-anchor="middle" fill="#d29922" font-size="12" font-weight="600">Agent2 特定 Cache</text>
+            <text x="500" y="170" text-anchor="middle" fill="#8b949e" font-size="10">System prompt + 专用工具 (3K)</text>
+
+            <rect x="690" y="130" width="250" height="50" rx="6" fill="#bc8cff" opacity="0.2" stroke="#bc8cff"/>
+            <text x="815" y="152" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="600">Agent3 特定 Cache</text>
+            <text x="815" y="170" text-anchor="middle" fill="#8b949e" font-size="10">System prompt + 专用工具 (2K)</text>
+
+            <!-- Arrow down -->
+            <line x1="185" y1="180" x2="185" y2="200" stroke="#30363d" stroke-width="1.5"/>
+            <line x1="500" y1="180" x2="500" y2="200" stroke="#30363d" stroke-width="1.5"/>
+            <line x1="815" y1="180" x2="815" y2="200" stroke="#30363d" stroke-width="1.5"/>
+
+            <!-- Conversation history layers -->
+            <rect x="60" y="200" width="250" height="50" rx="6" fill="#3fb950" opacity="0.1" stroke="#3fb950" stroke-dasharray="4"/>
+            <text x="185" y="222" text-anchor="middle" fill="#3fb950" font-size="12">对话历史 (动态增长)</text>
+            <text x="185" y="240" text-anchor="middle" fill="#8b949e" font-size="10">5-20K tokens · Sliding window</text>
+
+            <rect x="375" y="200" width="250" height="50" rx="6" fill="#d29922" opacity="0.1" stroke="#d29922" stroke-dasharray="4"/>
+            <text x="500" y="222" text-anchor="middle" fill="#d29922" font-size="12">对话历史 (动态增长)</text>
+            <text x="500" y="240" text-anchor="middle" fill="#8b949e" font-size="10">5-20K tokens · Sliding window</text>
+
+            <rect x="690" y="200" width="250" height="50" rx="6" fill="#bc8cff" opacity="0.1" stroke="#bc8cff" stroke-dasharray="4"/>
+            <text x="815" y="222" text-anchor="middle" fill="#bc8cff" font-size="12">对话历史 (动态增长)</text>
+            <text x="815" y="240" text-anchor="middle" fill="#8b949e" font-size="10">5-20K tokens · Sliding window</text>
+
+            <!-- Memory savings annotation -->
+            <rect x="150" y="280" width="700" height="80" rx="8" fill="rgba(63,185,80,0.08)" stroke="#3fb950"/>
+            <text x="500" y="305" text-anchor="middle" fill="#3fb950" font-size="14" font-weight="600">内存节省效果</text>
+            <text x="200" y="330" fill="#8b949e" font-size="12">无优化: 3 Agents × 5K前缀 = 15K tokens 冗余</text>
+            <text x="200" y="350" fill="#3fb950" font-size="12">优化后: 共享5K + 各自2K = 11K tokens (节省27%)</text>
+            <text x="600" y="330" fill="#8b949e" font-size="12">10 Agents无优化: 50K tokens冗余</text>
+            <text x="600" y="350" fill="#3fb950" font-size="12">10 Agents优化: 5K + 20K = 25K (节省50%)</text>
+        </svg>
+        <div class="diagram-caption">图11-6: Multi-Agent KV Cache分层共享架构</div>
+    </div>
+
+    <h3>6.2 Copy-on-Write (CoW) 机制</h3>
+    <p>Copy-on-Write是Multi-Agent KV Cache优化的核心技术。多个Agent共享同一份基础KV Cache的物理存储，只有当某个Agent需要修改（追加新tokens）时才创建独立副本。</p>
+
+    <div class="code-block">
+<span class="keyword">class</span> <span class="class">CopyOnWriteKVCache</span>:
+    <span class="string">"""Copy-on-Write KV Cache for Multi-Agent"""</span>
+
+    <span class="keyword">def</span> <span class="func">__init__</span>(self, base_kv_cache):
+        <span class="comment"># 共享的基础KV Cache (system prompt + common tools)</span>
+        self.base_cache = base_kv_cache  <span class="comment"># 只读, 引用计数</span>
+        self.base_ref_count = <span class="number">0</span>
+        <span class="comment"># 每个Agent的私有KV Cache</span>
+        self.agent_caches = {}  <span class="comment"># agent_id -> private KV blocks</span>
+
+    <span class="keyword">def</span> <span class="func">register_agent</span>(self, agent_id):
+        <span class="string">"""注册新Agent, 共享base cache"""</span>
+        self.base_ref_count += <span class="number">1</span>
+        self.agent_caches[agent_id] = {
+            <span class="string">'base_ref'</span>: self.base_cache,  <span class="comment"># 共享引用, 不复制</span>
+            <span class="string">'private_blocks'</span>: [],          <span class="comment"># Agent私有的KV blocks</span>
+            <span class="string">'agent_prefix'</span>: <span class="keyword">None</span>,          <span class="comment"># Agent特定前缀</span>
+        }
+
+    <span class="keyword">def</span> <span class="func">append_tokens</span>(self, agent_id, new_kv_blocks):
+        <span class="string">"""追加新tokens的KV Cache到Agent"""</span>
+        <span class="comment"># 只修改agent私有cache, base cache不变</span>
+        self.agent_caches[agent_id][<span class="string">'private_blocks'</span>].extend(new_kv_blocks)
+
+    <span class="keyword">def</span> <span class="func">get_full_cache</span>(self, agent_id):
+        <span class="string">"""获取Agent的完整KV Cache视图"""</span>
+        agent = self.agent_caches[agent_id]
+        <span class="comment"># 逻辑上拼接: base + agent_prefix + private</span>
+        <span class="keyword">return</span> (
+            agent[<span class="string">'base_ref'</span>],
+            agent.get(<span class="string">'agent_prefix'</span>, []),
+            agent[<span class="string">'private_blocks'</span>],
+        )
+
+    <span class="keyword">def</span> <span class="func">unregister_agent</span>(self, agent_id):
+        <span class="string">"""Agent结束, 释放资源"""</span>
+        self.base_ref_count -= <span class="number">1</span>
+        del self.agent_caches[agent_id]
+        <span class="keyword">if</span> self.base_ref_count == <span class="number">0</span>:
+            self.base_cache.free()  <span class="comment"># 无人引用时释放</span>
+    </div>
+
+    <h3>6.3 Agent轮转调度</h3>
+    <p>当GPU内存不足以同时容纳所有Agent的KV Cache时，可以采用轮转调度策略：</p>
+
+    <div class="flow-steps">
+        <div class="flow-step">🟢 Agent1 活跃</div>
+        <span class="flow-arrow">→</span>
+        <div class="flow-step">⏸️ Agent1 等待</div>
+        <span class="flow-arrow">→</span>
+        <div class="flow-step">🟢 Agent2 活跃</div>
+        <span class="flow-arrow">→</span>
+        <div class="flow-step">⏸️ Agent2 等待</div>
+        <span class="flow-arrow">→</span>
+        <div class="flow-step">🟢 Agent3 活跃</div>
+        <span class="flow-arrow">→</span>
+        <div class="flow-step">🔄 循环</div>
+    </div>
+
+    <ul>
+        <li><strong>Swap-out:</strong> 将非活跃Agent的KV Cache换出到CPU内存或磁盘</li>
+        <li><strong>Swap-in:</strong> 当Agent被激活时，将KV Cache从CPU加载回GPU</li>
+        <li><strong>预取(Prefetch):</strong> 预测下一个活跃的Agent，提前加载其KV Cache</li>
+        <li><strong>驱逐策略:</strong> LRU (最近最少使用) 或基于预测的智能驱逐</li>
+    </ul>
+</div>
+
+<!-- ==================== SECTION 7 ==================== -->
+<div class="section" id="sec7">
+    <h2><span class="sec-icon" style="background:rgba(247,120,186,0.15)">📋</span> 7. 结构化输出与KV Cache</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>让Agent输出结构化数据（如JSON），就像要求快递员用标准格式填写面单。手写潦草（自由文本）容易出错且分拣机（下游系统）难读，而标准化表格（JSON）能被机器瞬间解析。这对需要调用工具的Agent至关重要。</div>
+<div class="warn"><strong>常见误区：</strong>不要期望模型会100%遵守复杂的输出格式约束（如严格的JSON Schema）。容易出现少括号、多逗号、类型错误等问题。必须在代码中加入解析和重试机制，而不是盲目信任模型的首次输出。</div>
+<div class="deep"><strong>深入探讨：</strong>实现结构化输出的工程实践：1) **Grammar-guided decoding**：在解码时，用有限状态机(FSM)或上下文无关文法(CFG)约束输出token，保证其100%符合预定义语法（如JSON）。这需要修改推理内核。2) **Prompt工程**：在系统提示中用大量示例明确定义输出格式。3) **后期解析与修复**：先获取自由输出，再用代码尝试解析修复。方案1最可靠但工程难度高。</div>
+<div class="ascii"><pre>  自由文本: “巴黎，法国首都，人口1200万...”
+      |
+  [解析器?] -> 可能失败
+
+  结构化输出: {“city”: “Paris”, “country”: “France”, “pop”: 12000000}
+      |
+  [JSON Parser] -> 成功率100%</pre></div>
+<table><tr><th>输出类型</th><th>Prompt示例</th><th>解析难度</th><th>对下游工具友好度</th></tr><tr><td>自由文本</td><td>“请描述巴黎”</td><td>高(需NLP提取)</td><td>低</td></tr><tr><td>受限格式</td><td>“请用JSON格式描述巴黎，包含字段: city, country, population”</td><td>中(有格式错误风险)</td><td>中</td></tr><tr><td>语法引导</td><td>“请输出符合此JSON Schema的响应: {...}” (配合解码约束)</td><td>低(理论上可保证)</td><td>高</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>7.1 Function Calling的KV Cache开销</h3>
+    <p>Agent系统通常要求模型输出结构化的JSON或function call格式。这对KV Cache有独特的影响：</p>
+
+    <div class="layer-tabs">
+        <div class="layer-tab active" onclick="switchLayer(this, 'l7')">🟢 初学者</div>
+        <div class="layer-tab" onclick="switchLayer(this, 'l7')">🟡 中级</div>
+        <div class="layer-tab" onclick="switchLayer(this, 'l7')">🔴 高级</div>
+    </div>
+    <div class="layer-content layer-beginner">
+        <div class="active">
+            <p><strong>简单理解：</strong>当AI要调用工具时，它需要输出严格的JSON格式，比如 <code>{"name": "search", "arguments": {"query": "天气"}}</code>。这种格式化输出比自由文本更"费力"——模型需要在每一步都记住格式约束，这会稍微增加KV Cache的使用。</p>
+        </div>
+        <div>
+            <p><strong>Constrained Decoding的影响：</strong></p>
+            <ul>
+                <li><strong>Grammar/JSON Schema约束：</strong>在decode阶段，通过logits masking强制输出符合JSON格式。这不直接影响KV Cache大小，但影响decode效率</li>
+                <li><strong>结构化前缀tokens：</strong>每次function call输出都以 <code>{"name": "</code> 开头，这些token可以被缓存</li>
+                <li><strong>工具名缓存：</strong>如果Agent反复调用同一工具，工具名部分的KV Cache可以复用</li>
+            </ul>
+        </div>
+        <div>
+            <p><strong>Grammar-Guided Generation的KV Cache分析：</strong></p>
+            <p>使用Outlines/vLLM的guided decoding时：</p>
+            <ul>
+                <li>Grammar状态机在CPU上运行，不占用GPU KV Cache</li>
+                <li>但每个constrained token的decode仍然需要完整的attention计算（需要之前所有token的KV Cache）</li>
+                <li><strong>优化点：</strong>function call的固定前缀 <code>{"name":"tool_name","arguments":{</code> 约20-50 tokens可以被prefix cache命中</li>
+                <li><strong>Prompt格式优化：</strong>使用chat template中的function_call特殊标记，减少冗余的JSON结构tokens</li>
+            </ul>
+        </div>
+    </div>
+
+    <h3>7.2 结构化输出优化建议</h3>
+    <div class="table-wrapper">
+        <table>
+            <tr>
+                <th>优化策略</th>
+                <th>效果</th>
+                <th>实现复杂度</th>
+            </tr>
+            <tr>
+                <td>使用紧凑的JSON key名</td>
+                <td>减少5-15% output tokens</td>
+                <td>低</td>
+            </tr>
+            <tr>
+                <td>缓存function call固定前缀</td>
+                <td>减少20-50 tokens prefill</td>
+                <td>低</td>
+            </tr>
+            <tr>
+                <td>合并多个tool call为一次输出</td>
+                <td>减少请求次数</td>
+                <td>中</td>
+            </tr>
+            <tr>
+                <td>使用streaming partial JSON</td>
+                <td>降低首工具调用延迟</td>
+                <td>中</td>
+            </tr>
+            <tr>
+                <td>Grammar-guided + prefix cache</td>
+                <td>兼顾格式正确性和性能</td>
+                <td>高</td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+<!-- ==================== SECTION 8 ==================== -->
+<div class="section" id="sec8">
+    <h2><span class="sec-icon" style="background:rgba(88,166,255,0.15)">🏛️</span> 8. Agent推理服务架构设计</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>设计Agent推理服务架构，如同规划一个高效的应急指挥中心。必须有清晰的接警台（请求接入）、调度中心（路由与调度）、多个专业救援队（推理引擎池）、共享的地图和资料库（KV Cache管理器），确保信息流转快速、资源调用精准、系统稳定可靠。</div>
+<div class="warn"><strong>常见误区：</strong>避免单点瓶颈。常见的错误是将KV Cache管理、模型推理、工具执行都耦合在同一个进程内。当某个环节（如工具调用）耗时过长时，会阻塞整个推理引擎，造成资源浪费和延迟飙升。</div>
+<div class="deep"><strong>深入探讨：</strong>一个分层的架构设计：1) **接入层**：处理HTTP/WebSocket连接，认证，以及基本的请求格式校验。2) **调度层**：维护活跃Agent会话状态，管理KV Cache映射，将请求路由到合适的推理引擎实例。3) **计算层**：无状态的推理引擎集群，从调度层获取会话状态（包括KV Cache位置），执行计算后返回结果。4) **状态存储层**：如Redis，存储会话元数据；如S3/分布式缓存，存储KV Cache的序列化快照。</div>
+<div class="ascii"><pre>  Client -> [Gateway] -> [Session Manager & KV Router]
+                |               |
+          [Tool Service]    [Inference Engine Pool]
+                |               |
+         [Tool Sandbox]    [KV Cache Backend]</pre></div>
+<table><tr><th>架构模式</th><th>KV Cache位置</th><th>优点</th><th>缺点</th></tr><tr><td>单体服务</td><td>引擎本地GPU显存</td><td>实现简单，延迟最低</td><td>无法扩展，会话与引擎强绑定</td></tr><tr><td>中心化状态服务</td><td>外部分布式缓存</td><td>支持无状态引擎，易水平扩展</td><td>网络延迟高，实现复杂</td></tr><tr><td>混合模式</td><td>热数据在本地，冷数据在中心</td><td>平衡性能与扩展性</td><td>需要复杂的数据分层与调度策略</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>8.1 架构模式对比</h3>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 1000 400" xmlns="http://www.w3.org/2000/svg">
+            <text x="250" y="25" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="700">模式A: 单Agent单模型实例</text>
+            <text x="750" y="25" text-anchor="middle" fill="#e6edf3" font-size="14" font-weight="700">模式B: 多Agent共享模型实例</text>
+
+            <!-- Pattern A -->
+            <rect x="30" y="40" width="440" height="340" rx="10" fill="none" stroke="#30363d"/>
+            <!-- Agent 1 -->
+            <rect x="50" y="55" width="120" height="40" rx="6" fill="#3fb950" opacity="0.8"/>
+            <text x="110" y="80" text-anchor="middle" fill="#fff" font-size="11">Agent 1</text>
+            <rect x="50" y="100" width="120" height="50" rx="6" fill="#58a6ff" opacity="0.7"/>
+            <text x="110" y="120" text-anchor="middle" fill="#fff" font-size="10">Model</text>
+            <text x="110" y="135" text-anchor="middle" fill="#fff" font-size="9">Instance 1</text>
+            <rect x="50" y="155" width="120" height="30" rx="4" fill="#bc8cff" opacity="0.6"/>
+            <text x="110" y="175" text-anchor="middle" fill="#fff" font-size="9">KV Cache 1</text>
+
+            <!-- Agent 2 -->
+            <rect x="190" y="55" width="120" height="40" rx="6" fill="#d29922" opacity="0.8"/>
+            <text x="250" y="80" text-anchor="middle" fill="#fff" font-size="11">Agent 2</text>
+            <rect x="190" y="100" width="120" height="50" rx="6" fill="#58a6ff" opacity="0.7"/>
+            <text x="250" y="120" text-anchor="middle" fill="#fff" font-size="10">Model</text>
+            <text x="250" y="135" text-anchor="middle" fill="#fff" font-size="9">Instance 2</text>
+            <rect x="190" y="155" width="120" height="30" rx="4" fill="#bc8cff" opacity="0.6"/>
+            <text x="250" y="175" text-anchor="middle" fill="#fff" font-size="9">KV Cache 2</text>
+
+            <!-- Agent 3 -->
+            <rect x="330" y="55" width="120" height="40" rx="6" fill="#f778ba" opacity="0.8"/>
+            <text x="390" y="80" text-anchor="middle" fill="#fff" font-size="11">Agent 3</text>
+            <rect x="330" y="100" width="120" height="50" rx="6" fill="#58a6ff" opacity="0.7"/>
+            <text x="390" y="120" text-anchor="middle" fill="#fff" font-size="10">Model</text>
+            <text x="390" y="135" text-anchor="middle" fill="#fff" font-size="9">Instance 3</text>
+            <rect x="330" y="155" width="120" height="30" rx="4" fill="#bc8cff" opacity="0.6"/>
+            <text x="390" y="175" text-anchor="middle" fill="#fff" font-size="9">KV Cache 3</text>
+
+            <!-- Pros/Cons A -->
+            <text x="50" y="210" fill="#3fb950" font-size="11">✅ 完全隔离, 无干扰</text>
+            <text x="50" y="230" fill="#3fb950" font-size="11">✅ 独立扩缩容</text>
+            <text x="50" y="260" fill="#f85149" font-size="11">❌ 内存浪费 (3×模型权重)</text>
+            <text x="50" y="280" fill="#f85149" font-size="11">❌ 无法共享prefix cache</text>
+            <text x="50" y="300" fill="#f85149" font-size="11">❌ GPU利用率低</text>
+            <text x="50" y="340" fill="#8b949e" font-size="12">适用: Agent数量少, 安全隔离要求高</text>
+            <text x="50" y="360" fill="#8b949e" font-size="12">GPU需求: 3 × (模型权重 + KV Cache)</text>
+
+            <!-- Pattern B -->
+            <rect x="530" y="40" width="440" height="340" rx="10" fill="none" stroke="#30363d"/>
+            <!-- Agents -->
+            <rect x="550" y="55" width="80" height="40" rx="6" fill="#3fb950" opacity="0.8"/>
+            <text x="590" y="80" text-anchor="middle" fill="#fff" font-size="10">Agent1</text>
+            <rect x="640" y="55" width="80" height="40" rx="6" fill="#d29922" opacity="0.8"/>
+            <text x="680" y="80" text-anchor="middle" fill="#fff" font-size="10">Agent2</text>
+            <rect x="730" y="55" width="80" height="40" rx="6" fill="#f778ba" opacity="0.8"/>
+            <text x="770" y="80" text-anchor="middle" fill="#fff" font-size="10">Agent3</text>
+
+            <!-- Arrows -->
+            <line x1="590" y1="95" x2="680" y2="115" stroke="#30363d" stroke-width="1"/>
+            <line x1="680" y1="95" x2="680" y2="115" stroke="#30363d" stroke-width="1"/>
+            <line x1="770" y1="95" x2="680" y2="115" stroke="#30363d" stroke-width="1"/>
+
+            <!-- Router -->
+            <rect x="620" y="115" width="120" height="35" rx="6" fill="#39d2c0" opacity="0.7"/>
+            <text x="680" y="137" text-anchor="middle" fill="#fff" font-size="10">KV-Aware Router</text>
+
+            <!-- Shared model -->
+            <rect x="580" y="165" width="200" height="50" rx="8" fill="#58a6ff" opacity="0.8"/>
+            <text x="680" y="185" text-anchor="middle" fill="#fff" font-size="12" font-weight="600">共享模型实例</text>
+            <text x="680" y="200" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="10">vLLM / TensorRT-LLM</text>
+
+            <!-- Shared KV Cache pool -->
+            <rect x="560" y="230" width="240" height="40" rx="6" fill="#bc8cff" opacity="0.6"/>
+            <text x="680" y="255" text-anchor="middle" fill="#fff" font-size="10">共享KV Cache池 (带Agent隔离)</text>
+
+            <!-- Pros/Cons B -->
+            <text x="550" y="295" fill="#3fb950" font-size="11">✅ 模型权重只加载一次</text>
+            <text x="550" y="315" fill="#3fb950" font-size="11">✅ Prefix cache共享最大化</text>
+            <text x="550" y="335" fill="#3fb950" font-size="11">✅ GPU利用率高</text>
+            <text x="550" y="355" fill="#f85149" font-size="11">❌ 需要KV Cache管理 (CoW, 隔离)</text>
+            <text x="550" y="375" fill="#8b949e" font-size="12">适用: Agent数量多, 相同base model, 成本敏感</text>
+        </svg>
+        <div class="diagram-caption">图11-7: 两种Agent推理服务架构模式对比</div>
+    </div>
+
+    <h3>8.2 KV Cache-Aware Request Routing</h3>
+    <div class="code-block">
+<span class="keyword">class</span> <span class="class">KVCacheAwareRouter</span>:
+    <span class="string">"""根据KV Cache状态路由Agent请求"""</span>
+
+    <span class="keyword">def</span> <span class="func">route</span>(self, agent_request):
+        <span class="comment"># 1. 检查哪个worker有该Agent的KV Cache</span>
+        <span class="keyword">for</span> worker <span class="keyword">in</span> self.workers:
+            <span class="keyword">if</span> worker.has_cached_prefix(agent_request.agent_id):
+                <span class="comment"># KV Cache命中! 优先路由到此worker</span>
+                <span class="keyword">return</span> worker
+
+        <span class="comment"># 2. 无缓存命中, 选择负载最低的worker</span>
+        <span class="comment"># 但优先选择有共享prefix cache的worker</span>
+        best_worker = <span class="keyword">None</span>
+        best_score = -<span class="number">1</span>
+
+        <span class="keyword">for</span> worker <span class="keyword">in</span> self.workers:
+            score = <span class="number">0</span>
+            <span class="comment"># 有相同的system prompt前缀?</span>
+            <span class="keyword">if</span> worker.has_similar_prefix(agent_request.system_hash):
+                score += <span class="number">10</span>
+            <span class="comment"># 当前负载低?</span>
+            score += (<span class="number">1.0</span> - worker.utilization) * <span class="number">5</span>
+            <span class="comment"># 可用KV Cache空间?</span>
+            score += worker.free_kv_memory_ratio * <span class="number">3</span>
+
+            <span class="keyword">if</span> score > best_score:
+                best_score = score
+                best_worker = worker
+
+        <span class="keyword">return</span> best_worker
+
+    <span class="keyword">def</span> <span class="func">handle_session_migration</span>(self, agent_id, from_worker, to_worker):
+        <span class="string">"""会话迁移时的KV Cache处理"""</span>
+        <span class="comment"># 选项1: 传输KV Cache (大但快)</span>
+        kv_data = from_worker.export_kv_cache(agent_id)
+        to_worker.import_kv_cache(agent_id, kv_data)
+
+        <span class="comment"># 选项2: 丢弃KV Cache, 在新worker上重建 (慢但省内存)</span>
+        <span class="comment"># from_worker.evict_cache(agent_id)</span>
+        <span class="comment"># 新请求会触发prefill重建</span>
+    </div>
+
+    <h3>8.3 监控指标</h3>
+    <div class="metric-grid">
+        <div class="metric-card">
+            <div class="value">85-95%</div>
+            <div class="label">Prefix Cache命中率 (目标)</div>
+        </div>
+        <div class="metric-card">
+            <div class="value">&lt;100ms</div>
+            <div class="label">TTFT (缓存命中时)</div>
+        </div>
+        <div class="metric-card">
+            <div class="value">&lt;80%</div>
+            <div class="label">KV Cache显存使用率 (警戒线)</div>
+        </div>
+        <div class="metric-card">
+            <div class="value">&lt;5%</div>
+            <div class="label">Cache驱逐率 (目标)</div>
+        </div>
+    </div>
+</div>
+
+<!-- ==================== SECTION 9 ==================== -->
+<div class="section" id="sec9">
+    <h2><span class="sec-icon" style="background:rgba(63,185,80,0.15)">💻</span> 9. 实际案例与代码</h2>
+
+    
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>实现KV-Cache优化，好比为你的Agent建立一个「速查笔记本」。首次思考问题时，把关键的推理步骤和结论记下来。下次遇到类似问题或继续追问时，直接翻阅笔记本，避免从头开始，从而获得快速响应。</div>
+<div class="warn"><strong>常见误区：</strong>切忌在多轮对话中盲目缓存全部历史KV。这会导致内存迅速爆炸，且无用的中间态信息会干扰模型决策。应采用选择性缓存策略，如仅缓存关键实体或主线索引的KV对。</div>
+<div class="deep"><strong>深入探讨：</strong>在一个典型的客服Agent案例中，优化前，每轮响应需重新计算整个对话历史的KV，平均延迟达800ms。引入基于注意力分数阈值（如>0.1）的KV选择性缓存后，缓存命中率约70%，第二轮响应延迟降至200ms以内，内存占用峰值降低约40%。</div>
+<div class="ascii"><pre>用户查询: “订单号A123的物流状态”
+[A123, 物流] --> [KV缓存] --> 快速响应
+
+用户追问: “它昨天到哪了？”
+[检查缓存，命中A123] --> [复用KV] --> 拼接新查询 --> 快速响应</pre></div>
+<table><tr><th>优化策略</th><th>实现复杂度</th><th>适用场景</th><th>收益</th></tr><tr><td>缓存全部历史KV</td><td>低</td><td>极短对话（1-2轮）</td><td>省去计算，但内存消耗大</td></tr><tr><td>选择性缓存关键KV</td><td>中</td><td>长对话、多主题Agent</td><td>平衡延迟、内存与精度</td></tr><tr><td>基于会话/实体的KV池</td><td>高</td><td>多用户、复杂任务流</td><td>最大化复用，系统级优化</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>9.1 vLLM + Agent框架集成示例</h3>
+    <div class="code-block">
+<span class="keyword">import</span> asyncio
+<span class="keyword">from</span> vllm <span class="keyword">import</span> AsyncLLMEngine, AsyncEngineArgs, SamplingParams
+<span class="keyword">from</span> typing <span class="keyword">import</span> List, Dict
+
+<span class="keyword">class</span> <span class="class">AgentInferenceServer</span>:
+    <span class="string">"""带KV Cache优化的Agent推理服务"""</span>
+
+    <span class="keyword">def</span> <span class="func">__init__</span>(self, model_path: str):
+        engine_args = AsyncEngineArgs(
+            model=model_path,
+            enable_prefix_caching=<span class="keyword">True</span>,   <span class="comment"># 关键: 启用前缀缓存</span>
+            max_model_len=<span class="number">32768</span>,
+            gpu_memory_utilization=<span class="number">0.92</span>,
+            max_num_seqs=<span class="number">32</span>,
+            block_size=<span class="number">16</span>,
+        )
+        self.engine = AsyncLLMEngine.from_engine_args(engine_args)
+        self.agent_sessions: Dict[str, List[dict]] = {}
+
+    <span class="keyword">async def</span> <span class="func">agent_chat</span>(
+        self,
+        agent_id: str,
+        system_prompt: str,
+        tool_definitions: List[dict],
+        user_message: str,
+    ) -> str:
+        <span class="string">"""处理Agent对话请求"""</span>
+
+        <span class="comment"># 构建消息 (关键: 不变内容放前面)</span>
+        messages = [
+            {<span class="string">"role"</span>: <span class="string">"system"</span>, <span class="string">"content"</span>: system_prompt},
+            {<span class="string">"role"</span>: <span class="string">"system"</span>, <span class="string">"content"</span>: self.<span class="func">format_tools</span>(tool_definitions)},
+        ]
+
+        <span class="comment"># 添加历史消息 (已缓存的KV Cache)</span>
+        <span class="keyword">if</span> agent_id <span class="keyword">in</span> self.agent_sessions:
+            messages.extend(self.agent_sessions[agent_id])
+
+        <span class="comment"># 添加新用户消息</span>
+        messages.append({<span class="string">"role"</span>: <span class="string">"user"</span>, <span class="string">"content"</span>: user_message})
+
+        <span class="comment"># 转换为prompt (vLLM会自动匹配前缀)</span>
+        prompt = self.engine.get_tokenizer().apply_chat_template(
+            messages, tokenize=<span class="keyword">False</span>, add_generation_prompt=<span class="keyword">True</span>
+        )
+
+        <span class="comment"># 生成</span>
+        sampling = SamplingParams(
+            temperature=<span class="number">0.7</span>,
+            max_tokens=<span class="number">4096</span>,
+        )
+
+        result = <span class="keyword">await</span> self.engine.generate(prompt, sampling, request_id=agent_id)
+        response = result.outputs[<span class="number">0</span>].text
+
+        <span class="comment"># 更新session历史</span>
+        <span class="keyword">if</span> agent_id <span class="keyword">not in</span> self.agent_sessions:
+            self.agent_sessions[agent_id] = []
+        self.agent_sessions[agent_id].append(
+            {<span class="string">"role"</span>: <span class="string">"user"</span>, <span class="string">"content"</span>: user_message}
+        )
+        self.agent_sessions[agent_id].append(
+            {<span class="string">"role"</span>: <span class="string">"assistant"</span>, <span class="string">"content"</span>: response}
+        )
+
+        <span class="keyword">return</span> response
+
+    <span class="keyword">def</span> <span class="func">format_tools</span>(self, tools: List[dict]) -> str:
+        <span class="string">"""格式化工具定义为固定文本 (利于缓存)"""</span>
+        <span class="keyword">return</span> <span class="string">"Available tools:\n"</span> + <span class="string">"\n"</span>.join(
+            <span class="string">f"- {t['name']}: {t['description']}"</span> <span class="keyword">for</span> t <span class="keyword">in</span> tools
+        )
+    </div>
+
+    <h3>9.2 LangChain + vLLM集成</h3>
+    <div class="code-block">
+<span class="keyword">from</span> langchain_openai <span class="keyword">import</span> ChatOpenAI
+<span class="keyword">from</span> langchain.agents <span class="keyword">import</span> AgentExecutor, create_tool_calling_agent
+<span class="keyword">from</span> langchain_core.prompts <span class="keyword">import</span> ChatPromptTemplate, MessagesPlaceholder
+
+<span class="comment"># vLLM作为后端 (启用prefix caching)</span>
+llm = ChatOpenAI(
+    base_url=<span class="string">"http://localhost:8000/v1"</span>,
+    model=<span class="string">"meta-llama/Llama-3.1-70B-Instruct"</span>,
+    temperature=<span class="number">0.7</span>,
+)
+
+<span class="comment"># Agent prompt模板 (system prompt固定, 利于prefix caching)</span>
+prompt = ChatPromptTemplate.from_messages([
+    (<span class="string">"system"</span>, <span class="string">"""You are a helpful assistant with these tools:
+{tools_description}
+Always respond in JSON format."""</span>),
+    MessagesPlaceholder(variable_name=<span class="string">"chat_history"</span>),  <span class="comment"># 历史消息</span>
+    (<span class="string">"human"</span>, <span class="string">"{input}"</span>),
+    MessagesPlaceholder(variable_name=<span class="string">"agent_scratchpad"</span>),  <span class="comment"># 工具调用中间结果</span>
+])
+
+<span class="comment"># 创建Agent</span>
+agent = create_tool_calling_agent(llm, tools, prompt)
+executor = AgentExecutor(agent=agent, tools=tools, verbose=<span class="keyword">True</span>)
+
+<span class="comment"># 每次调用时, system prompt + tools定义始终相同</span>
+<span class="comment"># vLLM的prefix caching会自动复用这部分KV Cache</span>
+result = executor.invoke({
+    <span class="string">"input"</span>: <span class="string">"帮我分析最近的销售数据"</span>,
+    <span class="string">"tools_description"</span>: tools_desc,  <span class="comment"># 固定值</span>
+    <span class="string">"chat_history"</span>: history,           <span class="comment"># 累积增长</span>
+    <span class="string">"agent_scratchpad"</span>: scratchpad,    <span class="comment"># 每轮不同</span>
+})
+    </div>
+
+    <h3>9.3 性能对比：有无Prefix Caching</h3>
+
+    <div class="diagram-container">
+        <svg viewBox="0 0 1000 300" xmlns="http://www.w3.org/2000/svg">
+            <text x="500" y="25" text-anchor="middle" fill="#e6edf3" font-size="16" font-weight="700">Agent场景: Prefix Caching 性能对比</text>
+
+            <!-- TTFT comparison -->
+            <text x="250" y="60" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">首Token延迟 (TTFT)</text>
+
+            <!-- Without caching -->
+            <text x="120" y="90" fill="#f85149" font-size="12">无Prefix Cache:</text>
+            <rect x="120" y="100" width="250" height="25" rx="4" fill="#f85149" opacity="0.7"/>
+            <text x="245" y="117" text-anchor="middle" fill="#fff" font-size="11">1200ms (prefill 8K tokens)</text>
+
+            <!-- With caching -->
+            <text x="120" y="145" fill="#3fb950" font-size="12">有Prefix Cache:</text>
+            <rect x="120" y="155" width="40" height="25" rx="4" fill="#3fb950" opacity="0.8"/>
+            <text x="140" y="172" text-anchor="middle" fill="#fff" font-size="10">80ms</text>
+            <rect x="165" y="155" width="30" height="25" rx="4" fill="#3fb950" opacity="0.3"/>
+            <text x="180" y="172" text-anchor="middle" fill="#3fb950" font-size="8">cache</text>
+
+            <text x="400" y="170" fill="#3fb950" font-size="12" font-weight="600">→ 15x 加速</text>
+
+            <!-- Throughput comparison -->
+            <text x="750" y="60" text-anchor="middle" fill="#e6edf3" font-size="13" font-weight="600">吞吐量 (req/s)</text>
+
+            <text x="600" y="90" fill="#f85149" font-size="12">无Prefix Cache:</text>
+            <rect x="600" y="100" width="150" height="25" rx="4" fill="#f85149" opacity="0.7"/>
+            <text x="675" y="117" text-anchor="middle" fill="#fff" font-size="11">12 req/s</text>
+
+            <text x="600" y="145" fill="#3fb950" font-size="12">有Prefix Cache:</text>
+            <rect x="600" y="155" width="320" height="25" rx="4" fill="#3fb950" opacity="0.8"/>
+            <text x="760" y="172" text-anchor="middle" fill="#fff" font-size="11">45 req/s (3.75x 吞吐提升)</text>
+
+            <!-- Cost comparison -->
+            <rect x="100" y="210" width="800" height="70" rx="8" fill="rgba(63,185,80,0.08)" stroke="#3fb950"/>
+            <text x="500" y="235" text-anchor="middle" fill="#3fb950" font-size="14" font-weight="600">成本节省</text>
+            <text x="200" y="260" fill="#8b949e" font-size="12">GPU计算: 节省 50-80%</text>
+            <text x="450" y="260" fill="#8b949e" font-size="12">延迟: 降低 85-95%</text>
+            <text x="700" y="260" fill="#8b949e" font-size="12">吞吐: 提升 3-5x</text>
+        </svg>
+        <div class="diagram-caption">图11-8: Agent场景下Prefix Caching的性能提升效果</div>
+    </div>
+
+    <h3>9.4 AutoGen Multi-Agent KV Cache策略</h3>
+    <div class="code-block">
+<span class="comment"># AutoGen多Agent系统的KV Cache优化配置</span>
+<span class="keyword">from</span> autogen <span class="keyword">import</span> AssistantAgent, UserProxyAgent, GroupChat
+
+<span class="comment"># 共享的LLM配置 (指向同一个vLLM实例)</span>
+llm_config = {
+    <span class="string">"config_list"</span>: [{
+        <span class="string">"model"</span>: <span class="string">"meta-llama/Llama-3.1-70B-Instruct"</span>,
+        <span class="string">"base_url"</span>: <span class="string">"http://localhost:8000/v1"</span>,
+        <span class="string">"api_key"</span>: <span class="string">"fake"</span>,
+    }],
+    <span class="string">"cache_seed"</span>: <span class="keyword">None</span>,  <span class="comment"># 禁用LangChain层缓存, 让vLLM处理</span>
+    <span class="string">"temperature"</span>: <span class="number">0.7</span>,
+}
+
+<span class="comment"># 所有Agent共享相同的system prompt前缀 → prefix cache命中</span>
+base_system = <span class="string">"""You are part of a multi-agent team. Base instructions:
+[... 共享的基础指令, 约2K tokens ...]"""</span>
+
+<span class="comment"># 每个Agent的特定前缀附加在base之后</span>
+coder = AssistantAgent(
+    name=<span class="string">"Coder"</span>,
+    system_message=base_system + <span class="string">"\n\nYou are the coding specialist..."</span>,
+    llm_config=llm_config,
+)
+
+reviewer = AssistantAgent(
+    name=<span class="string">"Reviewer"</span>,
+    system_message=base_system + <span class="string">"\n\nYou are the code reviewer..."</span>,
+    llm_config=llm_config,
+)
+
+<span class="comment"># GroupChat中多个Agent交替发言</span>
+<span class="comment"># vLLM会自动为所有Agent复用共享的base prefix KV Cache</span>
+<span class="comment"># 每个Agent的特定前缀也会被缓存</span>
+groupchat = GroupChat(
+    agents=[coder, reviewer, user_proxy],
+    messages=[],
+    max_round=<span class="number">20</span>,
+)
+    </div>
+
+    <div class="callout callout-success">
+        <span class="callout-icon">🎯</span>
+        <div>
+            <p><strong>最佳实践总结：</strong></p>
+            <ul>
+                <li><strong>1. 启用Prefix Caching</strong> — 这是Agent场景的"免费午餐"，几乎零成本获得巨大收益</li>
+                <li><strong>2. 消息排列顺序</strong> — 将不变内容（system + tools）放在消息列表最前面</li>
+                <li><strong>3. 共享模型实例</strong> — Multi-Agent尽量共享同一vLLM实例，最大化prefix cache复用</li>
+                <li><strong>4. Copy-on-Write</strong> — 共享前缀用CoW，避免重复内存占用</li>
+                <li><strong>5. 监控驱逐率</strong> — KV Cache驱逐率过高说明内存不足，需要扩容或减小上下文</li>
+                <li><strong>6. Sliding Window</strong> — 长对话用滑动窗口+保留前缀策略，而非简单截断</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<!-- ==================== KEY TAKEAWAYS ==================== -->
+<div class="section">
+    <h2><span class="sec-icon" style="background:rgba(210,153,34,0.15)">📌</span> 核心要点回顾</h2>
+<h3>📌 核心要点回顾</h3>ss="tip"><strong>通俗类比：</strong>复习KV-Cache优化，就像整理一个高效的“记忆工具箱”。钥匙（策略）不是唯一，要根据锁（任务）来选。多轮对话用长记忆缓存，实体密集任务用精准索引，复杂工作流则用会话池。理解每把钥匙的原理，才能在实际项目中灵活运用。</div>
+<div class="warn"><strong>常见误区：</strong>最大的误区是“一招鲜，吃遍天”。例如，为追求极致响应速度，在所有场景中都盲目开启最大缓存，最终导致系统内存溢出或响应质量下降。优化必须与具体任务场景、硬件资源深度绑定，没有万能方案。</div>
+<div class="deep"><strong>深入探讨：</strong>回顾核心公式：总延迟 ≈ T_prefill + n * T_decode。KV-Cache优化主要作用于降低T_prefill（通过复用KV）和T_decode（通过减少注意力计算复杂度）。工程上，需监控两个关键指标：缓存命中率(Hit Rate)和显存带宽利用率。当命中率>60%时，系统通常能获得显著收益。</div>
+<div class="ascii"><pre>场景：多轮技术问答Agent
+1. 首轮提问：建立基础KV缓存 (CPU: 高， 延迟: 高)
+2. 追问细节：命中并复用部分KV (CPU: 低， 延迟: 中)
+3. 切换子话题：智能更新缓存 (CPU: 中， 延迟: 中)
+核心：在「计算成本」与「响应速度」间取得最优平衡。</pre></div>
+<table><tr><th>核心维度</th><th>需要关注的要点</th><th>常见陷阱</th></tr><tr><td>缓存粒度</td><td>句子级、实体级、会话级，选择与任务匹配的粒度。</td><td>粒度过粗，缓存无效；粒度过细，管理开销大。</td></tr><tr><td>失效策略</td><td>基于时间、会话结束、或内存压力的主动淘汰机制。</td><td>没有失效策略，导致缓存堆积，命中率反而下降。</td></tr><tr><td>资源权衡</td><td>显存/内存占用 vs. 响应延迟 vs. 计算成本。</td><td>只追求单一指标最优（如最低延迟），牺牲系统稳定性。</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="table-wrapper">
+        <table>
+            <tr>
+                <th>#</th>
+                <th>要点</th>
+                <th>关键行动</th>
+            </tr>
+            <tr>
+                <td>1</td>
+                <td>Agent场景是Prefix Caching的杀手级应用</td>
+                <td>确保vLLM enable_prefix_caching=True</td>
+            </tr>
+            <tr>
+                <td>2</td>
+                <td>消息顺序决定缓存命中率</td>
+                <td>不变内容(system+tools)始终放最前</td>
+            </tr>
+            <tr>
+                <td>3</td>
+                <td>Multi-Agent共享模型实例更高效</td>
+                <td>使用KV-Aware Router而非独立实例</td>
+            </tr>
+            <tr>
+                <td>4</td>
+                <td>Copy-on-Write减少重复内存</td>
+                <td>共享前缀CoW + 私有增量分开</td>
+            </tr>
+            <tr>
+                <td>5</td>
+                <td>长对话需要智能KV Cache驱逐</td>
+                <td>保留前缀 + Sliding window驱逐中间历史</td>
+            </tr>
+            <tr>
+                <td>6</td>
+                <td>监控是持续优化的基础</td>
+                <td>跟踪Cache命中率、驱逐率、TTFT</td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+<!-- ==================== FOOTER ==================== -->
+<div class="module-footer">
+    <p>模块 11 / 12 · Agent系统中的KV Cache优化</p>
+    <div class="nav-links">
+        <a href="10-KV-Cache与集合通信.html">← 模块10: 分布式KV Cache</a>
+        <a href="12-推理框架KV-Cache实现对比.html">模块12: KV Cache前沿研究 →</a>
+    </div>
+</div>
+
+</div><!-- /container -->
+
+<script>
+function switchLayer(tab, groupId) {
+    const tabs = tab.parentElement.querySelectorAll('.layer-tab');
+    const content = tab.parentElement.nextElementSibling;
+    const divs = content.querySelectorAll(':scope > div');
+    const idx = Array.from(tabs).indexOf(tab);
+    tabs.forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    divs.forEach((d, i) => d.classList.toggle('active', i === idx));
+}
+</script>
+
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+  <li>请用自己的话解释<strong>🤖 1. Agent系统的推理特征</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>⚡ 2. Prefix Caching在Agent场景的价值</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>🔄 3. Multi-Turn对话的KV Cache管理</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>🔧 4. 工具调用中的KV Cache</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>🔥 5. Multi-Agent系统的KV Cache挑战</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+🤖 1. Agent系统的推理特征的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习🤖 1. Agent系统的推理特征建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03-流水线并行 | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.deep{background:rgba(188,140,255,0.08);border-left:4px solid var(--purple)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}
+.highlight{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin:16px 0;font-size:0.92em}</style>
+</head>
+<body>
+<div class="nav"><a href="02-张量并行.html">&larr; 02-张量并行</a><span>07-分布式 / 流水线并行</span><a href="04-3D并行与框架.html">04-3D并行与框架 &rarr;</a></div>
+<div class="container">
+
+<h1>🔄 3. 流水线并行 (Pipeline Parallelism)</h1>
+
+<h2>3.1 核心思想与动机</h2>
+<p>流水线并行（Pipeline Parallelism, PP）是将模型的不同层分配到不同GPU上，数据在GPU之间依次传递的并行策略。这种并行方式的核心动机是：当模型层数太多，单张GPU无法容纳所有层时，必须将模型"竖着切"成多个阶段（stage），每个阶段放在不同的GPU上。从数学原理上分析，流水线并行将模型的L层均匀分配到P个stage，每个stage处理L/P层，通过推导可知总通信量与P成正比但每步通信量与P无关。</p>
+
+<div class="box tip"><div class="label">💡 通俗类比</div>流水线并行就像工厂的流水线——每个工位（GPU）负责一道工序（几层模型），半成品在工位之间传递。问题是：如果只有一个产品在流水线上，大部分工位都在空等。解决方案是同时放入多个产品（micro-batch），让每个工位都有活干。这就是 GPipe 的核心思想。</div>
+
+<p>与张量并行相比，流水线并行有一个关键优势：通信量小。TP 每层需要 AllReduce（通信量与 batch_size × seq_len × hidden_size 成正比），而 PP 只需要在层间传递激活值（通信量同样与 batch_size × seq_len × hidden_size 成正比，但只在相邻 stage 之间传递，而非所有 GPU 之间）。这使得 PP 非常适合跨机器的场景，因为跨机器的通信带宽远低于机器内（NVLink）。</p>
+
+<div class="ascii">流水线并行的基本结构:
+
+┌──────────────────────────────────────────────────────────┐
+│                                                          │
+│  GPU 0          GPU 1          GPU 2          GPU 3      │
+│ ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
+│ │ Layer 0-7│→│ │ Layer 8-15│→│ │Layer 16-23│→│ │Layer 24-31│  │
+│ │ (Stage 0)│  │ (Stage 1)│  │ (Stage 2)│  │ (Stage 3)│  │
+│ └──────────┘  └──────────┘  └──────────┘  └──────────┘  │
+│      ↑ P2P          ↑ P2P         ↑ P2P         ↓       │
+│  输入数据       传递激活      传递激活      输出/Loss     │
+│                                                          │
+│  通信方式: 点对点 (P2P), 只在相邻 stage 之间              │
+│  通信量: batch_size × seq_len × hidden_size × 2B / step  │
+│  跨机器友好: 通信量远小于 TP                              │
+└──────────────────────────────────────────────────────────┘</div>
+
+<h2>3.2 Pipeline 调度策略</h2>
+<p>朴素的流水线并行存在严重的 GPU 利用率问题：如果只有一个 micro-batch 在流水线上，那么任何时候只有一个 GPU 在工作，其余 GPU 都在空闲。这种空闲时间被称为"流水线气泡"（pipeline bubble）。为了减少气泡，研究者提出了多种调度策略。</p>
+
+<h3>GPipe 调度</h3>
+<p>GPipe（Google, 2019）是最直观的调度策略：将一个大 batch 分成 M 个 micro-batch，依次送入流水线。当所有 micro-batch 的前向传播完成后，再依次进行反向传播。其工作机制可以通过数学公式表达：气泡比例 = (P-1)/(P+M-1)，这个公式的推导基于流水线的时序分析，证明了当M趋向无穷时气泡比例趋近于零。</p>
+
+<div class="ascii">GPipe 调度 (P=4 stages, M=8 micro-batches):
+
+时间 →
+GPU 0: [F0][F1][F2][F3][F4][F5][F6][F7][B7][B6][B5][B4][B3][B2][B1][B0]
+GPU 1:     [F0][F1][F2][F3][F4][F5][F6][F7][B7][B6][B5][B4][B3][B2][B1][B0]
+GPU 2:         [F0][F1][F2][F3][F4][F5][F6][F7][B7][B6][B5][B4][B3][B2][B1][B0]
+GPU 3:             [F0][F1][F2][F3][F4][F5][F6][F7][B7][B6][B5][B4][B3][B2][B1][B0]
+
+气泡比例: (4-1)/(4+8-1) = 3/11 ≈ 27%
+F = 前向传播, B = 反向传播
+数字表示 micro-batch 编号
+
+问题: 所有前向完成才开始反向, 显存峰值高 (需保存所有激活值)</div>
+
+<h3>1F1B 调度</h3>
+<p>1F1B（One Forward One Backward）是 Megatron-LM 和 PipeDream 提出的优化调度策略。其核心思想是：一旦流水线被填满，每完成一个 micro-batch 的前向传播后立即进行一个 micro-batch 的反向传播。这样可以尽早释放激活值，将显存峰值从 O(M) 降低到 O(P)。</p>
+
+<div class="ascii">1F1B 调度 (P=4 stages, M=8 micro-batches):
+
+时间 →
+GPU 0: [F0][F1][F2][F3][B0][F4][B1][F5][B2][F6][B3][F7][B4][B5][B6][B7]
+GPU 1:     [F0][F1][F2][F3][B0][F4][B1][F5][B2][F6][B3][F7][B4][B5][B6][B7]
+GPU 2:         [F0][F1][F2][F3][B0][F4][B1][F5][B2][F6][B3][F7][B4][B5][B6][B7]
+GPU 3:             [F0][F1][F2][F3][B0][F4][B1][F5][B2][F6][B3][F7][B4][B5][B6][B7]
+
+气泡比例: 与 GPipe 相同 = (P-1)/(P+M-1)
+但显存峰值: O(P) 而非 O(M)  ← 关键优势!
+前向传播和反向传播交替执行, 及时释放激活值</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区</div>流水线并行的"气泡"（bubble）是不可避免的——每个 micro-batch 在进入和离开流水线时都会造成 GPU 空闲。气泡比例 ≈ (pipeline_stages - 1) / (pipeline_stages + micro_batches - 1)。因此 micro-batch 数量应该远大于 pipeline stage 数量，才能让气泡比例可接受。1F1B 调度策略可以进一步减少气泡的显存峰值。</div>
+
+<h3>Interleaved 1F1B 调度</h3>
+<p>Megatron-LM 进一步提出了 Interleaved 1F1B 调度：将每个 GPU 分配多个不连续的层组（model chunk），而非一个连续的层组。例如，4 个 GPU、2 个 model chunk 时，GPU 0 持有 Layer 0-3 和 Layer 16-19，GPU 1 持有 Layer 4-7 和 Layer 20-23，以此类推。这种方式可以将气泡比例降低到 (P-1) / (P + kM - 1)，其中 k 是 model chunk 数量。</p>
+
+<div class="box tip"><div class="label">💡 调度策略选择</div>
+选择流水线调度策略时的实用指南：<br>
+• <strong>GPipe</strong>：实现简单，适合 micro-batch 数量远大于 stage 数的场景<br>
+• <strong>1F1B</strong>：显存效率最高，适合显存紧张的场景<br>
+• <strong>Interleaved 1F1B</strong>：气泡最少，但实现复杂，适合超多 stage 的场景<br>
+• <strong>Virtual Pipeline</strong>：Interleaved 的另一种称呼，Megatron-LM 中使用此术语
+</div>
+
+<h2>3.3 气泡比例的数学分析</h2>
+<p>流水线气泡是衡量流水线效率的关键指标。以下是各种调度策略的气泡比例公式推导：</p>
+
+<div class="formula">
+GPipe / 1F1B 气泡比例 = (P - 1) / (P + M - 1)
+<br>
+Interleaved 1F1B 气泡比例 = (P - 1) / (P + kM - 1)
+<br>
+其中: P = 流水线阶段数, M = micro-batch 数, k = model chunk 数
+</div>
+
+<p>以 P=16, M=64 为例：GPipe 气泡比例 = 15/79 ≈ 19%；Interleaved (k=4) 气泡比例 = 15/(16+256-1) ≈ 5.7%。可以看到，增加 model chunk 数量可以显著减少气泡，但代价是更多的 P2P 通信和更复杂的调度逻辑。</p>
+
+<table>
+<tr><th>调度策略</th><th>气泡比例</th><th>显存峰值</th><th>实现复杂度</th><th>代表框架</th></tr>
+<tr><td>GPipe</td><td>(P-1)/(P+M-1)</td><td>O(M × 层大小)</td><td>低</td><td>GPipe (Google)</td></tr>
+<tr><td>1F1B</td><td>(P-1)/(P+M-1)</td><td>O(P × 层大小)</td><td>中</td><td>Megatron-LM</td></tr>
+<tr><td>Interleaved 1F1B</td><td>(P-1)/(P+kM-1)</td><td>O(kP × 层大小)</td><td>高</td><td>Megatron-LM</td></tr>
+<tr><td>Zero Bubble</td><td>~0%</td><td>O(P × 层大小)</td><td>极高</td><td>研究阶段</td></tr>
+</table>
+
+<div class="box deep"><div class="label">🔬 深入探讨</div>
+<h3>Zero Bubble Pipeline Parallelism</h3>
+<p>2024 年的研究提出了 Zero Bubble Pipeline Parallelism，目标是将气泡比例降至接近 0%。其核心思想是将反向传播拆分为两个独立的操作：B（计算输入梯度 dX）和 W（计算权重梯度 dW）。传统方法中 B 和 W 是绑定在一起的，但 Zero Bubble 方法发现可以将 W 延迟执行——只要在参数更新之前完成即可。</p>
+<p>通过精心调度 F、B、W 三种操作的执行顺序，Zero Bubble 方法可以将气泡填充到几乎为零。实验表明，在 8 个 stage、16 个 micro-batch 的配置下，Zero Bubble 方法的气泡比例从 1F1B 的 30% 降低到不到 2%。但代价是实现复杂度极高，需要修改反向传播的底层逻辑，目前尚未在主流框架中广泛使用。</p>
+<p>Zero Bubble 方法的数学证明依赖于一个关键观察：在 1F1B 调度中，气泡主要产生在流水线的启动和排空阶段。如果将 W 操作从 B 中分离出来，W 可以在气泡期间执行，从而"填充"气泡。总操作数为 P × M × 3（F、B、W 各 P × M 次），而时间槽总数为 P × M × 3 - (P-1) × M × 2 ≈ P × M × 3，因此气泡比例趋近于 0。</p>
+</div>
+
+<h2>3.4 通信与显存分析</h2>
+<p>流水线并行的通信模式与张量并行完全不同。PP 只需要在相邻 stage 之间传递激活值（前向）和梯度（反向），通信量与 batch_size × seq_len × hidden_size 成正比，但与模型层数无关。</p>
+
+<div class="box warn"><div class="label">⚠️ 通信注意事项</div>流水线并行的 P2P 通信虽然量小，但延迟敏感。每个 micro-batch 在进入下一个 stage 之前必须等待当前 stage 的计算完成。如果 stage 之间的网络延迟高（如跨数据中心），流水线效率会急剧下降。此外，P2P 通信的启动开销（kernel launch + 网络握手）对小消息的影响很大——当 hidden_size 较小或 batch_size 较小时，通信开销可能超过计算时间。</div>
+
+<table>
+<tr><th>特性</th><th>张量并行 (TP)</th><th>流水线并行 (PP)</th></tr>
+<tr><td>切分方式</td><td>切分矩阵（列/行）</td><td>切分层（stage）</td></tr>
+<tr><td>通信频率</td><td>每层 2 次 AllReduce</td><td>每 micro-batch 每 stage 边界 1 次 P2P</td></tr>
+<tr><td>通信量</td><td>大（激活值 × 层数 × 2）</td><td>小（仅层间输出 × micro-batch 数）</td></tr>
+<tr><td>通信模式</td><td>AllReduce（集体通信）</td><td>P2P Send/Recv（点对点）</td></tr>
+<tr><td>适合互联</td><td>NVLink（600+ GB/s）</td><td>InfiniBand（50 GB/s）或跨机器</td></tr>
+<tr><td>GPU 拓扑要求</td><td>全连接（任何两卡间高带宽）</td><td>线性（只需相邻卡间通信）</td></tr>
+<tr><td>显存效率</td><td>参数分摊，激活共享</td><td>参数分摊，激活独立</td></tr>
+<tr><td>计算效率</td><td>高（无气泡）</td><td>中（有气泡）</td></tr>
+</table>
+
+<h3>PP 的显存优化</h3>
+<p>流水线并行的显存优化主要集中在两个方面：(1) 减少流水线气泡导致的显存浪费；(2) 优化激活值的存储策略。</p>
+
+<p><strong>激活值存储策略</strong>：在 GPipe 中，所有 micro-batch 的激活值需要在前向传播完成后才能开始反向传播，显存峰值为 O(M × 激活大小)。1F1B 通过交替执行前向和反向，将显存峰值降低到 O(P × 激活大小)。Activation Checkpointing 可以进一步将激活值存储降低到 O(P)（只保存每个 stage 的输入激活值）。</p>
+
+<p><strong>虚拟流水线（Virtual Pipeline）</strong>：将每个 GPU 分配多个不连续的层组后，每个 GPU 只需同时保存较少的激活值（因为不同 micro-batch 的不同层组交替执行），但通信次数增加。</p>
+
+<h2>3.5 流水线并行的实现</h2>
+<p>主流框架对流水线并行的支持如下：</p>
+
+<pre><code><span class="comment"># Megatron-LM 流水线并行配置示例</span>
+<span class="comment"># 启动命令 (4 个 stage, 每 stage 1 个 GPU)</span>
+<span class="comment"># torchrun --nproc_per_node=4 pretrain_gpt.py \</span>
+<span class="comment">#   --tensor-model-parallel-size 1 \</span>
+<span class="comment">#   --pipeline-model-parallel-size 4 \</span>
+<span class="comment">#   --num-layers 32 \</span>
+<span class="comment">#   --micro-batch-size 1 \</span>
+<span class="comment">#   --global-batch-size 64 \</span>
+<span class="comment">#   --pipeline-model-parallel-split-point 16</span>
+
+<span class="comment"># DeepSpeed 流水线并行配置 (ds_config.json)</span>
+{
+    <span class="string">"train_batch_size"</span>: 64,
+    <span class="string">"train_micro_batch_size_per_gpu"</span>: 1,
+    <span class="string">"steps_per_print"</span>: 100,
+    <span class="string">"wall_clock_breakdown"</span>: true,
+    <span class="comment">// Pipeline 配置在 Python 代码中通过 PipelineModule 设置</span>
+    <span class="comment">// num_stages=4, schedule="1F1B"</span>
+}</code></pre>
+
+<div class="box tip"><div class="label">💡 实践建议</div>
+使用流水线并行时的关键实践建议：<br>
+1. <strong>stage 数量</strong>：通常设为单机 GPU 数量（4 或 8），跨机器的 stage 通过网络连接<br>
+2. <strong>micro-batch 数量</strong>：至少为 stage 数量的 4-8 倍，以保持气泡比例 < 20%<br>
+3. <strong>层分配</strong>：尽量让每个 stage 的计算量均匀（不均匀会导致木桶效应）<br>
+4. <strong>通信优化</strong>：使用 --overlap-p2p-communication 开启通信-计算重叠<br>
+5. <strong>与 TP 结合</strong>：单机内用 TP=8，跨机器用 PP，这是最常见的 3D 并行配置
+</div>
+
+<h3>P2P 通信的实现细节</h3>
+<p>流水线并行的 P2P 通信使用 NCCL 的 Send/Recv 操作。在 Megatron-LM 中，P2P 通信有两种模式：</p>
+
+<ul>
+<li><strong>ISend/IRecv（异步）</strong>：发送和接收操作立即返回，通过 Wait 操作等待完成。允许通信与计算重叠。</li>
+<li><strong>Send/Recv（同步）</strong>：发送和接收操作阻塞直到完成。实现简单但无法重叠。</li>
+</ul>
+
+<p>Megatron-LM 默认使用异步 P2P，并通过 <code>--overlap-p2p-communication</code> 开启通信-计算重叠。在 1F1B 调度的稳定阶段，当前 micro-batch 的计算可以与下一个 micro-batch 的 P2P 通信同时进行，从而进一步减少气泡。</p>
+
+<div class="box deep"><div class="label">🔬 深入探讨</div>
+<h3>流水线并行与张量并行的通信对比</h3>
+<p>从通信模式的角度，PP 和 TP 是互补的：</p>
+<p><strong>TP 的通信特征</strong>：每次 AllReduce 的通信量 = 2 × (N-1)/N × batch_size × seq_len × hidden_size × sizeof(dtype)。对于 32 层的模型，前向传播需要 32 × 2 = 64 次 AllReduce，反向传播同样 64 次，总计 128 次 AllReduce。通信量大但可以利用 NVLink 的高带宽。</p>
+<p><strong>PP 的通信特征</strong>：每个 micro-batch 在每个 stage 边界只需要一次 P2P Send + 一次 P2P Recv。对于 M 个 micro-batch、P 个 stage，前向传播需要 M × (P-1) 次 P2P 通信，反向传播同样 M × (P-1) 次。通信量小但延迟敏感。</p>
+<p><strong>在 3D 并行中的分工</strong>：TP 放在 NVLink 互联的单机内（通信量大但带宽高），PP 跨机器（通信量小但带宽低），DP 也跨机器但通信可以与计算重叠。这种分工充分利用了不同层级网络的特性。</p>
+</div>
+
+<div class="box exercise"><div class="label">🎯 练习</div>
+<strong>练习 1</strong>：使用 DeepSpeed Pipeline 在 4 张 GPU 上训练一个 32 层 Transformer，对比 GPipe 和 1F1B 的显存占用。<br>
+<strong>练习 2</strong>：计算 P=8, M=32 时的气泡比例，以及使用 Interleaved (k=4) 后的气泡比例。<br>
+<strong>练习 3</strong>：实现一个简单的 2-stage 流水线，手动管理 P2P Send/Recv。
+<pre><code><span class="comment"># 练习参考: 手动 2-stage 流水线</span>
+<span class="keyword">import</span> torch
+<span class="keyword">import</span> torch.distributed <span class="keyword">as</span> dist
+
+<span class="keyword">def</span> <span class="string">pipeline_forward</span>(model_chunk, x, stage, world_size):
+    <span class="keyword">if</span> stage > 0:
+        <span class="comment"># 接收上一个 stage 的输出</span>
+        recv_buf = torch.empty_like(x)
+        dist.recv(recv_buf, src=stage - 1)
+        x = recv_buf
+    
+    <span class="comment"># 计算当前 stage 的层</span>
+    x = model_chunk(x)
+    
+    <span class="keyword">if</span> stage < world_size - 1:
+        <span class="comment"># 发送给下一个 stage</span>
+        dist.send(x, dst=stage + 1)
+    
+    <span class="keyword">return</span> x
+
+<span class="comment"># 运行: torchrun --nproc_per_node=2 pipeline_demo.py</span></code></pre>
+</div>
+
+<h2>学习路径建议</h2>
+<p>流水线并行是跨机器训练大模型的关键技术。建议继续学习：</p>
+<ul>
+<li><strong>下一步</strong>：学习<a href="04-3D并行与框架.html">3D 并行与训练框架</a>，了解如何将 TP、PP、DP 组合使用</li>
+<li><strong>对比学习</strong>：回顾<a href="02-张量并行.html">张量并行</a>，理解 TP 和 PP 的互补关系</li>
+<li><strong>论文阅读</strong>：GPipe (Huang et al., 2019)、PipeDream (Narayanan et al., 2019)、Megatron-LM (Narayanan et al., 2021)</li>
+</ul>
+
+<div class="next-prev"><a href="02-张量并行.html">&larr; 02-TP</a><a href="04-3D并行与框架.html">04-3D并行 →</a></div>
+
+<h2>3.6 流水线并行的实际性能数据</h2>
+<p>以下是不同模型和配置下流水线并行的实际训练性能数据，帮助理解 PP 在不同场景下的表现和气泡的实际影响。</p>
+
+<table>
+<tr><th>配置</th><th>Stage 数</th><th>Micro-batch</th><th>气泡比例</th><th>GPU 利用率</th><th>显存峰值</th><th>备注</th></tr>
+<tr><td>PP=2, M=32</td><td>2</td><td>32</td><td>3.1%</td><td>~93%</td><td>低</td><td>最小气泡</td></tr>
+<tr><td>PP=4, M=32</td><td>4</td><td>32</td><td>9.4%</td><td>~85%</td><td>中</td><td>常用配置</td></tr>
+<tr><td>PP=8, M=32</td><td>8</td><td>32</td><td>19.5%</td><td>~75%</td><td>中</td><td>气泡较大</td></tr>
+<tr><td>PP=8, M=64</td><td>8</td><td>64</td><td>11.0%</td><td>~85%</td><td>高</td><td>增加 M 减少气泡</td></tr>
+<tr><td>PP=16, M=64</td><td>16</td><td>64</td><td>19.7%</td><td>~75%</td><td>高</td><td>超大模型</td></tr>
+<tr><td>PP=16, M=128</td><td>16</td><td>128</td><td>11.0%</td><td>~85%</td><td>很高</td><td>LLaMA-3 405B 类</td></tr>
+<tr><td>PP=16(k=4), M=32</td><td>16</td><td>32</td><td>6.1%</td><td>~90%</td><td>中</td><td>Interleaved 1F1B</td></tr>
+</table>
+
+<p>从数据可以看出几个重要规律：(1) 气泡比例与 P/M 比值正相关——保持 M >> P 是减少气泡的关键；(2) Interleaved 1F1B 可以将气泡降低 2-3 倍，但实现复杂度高；(3) 当 PP=16 时，即使 M=64 气泡仍接近 20%，需要 M=128 才能降到 10% 左右；(4) 显存峰值与调度策略密切相关——1F1B 的 O(P) 远优于 GPipe 的 O(M)。</p>
+
+<p>实际训练中的另一个重要考量是流水线的负载均衡。如果各 stage 的计算时间不一致（例如某些层有 MoE 而其他层没有），最慢的 stage 会成为瓶颈。解决方法包括：(1) 手动调整每 stage 的层数，使计算量尽量均衡；(2) 使用动态调度策略，在运行时调整 micro-batch 的分配；(3) 对于 MoE 模型，将 MoE 层和 Dense 层交替放置，使每个 stage 的平均计算量相近。</p>
+
+</div>
+<div class="footer"><p>LLM 系统学习 · 03-流水线并行</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="tip"><strong>相关章节：</strong>
+核心思想与动机与以下内容密切相关：<a href="01-数据并行与FSDP.html">01-数据并行与FSDP</a> | <a href="02-张量并行.html">02-张量并行</a> | <a href="04-3D并行与框架.html">04-3D并行与框架</a>。建议结合学习。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+建议先在4张GPU上实现朴素的GPipe流水线并行，测量不同micro-batch数量下的GPU利用率。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+从流水线并行的<strong>核心原理</strong>出发，将模型按层划分到不同GPU上，形成流水线式的前向-反向计算。<strong>为什么</strong>朴素流水线并行效率低？<strong>推导</strong>：若模型有L层分到N个GPU，每个GPU处理L/N层。朴素方式下同一时刻只有一张GPU在计算，GPU利用率仅为1/N。GPipe通过micro-batch将数据切分为M份，使流水线上同时有M个micro-batch在不同阶段运行。<strong>数学本质</strong>上，流水线气泡比为(N-1)/(M+N-1)，当M≫N时气泡可忽略不计。
+</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释核心思想与动机的核心原理，并举一个实际应用场景。</li>
+<li>核心思想与动机在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比核心思想与动机与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+核心思想与动机的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<pre><code class="language-python"># 核心思想与动机 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="deep"><strong>深入探讨：</strong>
+从流水线并行的<strong>核心原理</strong>出发，将模型按层划分到不同GPU上，形成流水线式的前向-反向计算。<strong>为什么</strong>朴素流水线并行效率低？<strong>推导</strong>：若模型有L层分到N个GPU，每个GPU处理L/N层。朴素方式下同一时刻只有一张GPU在计算，GPU利用率仅为1/N。GPipe通过micro-batch将数据切分为M份，使流水线上同时有M个micro-batch在不同阶段运行。<strong>数学本质</strong>上，流水线气泡比为(N-1)/(M+N-1)，当M≫N时气泡可忽略不计。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习流水线并行时，很多人只看时序图不实际计算气泡比。建议根据模型层数和micro-batch数计算理论气泡比，并与实际训练的GPU利用率对比验证。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为流水线并行就是简单地把模型切分到不同GPU上。切分点选择、micro-batch大小、调度策略（1F1B vs Interleaved）等都影响效率。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+核心思想与动机与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

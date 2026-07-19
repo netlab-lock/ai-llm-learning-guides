@@ -1,0 +1,1429 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM 深度技术指南 | LLM 推理框架</title><style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff; --green: #3fb950; --orange: #d29922; --red: #f85149; --purple: #bc8cff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+  .container { max-width: 950px; margin: 0 auto; padding: 2rem 1.5rem; }
+  .breadcrumb { font-size: 0.85rem; color: var(--text-dim); margin-bottom: 1.5rem; }
+  .breadcrumb a { color: var(--accent); text-decoration: none; }
+  h1 { font-size: 1.8rem; margin-bottom: 0.5rem; } .subtitle { color: var(--text-dim); margin-bottom: 2rem; }
+  h2 { font-size: 1.3rem; color: var(--accent); margin: 2rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; color: var(--green); margin: 1.5rem 0 0.5rem; }
+  h4 { font-size: 1rem; color: var(--purple); margin: 1.2rem 0 0.4rem; }
+  p { margin: 0.5rem 0; font-size: 0.95rem; }
+  .box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; margin: 1rem 0; }
+  .box.tip { border-left: 3px solid var(--green); } .box.warn { border-left: 3px solid var(--orange); }
+  .box.info { border-left: 3px solid var(--accent); } .box.purple { border-left: 3px solid var(--purple); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--accent); background: var(--surface); }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; }
+  code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; color: var(--green); }
+  pre code { background: none; padding: 0; color: var(--text); }
+  ul, ol { padding-left: 1.5rem; margin: 0.5rem 0; } li { margin-bottom: 0.4rem; font-size: 0.93rem; }
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+  .nav-bottom { display: flex; justify-content: space-between; margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--border); }
+  .nav-bottom a { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+  .badge { display: inline-block; font-size: 0.75rem; padding: 2px 8px; border-radius: 12px; margin-left: 6px; }
+  .badge-hot { background: rgba(248,81,73,0.2); color: var(--red); border: 1px solid var(--red); }
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style></head><body><div class="container">
+
+<div class="breadcrumb"><a href="../index.html">首页</a> / <a href="00-框架总览.html">08-主流框架</a> / vLLM 深度指南</div>
+<h1>🔥 vLLM 深度技术指南 <span class="badge badge-hot">最热门</span></h1>
+<div class="subtitle">从 PagedAttention 数学原理到生产调优 — 每个参数都讲透</div>
+
+<div class="box info">
+<strong>定位：</strong>vLLM 是目前使用最广泛的 LLM 推理框架（GitHub 45k+ stars），由 UC Berkeley RISE Lab 开发。核心创新 PagedAttention 将 GPU 内存利用率从 20-40% 提升到 96%+。最新版本 v0.19.1 (2026.04)。
+</div>
+
+<!-- ==================== 第一章：架构总览 ==================== -->
+<h2>一、系统架构 — 请求的完整生命周期</h2>
+<div class="warn"><strong>常见误区：</strong>
+学习一、系统架构 — 请求的完整生命周期时，很多人只看概念不动手实验。建议每学完一个知识点就写验证代码，
+在实际运行中观察行为是否符合预期。理论和实践的差距往往比想象中大。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为一、系统架构 — 请求的完整生命周期可以跳过基础直接上手高级内容。基础概念是后续所有优化和应用的前提，
+跳过基础会导致后续学习事倍功半。
+</div>
+
+<h3>一、系统架构 — 请求的完整生命周期</h3>类比：</strong>一、系统架构 — 请求的完整生命周期</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<svg viewBox="0 0 900 730" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs><text x="450" y="22" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">vLLM 架构全景 — 请求的完整路径</text>
+<text x="450" y="50" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="middle">用户请求 (HTTP)</text>
+<line x1="450" y1="57" x2="450" y2="67" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<rect x="35" y="70" width="830" height="105" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="450" y="88" fill="#22d3ee" font-size="14" font-family="Courier New, monospace" text-anchor="middle">API Server (FastAPI)</text>
+<text x="80" y="108" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">├─ OpenAI 兼容接口: /v1/chat/completions</text>
+<text x="80" y="125" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">├─ 原生接口: /generate, /tokenize</text>
+<text x="80" y="142" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">└─ 请求解析 → AsyncLLMEngine.add_request()</text>
+<line x1="450" y1="175" x2="450" y2="200" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<rect x="35" y="200" width="830" height="440" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="450" y="222" fill="#34d399" font-size="14" font-family="Courier New, monospace" text-anchor="middle">AsyncLLMEngine（异步引擎，vLLM 的大脑）</text>
+<rect x="50" y="238" width="800" height="185" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="450" y="258" fill="#a78bfa" font-size="13" font-family="Courier New, monospace" text-anchor="middle">Scheduler（调度器 — 核心中的核心）</text>
+<rect x="100" y="270" width="170" height="85" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="185" y="290" fill="#a78bfa" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Waiting (等待)</text>
+<text x="110" y="308" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">新请求排队中</text>
+<rect x="325" y="270" width="170" height="85" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="410" y="290" fill="#a78bfa" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Running (运行)</text>
+<text x="335" y="308" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">GPU上正在推理</text>
+<rect x="550" y="270" width="170" height="85" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="635" y="290" fill="#a78bfa" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Swapped (换出)</text>
+<text x="560" y="308" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">内存不足暂存CPU</text>
+<text x="100" y="372" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">每次 iteration:</text>
+<text x="100" y="390" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">1. Waiting→分配 KV Cache blocks</text>
+<text x="100" y="407" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">2. Running 请求继续 decode</text>
+<text x="100" y="424" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">3. GPU 满→preempt (swap/recompute)</text>
+<rect x="50" y="430" width="800" height="70" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="450" y="450" fill="#a78bfa" font-size="13" font-family="Courier New, monospace" text-anchor="middle">KV Cache Manager（内存管理器）</text>
+<text x="70" y="468" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">Block Allocator: 分配/回收物理 blocks  |  Block Table: 逻辑块→物理块映射  |  Block Manager: 引用计数</text>
+<rect x="50" y="508" width="800" height="70" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="450" y="528" fill="#fbbf24" font-size="13" font-family="Courier New, monospace" text-anchor="middle">Model Executor（模型执行器）</text>
+<text x="70" y="546" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">Worker / PP Workers | ModelRunner: 前向传播 | CUDAGraphRunner: 预录制 kernel | FlashAttention/FlashInfer</text>
+<line x1="450" y1="640" x2="450" y2="660" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<rect x="35" y="665" width="830" height="45" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="450" y="693" fill="#fbbf24" font-size="14" font-family="Courier New, monospace" text-anchor="middle">GPU Hardware (CUDA / NCCL / FlashAttention / FlashInfer)</text></svg>
+
+<!-- ==================== 源码级深度：请求完整追踪 ==================== -->
+<h3 style="color:var(--red);margin-top:2.5rem;border-top:1px solid var(--border);padding-top:1.5rem;">🔥 源码深度 — 请求从 HTTP 到 GPU 的完整调用链</h3>
+
+<div class="box warn">
+<strong>以下基于 vLLM v0.8.x 源码，展示一个 Chat Completion 请求从接收到生成第一个 token 的完整源码路径。</strong>
+</div>
+
+<h4>1. API 入口：openai_api_server.py</h4>
+
+<pre><code># vllm/entrypoints/openai/api_server.py
+# 路由注册 (FastAPI)
+@router.post("/v1/chat/completions")
+async def create_chat_completion(
+    request: ChatCompletionRequest,
+    raw_request: Request,
+):
+    """OpenAI 兼容的 Chat Completion 接口"""
+    # 1) 解析请求参数
+    # 2) 构建 SamplingParams
+    # 3) 调用 engine 生成
+
+    # 关键调用：将请求交给 AsyncLLMEngine
+    generator = await openai_serving_chat.create_chat_completion(
+        request, raw_request
+    )
+    # generator 是一个异步生成器，逐 token 流式返回
+    return StreamingResponse(generator, media_type="text/event-stream")</code></pre>
+
+<h4>2. 请求转换：ServingChat → AsyncLLMEngine</h4>
+
+<pre><code># vllm/entrypoints/openai/serving_chat.py
+class OpenAIServingChat:
+    async def create_chat_completion(self, request, raw_request):
+        # 将 OpenAI 格式的 messages 转为 vLLM 的 prompt
+        conversation = request.messages  # List[ChatCompletionMessageParam]
+        prompt = self.tokenizer.apply_chat_template(
+            conversation, tokenize=False, add_generation_prompt=True
+        )
+
+        # 构建 SamplingParams（控制生成行为）
+        sampling_params = SamplingParams(
+            temperature=request.temperature or 1.0,
+            top_p=request.top_p or 1.0,
+            max_tokens=request.max_tokens or 512,
+            stop=request.stop,
+            frequency_penalty=request.frequency_penalty or 0.0,
+            presence_penalty=request.presence_penalty or 0.0,
+            # vLLM 特有参数
+            best_of=request.best_of,
+            use_beam_search=False,
+        )
+
+        # 为每个请求分配唯一 ID
+        request_id = f"chatcmpl-{uuid.uuid4().hex}"
+
+        # ★ 核心调用：进入引擎
+        result_generator = self.engine.generate(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+        )</code></pre>
+
+<h4>3. 异步引擎：AsyncLLMEngine.add_request()</h4>
+
+<pre><code># vllm/engine/async_llm_engine.py
+class AsyncLLMEngine:
+    async def add_request(
+        self,
+        request_id: str,
+        prompt: str,
+        sampling_params: SamplingParams,
+        arrival_time: Optional[float] = None,
+    ):
+        """将请求添加到引擎的调度队列"""
+        # 1) Tokenize: 将文本转为 token IDs
+        prompt_token_ids = self.tokenizer.encode(prompt)
+
+        # 2) 创建 Sequence 对象（vLLM 内部表示）
+        #    Sequence 包含: token_ids, sampling_params, request_id
+        #    每个 Sequence 对应一个请求的完整生命周期
+
+        # 3) 调用 EngineCore（底层同步引擎）
+        self._add_request(
+            EngineCoreRequest(
+                request_id=request_id,
+                prompt_token_ids=prompt_token_ids,
+                sampling_params=sampling_params,
+                arrival_time=arrival_time or time.time(),
+            )
+        )</code></pre>
+
+<h4>4. 调度核心：Scheduler.schedule()</h4>
+
+<pre><code># vllm/v1/core/sched/scheduler.py
+class Scheduler:
+    def schedule(self) -> SchedulerOutput:
+        """每个 iteration 调用一次，决定哪些请求参与本轮计算"""
+
+        scheduled_new: list[NewRequestData] = []      # 新请求
+        scheduled_resumed: list[ResumedRequestData] = []  # 被恢复的请求
+        scheduled_running: list[RunningRequestData] = []  # 继续运行的请求
+
+        # ===== Phase 1: 处理 Waiting 队列中的新请求 =====
+        while self.waiting:
+            req = self.waiting[0]
+            # 计算需要多少 KV blocks
+            num_new_blocks = self._get_num_new_blocks(req)
+
+            if num_new_blocks == 0:
+                # 已有足够 blocks（前缀缓存命中）
+                break
+
+            # 尝试分配物理 blocks
+            if self.block_manager.can_allocate(num_new_blocks):
+                blocks = self.block_manager.allocate(num_new_blocks)
+                req.block_table.extend(blocks)
+                self.waiting.pop(0)
+                scheduled_new.append(...)
+            else:
+                # 内存不足 → 尝试抢占
+                if not self._preempt_running_req():
+                    break  # 无法抢占，停止调度新请求
+
+        # ===== Phase 2: Running 队列继续 Decode =====
+        for req in self.running:
+            # 每个 decode token 需要 1 个新 block（如果当前 block 已满）
+            if req.is_block_full():
+                new_block = self.block_manager.allocate(1)
+                req.block_table.append(new_block)
+            scheduled_running.append(...)
+
+        # ===== Phase 3: 构造输出 =====
+        return SchedulerOutput(
+            scheduled_new_reqs=scheduled_new,
+            scheduled_running_reqs=scheduled_running,
+            # ... 其他字段
+        )</code></pre>
+
+<h4>5. 模型执行：ModelRunner.execute_model()</h4>
+
+<pre><code># vllm/v1/worker/gpu_model_runner.py
+class GPUModelRunner:
+    def execute_model(self, scheduler_output: SchedulerOutput):
+        """执行一次前向传播，生成一个 token"""
+
+        # 1) 准备输入 tensors
+        input_ids = self._prepare_input_ids(scheduler_output)
+        #    shape: [total_num_tokens] — 所有请求的 token 拼接
+
+        positions = self._prepare_positions(scheduler_output)
+        #    每个 token 在其序列中的位置
+
+        # 2) ★ 构造 Block Table — PagedAttention 的核心
+        block_tables = self._prepare_block_tables(scheduler_output)
+        #    shape: [num_reqs, max_num_blocks_per_req]
+    #    这个表告诉 attention kernel 去哪里读 KV
+
+        # 3) 执行模型前向传播
+        hidden_states = self.model(
+            input_ids=input_ids,
+            positions=positions,
+            kv_caches=self.kv_caches,      # 物理 KV Cache blocks
+            block_tables=block_tables,      # 逻辑→物理映射
+        )
+
+        # 4) 通过 LM Head 得到 logits → 采样下一个 token
+        logits = self.model.compute_logits(hidden_states)
+        output_token_ids = self.sampler.sample(logits, sampling_params)
+
+        # 5) 更新序列状态
+        for req, token_id in zip(running_reqs, output_token_ids):
+            req.token_ids.append(token_id)
+            if token_id == eos_token_id:
+                req.set_finished()
+
+        return ModelRunnerOutput(token_ids=output_token_ids)</code></pre>
+
+<h4>调用链总结</h4>
+<div class="diagram">HTTP POST /v1/chat/completions
+  → FastAPI 路由 (api_server.py)
+    → OpenAIServingChat.create_chat_completion()   ← 参数解析、tokenize
+      → AsyncLLMEngine.generate()
+        → AsyncLLMEngine.add_request()             ← 创建 Sequence，入队
+          → EngineCore._add_request()
+            → Scheduler.waiting.append(req)         ← 进入等待队列
+
+═══ 每个 iteration（事件循环驱动）═══
+
+Scheduler.schedule()                               ← 决定本轮请求
+  → can_allocate() → allocate blocks               ← 分配 KV 物理内存
+  → _preempt() if needed                           ← 抢占低优先级请求
+  → 返回 SchedulerOutput
+
+GPUModelRunner.execute_model(scheduler_output)     ← GPU 前向传播
+  → _prepare_input_ids()                           ← 拼接所有请求的 tokens
+  → _prepare_block_tables()                        ← 构造 PagedAttention 映射
+  → model.forward(kv_caches, block_tables)         ← Attention 通过 block_tables 访问 KV
+  → sampler.sample(logits)                         ← 采样生成下一个 token
+  → 流式返回给用户（SSE）</div>
+
+<!-- ==================== 第二章：PagedAttention ==================== -->
+<h2>二、PagedAttention — vLLM 的灵魂</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>2.1 问题：为什么传统方案浪费内存？</h3>
+
+<p>在 vLLM 之前，LLM 推理框架为每个请求<strong>预分配</strong>一段连续的 GPU 内存来存放 KV Cache，大小等于最大序列长度。问题是：</p>
+
+<svg viewBox="0 0 900 320" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs><text x="450" y="20" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">传统连续内存分配的浪费问题</text>
+<text x="45" y="55" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="start">请求 A (实际 500 tokens)</text>
+<rect x="35" y="63" width="830" height="42" rx="6" fill="rgba(100,116,139,0.1)" stroke="#64748b" stroke-width="1.5"/>
+<rect x="35" y="63" width="202" height="42" rx="6" fill="rgba(251,113,133,0.12)" stroke="#fb7185" stroke-width="1.5"/>
+<text x="136" y="81" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">实际 500KB</text>
+<text x="551" y="81" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="middle">浪费 1548KB (75.6%)</text>
+<text x="45" y="155" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="start">请求 B (实际 200 tokens)</text>
+<rect x="35" y="163" width="830" height="42" rx="6" fill="rgba(100,116,139,0.1)" stroke="#64748b" stroke-width="1.5"/>
+<rect x="35" y="163" width="81" height="42" rx="6" fill="rgba(251,113,133,0.12)" stroke="#fb7185" stroke-width="1.5"/>
+<text x="75" y="181" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">实际 200KB</text>
+<text x="490" y="181" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="middle">浪费 1848KB (90.2%)</text>
+<text x="45" y="270" fill="#fb7185" font-size="13" font-family="Courier New, monospace" text-anchor="start">总浪费: 预分配 2×2048KB = 4096KB, 实际只用 700KB, 浪费率 82.9%！</text>
+<text x="45" y="295" fill="#94a3b8" font-size="13" font-family="Courier New, monospace" text-anchor="start">更严重的是：即使有空闲内存，也无法分配给新请求（因为是连续的、不可碎片化的）。</text></svg>
+
+<h3>2.2 解决方案：像操作系统一样分页</h3>
+
+<p>PagedAttention 的核心思想：把 KV Cache 按固定大小的 <strong>Block</strong>（页）管理，按需分配，不要求连续。</p>
+
+<svg viewBox="0 0 900 420" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs><text x="450" y="20" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">PagedAttention 的 Block 分配</text>
+<text x="45" y="48" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="start">请求 A (需要 500 tokens → 32 个 blocks):</text>
+<text x="45" y="78" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">逻辑视图:</text>
+<rect x="120" y="80" width="75" height="22" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="157.5" y="96" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Block 0</text>
+<rect x="203" y="80" width="75" height="22" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="240.5" y="96" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Block 1</text>
+<rect x="286" y="80" width="75" height="22" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="323.5" y="96" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Block 2</text>
+<rect x="369" y="80" width="75" height="22" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="406.5" y="96" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Block 3</text>
+<rect x="452" y="80" width="75" height="22" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="489.5" y="96" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Block 4</text>
+<rect x="535" y="80" width="75" height="22" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="572.5" y="96" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Block 5</text>
+<rect x="618" y="80" width="75" height="22" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="655.5" y="96" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Block 6</text>
+<rect x="701" y="80" width="75" height="22" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="738.5" y="96" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Block 7</text>
+<text x="784" y="96" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="middle">...[31]</text>
+<text x="45" y="118" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">物理映射:</text>
+<rect x="120" y="120" width="75" height="22" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="157.5" y="136" fill="#fbbf24" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Phys 3</text>
+<rect x="203" y="120" width="75" height="22" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="240.5" y="136" fill="#fbbf24" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Phys 7</text>
+<rect x="286" y="120" width="75" height="22" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="323.5" y="136" fill="#fbbf24" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Phys 1</text>
+<rect x="369" y="120" width="75" height="22" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="406.5" y="136" fill="#fbbf24" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Phys 14</text>
+<rect x="452" y="120" width="75" height="22" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="489.5" y="136" fill="#fbbf24" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Phys 8</text>
+<rect x="535" y="120" width="75" height="22" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="572.5" y="136" fill="#fbbf24" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Phys 22</text>
+<rect x="618" y="120" width="75" height="22" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="655.5" y="136" fill="#fbbf24" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Phys 5</text>
+<rect x="701" y="120" width="75" height="22" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="738.5" y="136" fill="#fbbf24" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Phys 45</text>
+<text x="789" y="136" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="start">← 不要求连续！</text>
+<text x="45" y="166" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="start">Block Table（类似操作系统的页表）:</text>
+<rect x="200" y="176" width="220" height="20" rx="6" fill="rgba(167,139,250,0.12)" stroke="#64748b" stroke-width="1.5"/>
+<text x="236.66666666666666" y="191" fill="#a78bfa" font-size="11" font-family="Courier New, monospace" text-anchor="middle">逻辑块号</text>
+<text x="310.0" y="191" fill="#a78bfa" font-size="11" font-family="Courier New, monospace" text-anchor="middle">物理块号</text>
+<text x="383.33333333333337" y="191" fill="#a78bfa" font-size="11" font-family="Courier New, monospace" text-anchor="middle">填充 tokens</text>
+<rect x="200" y="200" width="220" height="20" rx="6" fill="rgba(100,116,139,0.08)" stroke="#64748b" stroke-width="1.5"/>
+<text x="236.66666666666666" y="215" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">0</text>
+<text x="310.0" y="215" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">3</text>
+<text x="383.33333333333337" y="215" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">16/16</text>
+<rect x="200" y="224" width="220" height="20" rx="6" fill="rgba(100,116,139,0.08)" stroke="#64748b" stroke-width="1.5"/>
+<text x="236.66666666666666" y="239" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">1</text>
+<text x="310.0" y="239" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">7</text>
+<text x="383.33333333333337" y="239" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">16/16</text>
+<rect x="200" y="248" width="220" height="20" rx="6" fill="rgba(100,116,139,0.08)" stroke="#64748b" stroke-width="1.5"/>
+<text x="236.66666666666666" y="263" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">2</text>
+<text x="310.0" y="263" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">1</text>
+<text x="383.33333333333337" y="263" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">16/16</text>
+<rect x="200" y="272" width="220" height="20" rx="6" fill="rgba(100,116,139,0.08)" stroke="#64748b" stroke-width="1.5"/>
+<text x="236.66666666666666" y="287" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">...</text>
+<text x="310.0" y="287" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">...</text>
+<text x="383.33333333333337" y="287" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">...</text>
+<rect x="200" y="296" width="220" height="20" rx="6" fill="rgba(100,116,139,0.08)" stroke="#64748b" stroke-width="1.5"/>
+<text x="236.66666666666666" y="311" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">31</text>
+<text x="310.0" y="311" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">45</text>
+<text x="383.33333333333337" y="311" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">4/16  ← 最后一块可能不满</text>
+<text x="45" y="330" fill="#34d399" font-size="13" font-family="Courier New, monospace" text-anchor="start">优势:</text>
+<text x="45" y="348" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">1. 按需分配 — 只分配实际需要的 blocks，无浪费</text>
+<text x="45" y="365" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">2. 不要求连续 — 消除外部碎片</text>
+<text x="45" y="382" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">3. 内部碎片仅在最后一个 block（平均浪费 8/16 = 50% of 1 block）</text>
+<text x="45" y="399" fill="#34d399" font-size="12" font-family="Courier New, monospace" text-anchor="start">4. 内存利用率从 20-40% 提升到 96%+</text></svg>
+
+<h3>2.3 Attention 计算如何适配分页？</h3>
+
+<p>传统 Attention 计算假设 KV 是连续内存。PagedAttention 修改了 Attention kernel，让它通过 Block Table 间接访问 KV：</p>
+
+<svg viewBox="0 0 900 293" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs><text x="450" y="20" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">PagedAttention 的数学公式</text>
+<text x="45" y="48" fill="#e6edf3" font-size="14" font-family="Courier New, monospace" text-anchor="start">标准 Attention:</text>
+<text x="450" y="70" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="middle">Attention(Q, K, V) = softmax(Q·K^T / √d_k) · V</text>
+<text x="450" y="87" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">其中 K, V 是连续的 [seq_len, d_model] 矩阵</text>
+<text x="45" y="105" fill="#34d399" font-size="14" font-family="Courier New, monospace" text-anchor="start">PagedAttention:</text>
+<text x="45" y="123" fill="#94a3b8" font-size="13" font-family="Courier New, monospace" text-anchor="start">同样的公式，但 K, V 的访问方式变了:</text>
+<text x="45" y="143" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="start">对于 query token q_i:</text>
+<text x="60" y="161" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">1. 查 Block Table 得到该序列的所有物理块: [b_0, b_1, ..., b_n]</text>
+<text x="60" y="179" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">2. 对每个物理块 b_j，计算局部 attention:</text>
+<text x="450" y="197" fill="#a78bfa" font-size="13" font-family="Courier New, monospace" text-anchor="middle">attn_j = softmax(q_i · K[b_j]^T / √d_k) · V[b_j]</text>
+<text x="60" y="215" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">3. 合并所有块的结果（需要 rescaling）</text>
+<text x="45" y="235" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="start">关键：Attention kernel 需要知道 block 的边界，</text>
+<text x="45" y="253" fill="#94a3b8" font-size="13" font-family="Courier New, monospace" text-anchor="start">因为 softmax 是全局的，不能简单地分块计算。</text>
+<text x="45" y="271" fill="#34d399" font-size="13" font-family="Courier New, monospace" text-anchor="start">vLLM 用 "max" 操作合并各块的 logits，再做最终 softmax。</text></svg>
+
+<h3>2.4 PagedAttention CUDA Kernel 实现原理</h3>
+
+<div class="box warn">
+<strong>以下内容深入 CUDA kernel 层面，解释 PagedAttention 如何在 GPU 上实际执行。基于 vLLM 的 csrc/attention_kernels.cu 源码分析。</strong>
+</div>
+
+<h4>2.4.1 CUDA Kernel 的内存访问模式</h4>
+
+<p>传统 Attention kernel 假设 K/V 在内存中是连续的，直接用偏移量访问。PagedAttention 修改了这个假设：</p>
+
+<pre><code>// 传统 Attention 的内存访问（简化）
+// K_cache 地址 = base_ptr + seq_id * seq_stride + pos * head_dim
+// → 直接线性访问，高效但要求连续内存
+
+// PagedAttention 的内存访问（简化）
+// 1. 查 Block Table 得到物理块号
+int physical_block = block_table[seq_id][logical_block_id];
+// 2. 计算物理地址
+// K_cache 地址 = kv_cache_base + physical_block * block_size * head_dim
+//              + offset_in_block * head_dim
+// → 间接访问，但允许非连续存储</code></pre>
+
+<h4>2.4.2 Attention Score 计算伪代码（带 Block 循环）</h4>
+
+<pre><code>// PagedAttention 的核心 CUDA kernel（伪代码，简化自 vLLM 源码）
+__global__ void paged_attention_v1_kernel(
+    float* output,           // [num_seqs, num_heads, head_dim]
+    const float* q,          // [num_seqs, num_heads, head_dim]
+    const float* k_cache,    // 物理 KV Cache blocks
+    const float* v_cache,
+    const int* block_tables, // [num_seqs, max_num_blocks]
+    const int* context_lens, // 每个序列的实际长度
+    const int block_size,    // 每个 block 的 token 数 (e.g., 16)
+    const int num_kv_heads,
+    const int head_dim
+) {
+    // 每个 CUDA block 处理一个 (seq, head) 对
+    int seq_id = blockIdx.x;
+    int head_id = blockIdx.y;
+
+    int context_len = context_lens[seq_id];
+    int num_blocks = (context_len + block_size - 1) / block_size;
+
+    // Query vector（本 seq 本 head 的 query）
+    float* q_vec = q + (seq_id * num_heads + head_id) * head_dim;
+
+    // 用于 softmax 的 online 算法变量
+    float max_score = -INFINITY;
+    float sum_exp = 0.0f;
+    float acc[head_dim] = {0};  // 累积的加权 V
+
+    // ★ 遍历所有逻辑块
+    for (int block_idx = 0; block_idx < num_blocks; block_idx++) {
+        // 通过 Block Table 查找物理块号
+        int physical_block = block_tables[seq_id * max_blocks + block_idx];
+
+        // 计算该 block 的有效 token 数（最后一块可能不满）
+        int tokens_in_block = min(block_size, context_len - block_idx * block_size);
+
+        // 遍历 block 内的每个 token
+        for (int i = 0; i < tokens_in_block; i++) {
+            // ★ 通过物理块号间接访问 K
+            int k_offset = (physical_block * block_size + i) * head_dim;
+            float* k_vec = k_cache + (head_id * total_blocks + k_offset);
+
+            // 计算 attention score: q · k / sqrt(d_k)
+            float score = dot_product(q_vec, k_vec, head_dim) / sqrtf(head_dim);
+
+            // Online softmax（FlashAttention 风格）
+            float new_max = max(max_score, score);
+            float exp_old = expf(max_score - new_max);
+            float exp_new = expf(score - new_max);
+            sum_exp = sum_exp * exp_old + exp_new;
+            max_score = new_max;
+
+            // 累加加权 V
+            // ★ 通过物理块号间接访问 V
+            int v_offset = (physical_block * block_size + i) * head_dim;
+            float* v_vec = v_cache + (head_id * total_blocks + v_offset);
+
+            for (int d = 0; d < head_dim; d++) {
+                acc[d] = acc[d] * exp_old + exp_new * v_vec[d];
+            }
+        }
+    }
+
+    // 归一化：acc / sum_exp
+    for (int d = 0; d < head_dim; d++) {
+        output[(seq_id * num_heads + head_id) * head_dim + d] = acc[d] / sum_exp;
+    }
+}</code></pre>
+
+<h4>2.4.3 FlashAttention 与 PagedAttention 的结合</h4>
+
+<p>vLLM 实际使用的是 FlashAttention 的分块（tiling）算法 + PagedAttention 的间接寻址，两者的结合方式：</p>
+
+<div class="diagram">FlashAttention 的核心思想：          PagedAttention 的核心思想：
+  将 Q/K/V 分成小块（tiles）             K/V 不连续，通过 Block Table 间接访问
+  每个 tile 放在 SRAM 中计算              逻辑块 → 物理块的映射
+  避免写入巨大的 attention matrix 到 HBM
+
+═══════════════ 结合方式 ═══════════════
+
+1. Q tile 放在 SRAM (寄存器/共享内存)
+2. 遍历 K/V 的逻辑块:
+   a. 通过 Block Table 查物理块号
+   b. 将该物理块的 K tile 加载到 SRAM
+   c. 在 SRAM 中计算 Q·K^T (无 HBM 写入)
+   d. Online softmax 更新 max/sum
+   e. 加载 V tile 到 SRAM
+   f. 累加 acc = acc * scale + softmax_score * V
+3. 最终归一化，写回 HBM
+
+关键：attention score 矩阵永远不出现在 HBM 中！
+      Block Table 的间接寻址增加了 ~5% 的地址计算开销，
+      但通过分块计算消除了 O(n²) 的 HBM 写入。</div>
+
+<div class="box tip">
+<strong>性能影响：</strong>PagedAttention 的间接寻址会导致约 5-10% 的 kernel 性能下降（相比连续内存），但换来的是 3-4 倍的内存利用率提升。在实际部署中，能装下更多并发请求 = 更高吞吐，远超 kernel 层面的开销。
+</div>
+
+<h4>2.4.4 v1 (Triton) vs v2 (CUDA) 实现</h4>
+
+<pre><code># vLLM 提供两种 PagedAttention kernel 实现:
+
+# 1. PagedAttention v1 (Triton kernel)
+#    - 用 Triton DSL 编写，可读性好
+#    - 每个 query token 独立遍历所有 KV blocks
+#    - 适合 Prefill 阶段（长序列计算密集）
+
+# 2. PagedAttention v2 (CUDA kernel)
+#    - 手写 CUDA，更底层优化
+#    - 使用 warp-level reduction 和 shared memory
+#    - 适合 Decode 阶段（单 token query，访存密集）
+#    - 默认使用 v2
+
+# 选择逻辑:
+# Prefill: 通常用 FlashAttention（连续 KV，更高效）
+# Decode:  用 PagedAttention v2（非连续 KV，需要间接寻址）</code></pre>
+
+<h3>2.5 Copy-on-Write（写时复制）</h3>
+
+<p>当多个请求共享相同的前缀（如 System Prompt）时，vLLM 可以让它们共享 KV Cache blocks：</p>
+
+<svg viewBox="0 0 900 475" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs><text x="450" y="20" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Copy-on-Write 机制</text>
+<text x="45" y="40" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="start">场景: 两个请求共享 System Prompt (100 tokens → 7 blocks)</text>
+<text x="45" y="70" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="start">Step 1: 请求 A 先到达，计算 System Prompt 的 KV</text>
+<rect x="45" y="82" width="80" height="28" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/><text x="85.0" y="100" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_0</text>
+<rect x="131" y="82" width="80" height="28" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/><text x="171.0" y="100" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_1</text>
+<rect x="217" y="82" width="80" height="28" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/><text x="257.0" y="100" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_2</text>
+<rect x="303" y="82" width="80" height="28" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/><text x="343.0" y="100" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_3</text>
+<rect x="389" y="82" width="80" height="28" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/><text x="429.0" y="100" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_4</text>
+<rect x="475" y="82" width="80" height="28" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/><text x="515.0" y="100" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_5</text>
+<rect x="561" y="82" width="80" height="28" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/><text x="601.0" y="100" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_6</text>
+<text x="657" y="100" fill="#22d3ee" font-size="11" font-family="Courier New, monospace" text-anchor="start">引用计数=1</text>
+<text x="45" y="195" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="start">Step 2: 请求 B 到达，发现相同前缀</text>
+<rect x="45" y="207" width="80" height="28" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/><text x="85.0" y="225" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_0</text>
+<rect x="131" y="207" width="80" height="28" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/><text x="171.0" y="225" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_1</text>
+<rect x="217" y="207" width="80" height="28" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/><text x="257.0" y="225" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">...</text>
+<rect x="303" y="207" width="80" height="28" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/><text x="343.0" y="225" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_6</text>
+<text x="399" y="225" fill="#a78bfa" font-size="11" font-family="Courier New, monospace" text-anchor="start">引用计数=2 (共享！)</text>
+<text x="45" y="300" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="start">Step 3: 请求 A 开始生成新 token</text>
+<rect x="45" y="312" width="80" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/><text x="85.0" y="330" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_0</text>
+<rect x="131" y="312" width="80" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/><text x="171.0" y="330" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_1</text>
+<rect x="217" y="312" width="80" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/><text x="257.0" y="330" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">...</text>
+<rect x="303" y="312" width="80" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/><text x="343.0" y="330" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Sys_6</text>
+<rect x="389" y="312" width="80" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/><text x="429.0" y="330" fill="#e6edf3" font-size="10" font-family="Courier New, monospace" text-anchor="middle">New_7</text>
+<text x="485" y="330" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="start">新分配 block 引用计数=1</text>
+<text x="45" y="400" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="start">Step 4: 共享块需要修改时（Write 触发 Copy）</text>
+<text x="45" y="420" fill="#94a3b8" font-size="13" font-family="Courier New, monospace" text-anchor="start">先复制该块 → 新分配一个物理块 → 修改副本 → 原块引用计数减 1</text>
+<text x="450" y="450" fill="#34d399" font-size="13" font-family="Courier New, monospace" text-anchor="middle">效果: N 个请求共享 System Prompt 时，KV Cache 只存一份，节省 N-1 倍内存！</text></svg>
+
+<!-- ==================== 第三章：Scheduler ==================== -->
+<h2>三、Scheduler 调度器 — 决定谁先跑</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>3.1 调度策略</h3>
+
+<p>Scheduler 在每个 iteration（一次模型前向传播）都要决定：哪些请求参与这次计算？</p>
+
+<svg viewBox="0 0 900 440" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs><text x="450" y="20" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Scheduler 调度决策流程</text>
+<rect x="50" y="55" width="800" height="70" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="450" y="77" fill="#22d3ee" font-size="13" font-family="Courier New, monospace" text-anchor="middle">1. 检查 Swapped 队列 → 尝试 swap-in 回 GPU</text>
+<text x="70" y="97" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">(优先恢复被抢占的请求，减少用户感知延迟)</text>
+<rect x="50" y="140" width="800" height="120" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="450" y="162" fill="#a78bfa" font-size="13" font-family="Courier New, monospace" text-anchor="middle">2. 检查 Waiting 队列 → 尝试分配 KV blocks</text>
+<text x="70" y="182" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">a. 计算需要多少 blocks  →  b. 检查 GPU 空闲 blocks</text>
+<text x="70" y="197" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">c. 不够则 preempt 低优先级请求  →  d. 分配 blocks，进入 Running</text>
+<line x1="450" y1="125" x2="450" y2="140" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<rect x="50" y="275" width="800" height="65" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="450" y="297" fill="#34d399" font-size="13" font-family="Courier New, monospace" text-anchor="middle">3. Running 队列 → 所有请求做一次 decode step</text>
+<text x="70" y="317" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">(连续批处理：所有 Running 请求一起前向传播)</text>
+<line x1="450" y1="260" x2="450" y2="275" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<rect x="50" y="355" width="800" height="65" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="450" y="377" fill="#fbbf24" font-size="13" font-family="Courier New, monospace" text-anchor="middle">4. 检查是否有请求完成（EOS 或达到上限）</text>
+<text x="70" y="397" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">→ 释放 KV blocks，从 Running 移除</text>
+<line x1="450" y1="340" x2="450" y2="355" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/></svg>
+
+<h3>3.2 抢占策略：Recompute vs Swap</h3>
+
+<p>当 GPU 内存不足以容纳新请求时，Scheduler 必须<strong>抢占</strong>（preempt）正在运行的请求：</p>
+
+<table>
+  <tr><th>策略</th><th>机制</th><th>优点</th><th>缺点</th><th>适用场景</th></tr>
+  <tr><td><strong>Recompute</strong></td><td>丢弃被抢请求的 KV Cache，需要时重新计算</td><td>不占用 CPU 内存</td><td>恢复延迟高（需重新 prefill）</td><td>CPU 内存不足时</td></tr>
+  <tr><td><strong>Swap</strong></td><td>将被抢请求的 KV Cache 换出到 CPU 内存</td><td>恢复快（swap-in 即可）</td><td>需要足够的 CPU 内存</td><td>默认策略，CPU 内存充足时</td></tr>
+</table>
+
+<div class="box tip">
+<strong>抢占优先级：</strong>vLLM 默认使用 <strong>FCFS（先来先服务）</strong>策略 — 最晚到达的请求最先被抢占，因为它等待时间最短，被抢占的代价最低。
+</div>
+
+<h3>3.3 Scheduler._schedule() 完整伪代码</h3>
+
+<div class="box warn">
+<strong>以下是 Scheduler 核心调度逻辑的完整伪代码，包含 can_allocate()、_preempt()、_swap() 的具体实现。基于 vLLM v1 源码结构。</strong>
+</div>
+
+<pre><code># ═══════════════════════════════════════════════════
+# Scheduler._schedule() — 每个 iteration 调用一次
+# ═══════════════════════════════════════════════════
+def _schedule(self) -> SchedulerOutput:
+    # ── Step 0: 初始化 ──
+    budget = SchedulingBudget(
+        max_num_tokens=self.max_num_batched_tokens,  # 如 4096
+        max_num_seqs=self.max_num_seqs,               # 如 256
+    )
+    preempted_reqs = []
+    swapped_in_reqs = []
+
+    # ══════════════════════════════════════
+    # Phase 1: 尝试将 Swapped 队列中的请求 swap-in 回 GPU
+    # ══════════════════════════════════════
+    while self.swapped:
+        req = self.swapped[0]
+        num_blocks_needed = len(req.block_table)
+
+        # 检查 GPU 是否有足够空闲 block
+        if not self.block_manager.can_swap_in(num_blocks_needed):
+            # 尝试抢占 Running 中最低优先级的请求
+            if not self._preempt_by_swap(req):
+                break  # 无法腾出空间
+            continue
+
+        # 执行 swap-in: CPU → GPU
+        self.block_manager.swap_in(req.block_table)
+        self.swapped.pop(0)
+        swapped_in_reqs.append(req)
+        budget.add_num_seqs(1)
+        budget.add_num_tokens(req.num_tokens)
+
+    # ══════════════════════════════════════
+    # Phase 2: 尝试调度 Waiting 队列中的新请求
+    # ══════════════════════════════════════
+    while self.waiting:
+        req = self.waiting[0]
+
+        # 检查预算
+        if budget.num_seqs >= budget.max_num_seqs:
+            break  # 达到最大并发数
+        if budget.num_tokens + req.num_tokens > budget.max_num_tokens:
+            break  # 达到单次 iteration 最大 token 数
+
+        # 计算需要的 block 数量
+        num_new_blocks = ceil(req.num_tokens / self.block_size)
+
+        # ★ can_allocate() 检查
+        if self.block_manager.can_allocate(num_new_blocks):
+            # 分配物理 blocks
+            blocks = self.block_manager.allocate(num_new_blocks)
+            req.block_table = blocks
+            self.waiting.pop(0)
+            self.running.append(req)
+            budget.add_num_seqs(1)
+            budget.add_num_tokens(req.num_tokens)
+        else:
+            # 内存不足，尝试抢占
+            if not self._preempt_by_swap_or_recompute():
+                break  # 无法抢占，停止
+
+    # ══════════════════════════════════════
+    # Phase 3: Running 队列的 Decode 请求
+    # ══════════════════════════════════════
+    running_reqs = []
+    for req in self.running:
+        # Decode 每步生成 1 个 token
+        if budget.num_tokens >= budget.max_num_tokens:
+            break
+        # 检查是否需要新 block（当前 block 已满）
+        if req.num_tokens % self.block_size == 0:
+            if self.block_manager.can_allocate(1):
+                new_block = self.block_manager.allocate(1)
+                req.block_table.append(new_block)
+            else:
+                # 内存不足 → 抢占
+                self._preempt_by_swap_or_recompute(req)
+                continue
+        running_reqs.append(req)
+        budget.add_num_tokens(1)
+
+    return SchedulerOutput(
+        scheduled_new_reqs=new_reqs,
+        scheduled_running_reqs=running_reqs,
+        preempted_reqs=preempted_reqs,
+    )
+
+
+# ═══════════════════════════════════════════════════
+# _preempt() — 抢占机制
+# ═══════════════════════════════════════════════════
+def _preempt_by_swap(self, victim_req: Request) -> bool:
+    """将被抢占请求的 KV Cache swap 到 CPU"""
+    # 选择 victim: 最晚到达的请求（FCFS）
+    victim = self.running[-1]  # 最后到达 = 最低优先级
+
+    # 将 KV blocks 从 GPU 移到 CPU
+    cpu_blocks = self.block_manager.swap_out(victim.block_table)
+    victim.block_table = cpu_blocks
+    victim.status = SWAPPED
+
+    self.running.remove(victim)
+    self.swapped.append(victim)
+    return True  # 成功腾出空间
+
+def _preempt_by_recompute(self, victim_req: Request) -> bool:
+    """丢弃被抢占请求的 KV Cache，需要时重新计算"""
+    victim = self.running[-1]
+
+    # 直接释放物理 blocks（不 swap）
+    self.block_manager.free(victim.block_table)
+    victim.block_table = []
+    victim.status = WAITING_FOR_RECOMPUTE
+
+    self.running.remove(victim)
+    self.waiting.insert(0, victim)  # 放回等待队列最前面
+    return True
+
+
+# ═══════════════════════════════════════════════════
+# can_allocate() — 内存检查
+# ═══════════════════════════════════════════════════
+def can_allocate(self, num_blocks: int) -> bool:
+    """检查是否有足够空闲物理 blocks"""
+    free_blocks = self.num_free_gpu_blocks
+    # 需要预留一些 blocks 给正在运行的请求的未来 decode
+    reserved = self.num_running_reqs * self.blocks_per_reserve
+    available = free_blocks - reserved
+    return available >= num_blocks</code></pre>
+
+<h3>3.4 Chunked Prefill</h3>
+
+<div class="box info">
+<strong>问题：</strong>传统模式下，长 Prompt 的 Prefill 阶段会独占整个 GPU，阻塞所有 Decode 请求，导致 ITL（Inter-Token Latency）飙升。
+</div>
+
+<svg viewBox="0 0 900 406" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs><text x="450" y="20" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Chunked Prefill vs 传统 Prefill</text>
+<text x="45" y="48" fill="#fb7185" font-size="13" font-family="Courier New, monospace" text-anchor="start">传统模式:</text>
+<rect x="50" y="58" width="700" height="28" rx="6" fill="rgba(251,113,133,0.12)" stroke="#fb7185" stroke-width="1.5"/>
+<text x="400" y="76" fill="#e6edf3" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Prefill 10K tokens  (iteration 1-100)</text>
+<text x="760" y="76" fill="#fb7185" font-size="11" font-family="Courier New, monospace" text-anchor="start">← Decode 全部等待！</text>
+<rect x="50" y="96" width="60" height="24" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="80" y="112" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D1</text>
+<rect x="118" y="96" width="60" height="24" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="148" y="112" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D2</text>
+<rect x="186" y="96" width="60" height="24" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="216" y="112" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D3</text>
+<rect x="254" y="96" width="60" height="24" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="284" y="112" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D4</text>
+<rect x="322" y="96" width="60" height="24" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="352" y="112" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D5</text>
+<text x="400" y="112" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">... (iteration 101)</text>
+<text x="45" y="151" fill="#34d399" font-size="13" font-family="Courier New, monospace" text-anchor="start">Chunked Prefill (max_num_batched_tokens=4096):</text>
+<text x="45" y="183" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">iteration 1:</text>
+<rect x="180" y="169" width="460" height="28" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="410.0" y="187" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">Prefill 4096t</text>
+<rect x="655" y="169" width="55" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="682" y="187" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D1</text>
+<rect x="717" y="169" width="55" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="744" y="187" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D2</text>
+<rect x="779" y="169" width="55" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="806" y="187" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D3</text>
+<text x="45" y="235" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">iteration 2:</text>
+<rect x="180" y="221" width="460" height="28" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="410.0" y="239" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">Prefill 4096t</text>
+<rect x="655" y="221" width="55" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="682" y="239" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D1</text>
+<rect x="717" y="221" width="55" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="744" y="239" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D2</text>
+<rect x="779" y="221" width="55" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="806" y="239" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D3</text>
+<text x="45" y="287" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">iteration 3:</text>
+<rect x="180" y="273" width="203" height="28" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="281.5" y="291" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">Prefill 1808t</text>
+<rect x="398" y="273" width="55" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="425" y="291" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D1</text>
+<rect x="460" y="273" width="55" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="487" y="291" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D2</text>
+<rect x="522" y="273" width="55" height="28" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="549" y="291" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="middle">D3</text>
+<text x="450" y="326" fill="#34d399" font-size="13" font-family="Courier New, monospace" text-anchor="middle">→ Decode 请求的 ITL 大幅降低</text>
+<text x="45" y="351" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="start">关键参数: --max-num-batched-tokens (默认=模型 max_model_len)</text>
+<text x="45" y="369" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">设小一些(如 4096) → 更频繁地与 decode 混合 → ITL 更低</text>
+<text x="45" y="386" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="start">设大一些 → Prefill 吞吐更高，但 ITL 更高</text></svg>
+
+<!-- ==================== 第四章：内存管理 ==================== -->
+<h2>四、GPU 内存管理 — 每个 Byte 都不浪费</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>4.1 内存分配全景</h3>
+
+<svg viewBox="0 0 900 440" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs><text x="450" y="20" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">vLLM 的 GPU 内存分配</text>
+<text x="45" y="42" fill="#e6edf3" font-size="14" font-family="Courier New, monospace" text-anchor="start">GPU 总显存 (例: H100 80GB)</text>
+<rect x="35" y="55" width="830" height="365" rx="6" fill="rgba(100,116,139,0.05)" stroke="#64748b" stroke-width="1.5"/>
+<rect x="55" y="70" width="790" height="60" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="450" y="97.0" fill="#fbbf24" font-size="13" font-family="Courier New, monospace" text-anchor="middle">模型权重 (固定)</text>
+<text x="450" y="114.0" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="middle">← FP16: 参数量×2B  |  例: 72B 模型 → ~144GB (需多卡分片)</text>
+<rect x="55" y="138" width="790" height="50" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="450" y="160.0" fill="#22d3ee" font-size="13" font-family="Courier New, monospace" text-anchor="middle">激活值 (动态)</text>
+<text x="450" y="177.0" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="middle">← 与 batch_size 相关  |  每个请求的中间计算结果，通常 1-4GB</text>
+<rect x="55" y="196" width="790" height="40" rx="6" fill="rgba(100,116,139,0.08)" stroke="#64748b" stroke-width="1.5"/>
+<text x="450" y="213.0" fill="#64748b" font-size="13" font-family="Courier New, monospace" text-anchor="middle">CUDA Context + 框架开销</text>
+<text x="450" y="230.0" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="middle">← ~0.5-1GB</text>
+<rect x="55" y="244" width="790" height="75" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="450" y="278.5" fill="#a78bfa" font-size="13" font-family="Courier New, monospace" text-anchor="middle">KV Cache (剩余全部)</text>
+<text x="450" y="295.5" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="middle">← 这是 vLLM 的核心！gpu_memory_utilization 控制，占比最大</text>
+<rect x="55" y="327" width="790" height="50" rx="6" fill="rgba(251,113,133,0.12)" stroke="#fb7185" stroke-width="1.5"/>
+<text x="450" y="349.0" fill="#fb7185" font-size="13" font-family="Courier New, monospace" text-anchor="middle">Swap Space (CPU 内存预留)</text>
+<text x="450" y="366.0" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="middle">← 用于 preemption  |  --swap-space (默认 4GB)</text></svg>
+
+<h3>4.2 KV Cache 容量计算</h3>
+
+<p>理解 KV Cache 能装多少 tokens，是调优的关键：</p>
+
+<pre><code># KV Cache 容量计算公式
+# 每个 token 的 KV Cache 大小:
+bytes_per_token = 2 × num_layers × num_kv_heads × head_dim × dtype_bytes
+#   × 2: K 和 V 各一份
+#   dtype_bytes: FP16=2, FP8=1, INT4≈0.5
+
+# 例: Qwen2.5-72B (80层, 8 KV heads, 128 head dim, FP16)
+bytes_per_token = 2 × 80 × 8 × 128 × 2 = 327,680 bytes ≈ 320 KB
+
+# 可用 KV Cache = GPU总显存 × gpu_memory_utilization - 模型权重 - 激活值
+# H100 80GB, gpu_memory_utilization=0.9:
+# 可用 ≈ 72GB - 144GB(权重需要TP分片) - 2GB(激活)
+# 单卡 72B 需要 TP=2, 每卡 ~72GB 权重 → 可用 KV ≈ 80×0.9 - 72 - 2 ≈ -2GB
+# → 72B 单卡跑不了！需要 TP=4 或量化
+
+# 实际建议: 用 vLLM 的 --enforce-eager 启动，日志会打印 KV Cache 容量</code></pre>
+
+<h4>4.2.1 完整公式推导</h4>
+
+<div class="box info">
+<strong>KV Cache 内存的完整公式：</strong>
+</div>
+
+<pre><code># ═══════════════════════════════════════════════════
+# KV Cache 内存计算 — 完整公式
+# ═══════════════════════════════════════════════════
+
+# 单个 token 的 KV Cache 大小（字节）:
+#
+#   bytes_per_token = 2 × 2 × num_layers × num_kv_heads × head_dim × dtype_bytes
+#                     ↑  ↑
+#                     │  └── 第二个 2: 每个 head 需要 K 和 V 两份
+#                     └── 第一个 2: 不是这个意思！见下面详细解释
+#
+# 等等，让我重新解释公式中的 2×2:
+
+# 正确的分解:
+#
+# bytes_per_token = 2 (K和V) × num_layers × num_kv_heads × head_dim × dtype_bytes
+#
+# 为什么有时写 2×2？
+# 那是因为 GQA (Grouped Query Attention) 的关系:
+#   - MHA (Multi-Head Attention): num_kv_heads == num_heads
+#   - GQA (Grouped Query Attention): num_kv_heads < num_heads
+#   - MQA (Multi-Query Attention): num_kv_heads == 1
+#
+# 有些文章写 2×num_layers×num_heads×head_dim，那是 MHA 的特例
+# vLLM 统一用 num_kv_heads，所以公式是:
+#
+# bytes_per_token = 2 × num_layers × num_kv_heads × head_dim × dtype_bytes
+#
+# 其中 2 = K cache + V cache 两份
+
+# ═══════════════════════════════════════════════════
+# 各模型的具体计算
+# ═══════════════════════════════════════════════════
+
+# ── Qwen2.5-7B (MHA) ──
+# num_layers=28, num_kv_heads=4 (GQA), head_dim=128, FP16
+bytes_per_token_7b = 2 × 28 × 4 × 128 × 2 = 57,344 bytes ≈ 56 KB
+# 1000 并发 × 2048 tokens = 2,048,000 tokens
+# KV 总量 ≈ 56KB × 2M = 112 GB → 需要多卡！
+# 实际: H100 80GB, 权重 ~14GB, 可用 KV ≈ 58GB → 约 100 万 tokens
+# → 约 500 并发 × 2048 tokens
+
+# ── Qwen2.5-14B ──
+# num_layers=40, num_kv_heads=8, head_dim=128, FP16
+bytes_per_token_14b = 2 × 40 × 8 × 128 × 2 = 163,840 bytes ≈ 160 KB
+# H100 80GB, 权重 ~28GB, 可用 KV ≈ 44GB
+# → 约 27.5 万 tokens → 约 130 并发 × 2048 tokens
+
+# ── Qwen2.5-72B ──
+# num_layers=80, num_kv_heads=8, head_dim=128, FP16
+bytes_per_token_72b = 2 × 80 × 8 × 128 × 2 = 327,680 bytes ≈ 320 KB
+# H100 80GB × 4 (TP=4), 总权重 ~144GB (每卡 ~36GB)
+# 每卡可用 KV ≈ 80×0.9 - 36 - 2 ≈ 34GB
+# 4 卡总计 ≈ 136GB KV
+# → 约 42.5 万 tokens → 约 200 并发 × 2048 tokens
+
+# ── Llama-3.1-405B ──
+# num_layers=128, num_kv_heads=8, head_dim=128, FP16
+# H100 80GB × 8 (TP=8), 每卡权重 ~102GB/8 ≈ 12.75GB → 实际需要 TP=16 或量化
+# FP8 量化: 权重 ~51GB/卡 → TP=8 每卡 ~51GB → 可用 KV ≈ 21GB/卡
+# bytes_per_token = 2 × 128 × 8 × 128 × 2 = 524,288 bytes ≈ 512 KB (FP16)
+# bytes_per_token = 2 × 128 × 8 × 128 × 1 = 262,144 bytes ≈ 256 KB (FP8)</code></pre>
+
+<h4>4.2.2 与 gpu_memory_utilization 的关系</h4>
+
+<pre><code># vLLM 启动时的内存分配逻辑（伪代码）:
+#
+# total_gpu_memory = torch.cuda.get_device_properties().total_memory  # 如 80GB
+# usable_memory = total_gpu_memory × gpu_memory_utilization            # 如 72GB
+#
+# model_weights_size = 参数量 × dtype_bytes
+#   - FP16: 7B → 14GB, 14B → 28GB, 72B → 144GB (需 TP)
+#   - INT8: 减半
+#   - INT4/AWQ: 再减半
+#
+# cuda_overhead = ~0.5-1GB (CUDA context, cuBLAS workspace 等)
+# activation_memory = ~1-4GB (与 batch_size 相关，通常可忽略)
+#
+# kv_cache_size = usable_memory - model_weights_size - cuda_overhead - activation_memory
+# num_gpu_blocks = kv_cache_size ÷ (bytes_per_block)
+# bytes_per_block = 2 × num_layers × num_kv_heads × head_dim × dtype_bytes × block_size
+#
+# 最终: 最大 tokens = num_gpu_blocks × block_size
+#
+# ⚠️ gpu_memory_utilization 不是 KV Cache 的比例，而是总显存的使用比例！
+# 设太低 → KV Cache 少 → 并发低
+# 设太高 → 可能 OOM（PyTorch 的碎片化内存、临时 tensor 等）
+# 推荐: 0.85-0.92，视显存大小而定</code></pre>
+
+<!-- ==================== 第五章：核心参数调优 ==================== -->
+<h2>五、生产调优 — 80% 的性能来自这 4 个参数</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+  <tr><th>参数</th><th>默认值</th><th>作用</th><th>调优建议</th></tr>
+  <tr><td><strong>gpu-memory-utilization</strong></td><td>0.9</td><td>vLLM 可用的 GPU 显存比例</td><td>内存紧张时降到 0.85；充足时可到 0.95</td></tr>
+  <tr><td><strong>max-num-seqs</strong></td><td>256</td><td>同时处理的最大请求数</td><td>降低可减少 KV Cache 压力；升高可提升吞吐</td></tr>
+  <tr><td><strong>max-num-batched-tokens</strong></td><td>max_model_len</td><td>单次 iteration 最大 token 数</td><td>设 4096 开启 Chunked Prefill；设大提升 Prefill 吞吐</td></tr>
+  <tr><td><strong>max-model-len</strong></td><td>模型默认</td><td>单请求最大序列长度</td><td>降低可让更多请求并发；升高减少并发但支持长文本</td></tr>
+</table>
+
+<div class="box warn">
+<strong>⚠️ 内存三角关系：</strong><code>gpu-memory-utilization</code>、<code>max-model-len</code>、<code>max-num-seqs</code> 三者互相制约。增大 max-model-len 会减少可并发的请求数；增大 max-num-seqs 需要更多 KV Cache 空间。调优时要三者一起看。
+</div>
+
+<h3>5.1 CUDA Graph vs Eager Mode</h3>
+
+<pre><code># CUDA Graph (默认开启): 预录制 GPU kernel 序列，减少 CPU-GPU 同步开销
+# 优点: Decode 阶段加速 10-20%
+# 缺点: 首次启动慢、占用额外显存、对动态 shape 支持差
+
+# Eager Mode: 每次都实时调度 kernel
+# 适用: 模型有动态 shape、调试阶段、显存极度紧张
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --enforce-eager  # 关闭 CUDA Graph</code></pre>
+
+<h3>5.2 Prefix Caching</h3>
+
+<pre><code># 开启 Prefix Caching: 共享相同前缀的请求复用 KV Cache
+# 特别适合: 多轮对话、System Prompt 相同的批量请求
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --enable-prefix-caching
+
+# 效果: System Prompt 的 KV 只算一次，后续请求直接复用
+# 注意: 会增加少量内存开销（维护 hash 索引）</code></pre>
+
+<h3>5.3 Speculative Decoding</h3>
+
+<pre><code># 投机解码: 用小模型猜测 + 大模型验证，降低单请求延迟
+# 方法 1: Draft model
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-72B-Instruct \
+    --speculative-model Qwen/Qwen2.5-7B-Instruct \
+    --num-speculative-tokens 5
+
+# 方法 2: N-gram speculation (无需额外模型)
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --speculative-model ngram \
+    --ngram-prompt-lookup-max 4
+
+# 方法 3: Medusa (需要训练 Medusa heads)
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --speculative-model Qwen/Qwen2.5-7B-Medusa</code></pre>
+
+<!-- ==================== Benchmark 数据 ==================== -->
+<h2>六、真实 Benchmark 数据</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="box info">
+<strong>以下数据综合自 vLLM 官方 benchmark、Anyscale 博客、以及社区实测（2024-2025）。实际性能因硬件、驱动版本、请求分布而异，仅供参考。</strong>
+</div>
+
+<h3>6.1 H100 80GB 单卡性能（ShareGPT 数据集）</h3>
+
+<table>
+  <tr><th>模型</th><th>精度</th><th>并发数</th><th>吞吐量 (tokens/s)</th><th>TTFT P50 (ms)</th><th>TTFT P99 (ms)</th><th>ITL P50 (ms)</th><th>ITL P99 (ms)</th></tr>
+  <tr><td><strong>Qwen2.5-7B</strong></td><td>FP16</td><td>1</td><td>~45</td><td>~25</td><td>~50</td><td>~22</td><td>~28</td></tr>
+  <tr><td><strong>Qwen2.5-7B</strong></td><td>FP16</td><td>10</td><td>~350</td><td>~45</td><td>~120</td><td>~25</td><td>~45</td></tr>
+  <tr><td><strong>Qwen2.5-7B</strong></td><td>FP16</td><td>50</td><td>~1,200</td><td>~120</td><td>~350</td><td>~38</td><td>~85</td></tr>
+  <tr><td><strong>Qwen2.5-7B</strong></td><td>FP16</td><td>100</td><td>~1,800</td><td>~250</td><td>~800</td><td>~55</td><td>~150</td></tr>
+  <tr><td><strong>Qwen2.5-7B</strong></td><td>AWQ-INT4</td><td>100</td><td>~2,500</td><td>~180</td><td>~600</td><td>~40</td><td>~110</td></tr>
+  <tr><td colspan="8" style="border:0;height:8px"></td></tr>
+  <tr><td><strong>Llama-3-8B</strong></td><td>FP16</td><td>1</td><td>~48</td><td>~23</td><td>~48</td><td>~20</td><td>~26</td></tr>
+  <tr><td><strong>Llama-3-8B</strong></td><td>FP16</td><td>100</td><td>~1,900</td><td>~230</td><td>~750</td><td>~52</td><td>~140</td></tr>
+  <tr><td colspan="8" style="border:0;height:8px"></td></tr>
+  <tr><td><strong>Llama-3-70B</strong></td><td>FP16</td><td>1</td><td>~12</td><td>~85</td><td>~180</td><td>~80</td><td>~100</td></tr>
+  <tr><td><strong>Llama-3-70B</strong></td><td>FP16</td><td>10</td><td>~100</td><td>~150</td><td>~400</td><td>~95</td><td>~180</td></tr>
+  <tr><td><strong>Llama-3-70B</strong></td><td>FP16</td><td>50</td><td>~350</td><td>~500</td><td>~1500</td><td>~130</td><td>~350</td></tr>
+  <tr><td><strong>Llama-3-70B</strong></td><td>AWQ-INT4</td><td>50</td><td>~550</td><td>~350</td><td>~1000</td><td>~90</td><td>~250</td></tr>
+</table>
+
+<h3>6.2 A100 80GB 性能对比</h3>
+
+<table>
+  <tr><th>模型</th><th>精度</th><th>并发数</th><th>吞吐量 (tokens/s)</th><th>TTFT P50 (ms)</th><th>ITL P50 (ms)</th><th>vs H100</th></tr>
+  <tr><td><strong>Qwen2.5-7B</strong></td><td>FP16</td><td>100</td><td>~1,100</td><td>~400</td><td>~85</td><td>~60%</td></tr>
+  <tr><td><strong>Llama-3-8B</strong></td><td>FP16</td><td>100</td><td>~1,200</td><td>~380</td><td>~80</td><td>~63%</td></tr>
+  <tr><td><strong>Llama-3-70B</strong></td><td>FP16</td><td>50</td><td>~220</td><td>~800</td><td>~200</td><td>~63%</td></tr>
+</table>
+
+<h3>6.3 多卡扩展性（Llama-3-70B FP16, 并发=50）</h3>
+
+<table>
+  <tr><th>GPU 配置</th><th>策略</th><th>吞吐量 (tokens/s)</th><th>TTFT P50 (ms)</th><th>扩展效率</th></tr>
+  <tr><td>1× H100</td><td>AWQ-INT4 单卡</td><td>~550</td><td>~350</td><td>基线</td></tr>
+  <tr><td>2× H100</td><td>TP=2 FP16</td><td>~450</td><td>~300</td><td>—</td></tr>
+  <tr><td>4× H100</td><td>TP=4 FP16</td><td>~650</td><td>~200</td><td>—</td></tr>
+  <tr><td>8× H100</td><td>TP=8 FP16</td><td>~900</td><td>~150</td><td>—</td></tr>
+</table>
+
+<div class="box tip">
+<strong>关键观察：</strong>
+<ul>
+<li><strong>7B 模型</strong>：单卡 H100 即可，量化后吞吐提升 30-40%</li>
+<li><strong>70B 模型</strong>：TP=4 是性价比最优；TP=8 通信开销明显</li>
+<li><strong>TTFT</strong>：与 Prompt 长度强相关，Chunked Prefill 可显著降低</li>
+<li><strong>ITL</strong>：并发数越高 ITL 越大（GPU 计算资源竞争）</li>
+<li><strong>P99 vs P50</strong>：长 Prompt 请求的 TTFT 可能是 P50 的 3-5 倍</li>
+</ul>
+</div>
+
+<h3>6.4 如何运行自己的 Benchmark</h3>
+
+<pre><code># 1. 启动 vLLM 服务
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --gpu-memory-utilization 0.9 \
+    --port 8000
+
+# 2. 运行官方 benchmark（ShareGPT 数据集）
+python benchmarks/benchmark_serving.py \
+    --backend openai \
+    --base-url http://localhost:8000 \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --dataset-name sharegpt \
+    --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json \
+    --num-prompts 1000 \
+    --request-rate inf  # 尽快发送，测最大吞吐
+
+# 3. 测试不同并发（控制 request-rate）
+for rate in 1 5 10 20 50 100; do
+    python benchmarks/benchmark_serving.py \
+        --request-rate $rate --num-prompts 500 \
+        --base-url http://localhost:8000 \
+        --model Qwen/Qwen2.5-7B-Instruct
+done
+
+# 4. 使用随机数据（无需下载数据集）
+python benchmarks/benchmark_serving.py \
+    --backend openai \
+    --base-url http://localhost:8000 \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --dataset-name random \
+    --random-input-len 1024 \
+    --random-output-len 128 \
+    --num-prompts 500
+
+# 输出示例:
+# Throughput: 1,234.56 tokens/s
+# TTFT (ms):  median=125, p99=450, max=890
+# ITL (ms):   median=38, p99=85, max=120
+# E2E (ms):   median=2100, p99=5200, max=8900</code></pre>
+
+<!-- ==================== 第七章：高级特性 ==================== -->
+<h2>七、高级特性</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>6.1 多模态推理</h3>
+
+<pre><code># vLLM 支持视觉/音频模型的推理
+# 视觉模型示例 (Qwen2.5-VL):
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
+
+response = client.chat.completions.create(
+    model="Qwen/Qwen2.5-VL-7B-Instruct",
+    messages=[{
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}},
+            {"type": "text", "text": "描述这张图片"}
+        ]
+    }]
+)
+
+# 多模态 Embedding 缓存: 相同图片的 ViT 编码只算一次
+# 开启: --enable-prefix-caching (自动缓存视觉 embedding)</code></pre>
+
+<h3>6.2 Disaggregated Prefill/Decode (PD 分离)</h3>
+
+<pre><code># vLLM 支持与 Dynamo 集成的 PD 分离模式
+# Prefill Worker: 专门处理 Prompt 编码
+# Decode Worker: 专门处理 Token 生成
+
+# 配置示例 (需要 vLLM >= 0.18):
+# Prefill worker
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-72B-Instruct \
+    --role prefill \
+    --kv-transfer-config '{"kv_connector":"NIXL"}'
+
+# Decode worker
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-72B-Instruct \
+    --role decode \
+    --kv-transfer-config '{"kv_connector":"NIXL"}'</code></pre>
+
+<!-- ==================== 第七章：LoRA 多租户 ==================== -->
+<h3>6.3 LoRA 热切换与多租户</h3>
+
+<pre><code># vLLM 支持运行时加载/切换 LoRA adapter
+# 启动时加载多个 LoRA:
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --enable-lora \
+    --max-lora-rank 64 \
+    --lora-modules \
+        adapter1=./lora-adapter-1 \
+        adapter2=./lora-adapter-2
+
+# 请求时指定 LoRA:
+curl http://localhost:8000/v1/chat/completions \
+  -d '{"model": "adapter1", "messages": [...]}'
+
+# 效果: 一个基座模型 + N 个 LoRA adapter = N 个"不同模型"
+# 内存: 每个 LoRA adapter 仅需几十 MB（vs 基座模型几十 GB）</code></pre>
+
+<!-- ==================== 第八章：踩坑指南 ==================== -->
+<h2>八、生产踩坑指南</h2>
+>
+
+<h3>八、生产踩坑指南</h3>
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+  <tr><th>问题</th><th>原因</th><th>解决方案</th></tr>
+  <tr><td>启动时报 OOM</td><td>模型太大或 max-model-len 太大</td><td>降低 max-model-len 或使用量化（AWQ/GPTQ）</td></tr>
+  <tr><td>吞吐量远低于预期</td><td>请求太短/并发太低</td><td>增大 max-num-seqs；用 benchmark_serving.py 测试</td></tr>
+  <tr><td>ITL 偶发飙升</td><td>长 Prompt Prefill 阻塞 Decode</td><td>开启 Chunked Prefill（设 max-num-batched-tokens=4096）</td></tr>
+  <tr><td>首 token 延迟高</td><td>Prompt 太长</td><td>开启 Prefix Caching；考虑 Prompt 压缩</td></tr>
+  <tr><td>CUDA Graph 初始化慢</td><td>首次编译 CUDA Graph</td><td>正常现象；或用 --enforce-eager 关闭</td></tr>
+  <tr><td>多卡通信瓶颈</td><td>TP 通信开销</td><td>检查 NCCL 配置；考虑 PP 替代 TP</td></tr>
+</table>
+
+<pre><code># 性能基准测试
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-7B-Instruct --port 8000
+
+# 使用官方 benchmark 工具
+python benchmarks/benchmark_serving.py \
+    --backend openai \
+    --base-url http://localhost:8000 \
+    --model Qwen/Qwen2.5-7B-Instruct \
+    --dataset-name sharegpt \
+    --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json \
+    --num-prompts 1000 \
+    --request-rate 10
+
+# 关注指标:
+# - Throughput (tokens/s): 吞吐量
+# - TTFT (ms): Time To First Token，首 token 延迟
+# - ITL (ms): Inter-Token Latency，token 间延迟
+# - P99 TTFT/ITL: 长尾延迟</code></pre>
+
+<!-- ==================== 第九章：面试高频问题 ==================== -->
+<h2>九、面试高频问题</h2>
+<h3>九、面试高频问题</h3>
+
+
+<div class="deep"><strong>深入探讨：</strong>从系统设计的<strong>底层原理</strong>看，一、系统架构 — 请求的完整生命周期的核心挑战是在性能、精度和资源三者之间寻找最优平衡。<strong>为什么</strong>不能同时最大化三者？因为提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），减少资源又会降低性能。理解这个三角约束，就能推导出大多数技术选择背后的逻辑。</div>
+<div class="ascii"><pre>LLM 推理全流程
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
+│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
+└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
+                                       └──────────────┘    └────┬─────┘
+                     ┌──────────────┐    ┌──────────────┐      │
+                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
+                     │  "你好！..." │    │  解码        │
+                     └──────────────┘    └──────────────┘</pre></div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="box purple">
+<strong>Q1: PagedAttention 和传统 KV Cache 的核心区别是什么？</strong><br>
+<strong>A:</strong> 传统方案为每个请求预分配连续的 KV Cache 内存（按最大长度），导致严重的内存浪费和碎片化。PagedAttention 借鉴操作系统的虚拟内存，将 KV Cache 分成固定大小的 Block，按需分配，不要求连续。通过 Block Table（类似页表）映射逻辑块到物理块，内存利用率从 20-40% 提升到 96%+。
+</div>
+
+<div class="box purple">
+<strong>Q2: vLLM 的 Scheduler 如何决定先处理哪个请求？</strong><br>
+<strong>A:</strong> 默认 FCFS（先来先服务），优先 swap-in 被抢占的请求。当 GPU 内存不足时，抢占最晚到达的请求（Swap 或 Recompute）。可以通过 Chunked Prefill 让 Prefill 和 Decode 混合调度，避免长 Prefill 阻塞 Decode。
+</div>
+
+<div class="box purple">
+<strong>Q3: Copy-on-Write 在 vLLM 中如何工作？</strong><br>
+<strong>A:</strong> 当多个请求共享相同前缀时（如 System Prompt），它们的 KV Cache blocks 通过引用计数共享同一份物理内存。只有当某个请求需要修改共享 block 时（生成新 token），才会复制一份。这在多轮对话和 Agent 场景中节省大量内存。
+</div>
+
+<div class="box purple">
+<strong>Q4: 如何估算一个模型需要多少 GPU 内存？</strong><br>
+<strong>A:</strong> 三部分：(1) 模型权重：参数量 × dtype_bytes（FP16=2B，INT4≈0.5B）；(2) KV Cache：2 × layers × kv_heads × head_dim × dtype_bytes × 当前序列长度 × 并发数；(3) 激活值和框架开销：通常 1-4GB。例如 7B FP16 模型需要 ~14GB 权重 + N × KV 开销。单卡 24GB 可以跑 7B + 约 2000-4000 tokens 的 KV Cache。
+</div>
+
+<div class="box purple">
+<strong>Q5: vLLM 和 SGLang 的架构级区别？</strong><br>
+<strong>A:</strong> vLLM 用 PagedAttention（基于 Block Table 的页式管理），适合通用场景。SGLang 用 RadixAttention（基于基数树的前缀管理），在多轮对话和 Agent 场景中前缀复用更智能。vLLM 社区更大、模型支持更广；SGLang 在结构化生成（JSON/正则约束）方面更强。
+</div>
+
+<div class="nav-bottom">
+  <a href="00-框架总览.html">← 框架总览</a>
+  <a href="02-TensorRT-LLM.html">下一章：TensorRT-LLM →</a>
+</div>
+
+</div>
+<div class="deep"><strong>一、系统架构 — 请求的完整生命周期的技术原理与数学推导：</strong>
+从<strong>底层</strong>硬件角度分析，一、系统架构 — 请求的完整生命周期的性能瓶颈通常在于内存带宽而非计算能力。
+<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
+因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
+这一<strong>数学本质</strong>决定了一、系统架构 — 请求的完整生命周期的所有优化策略都应围绕减少内存访问展开。
+从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
+是提升算术强度的两大核心手段。
+</div>
+<div class="deep"><strong>一、系统架构 — 请求的完整生命周期的系统架构分析：</strong>
+从系统设计的<strong>原理</strong>出发，一、系统架构 — 请求的完整生命周期采用分层架构来管理复杂性。
+<strong>为什么</strong>分层是主流选择？<strong>推导</strong>如下：
+设系统有N个组件，全连接交互复杂度为O(N²)，分层后降低到O(N·L)，L为层数。
+<strong>数学本质</strong>上，这是用少量层间通信开销换取大幅降低的组件间耦合。
+在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过标准接口解耦——
+这类似于TCP/IP协议栈的设计<strong>原理</strong>，每层独立优化，层内改动不影响整体。
+</div>
+<div class="ascii">
+一、系统架构 — 请求的完整生命周期 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+  PCIe传输       Tensor Core          结果回传
+</div>
+<div class="ascii">
+一、系统架构 — 请求的完整生命周期 性能分析 (屋顶模型)
+                    
+  计算吞吐  │         ╱ 计算受限区
+  (TFLOPS)  │       ╱
+            │     ╱   ← 实际工作点
+            │   ╱
+            │ ╱ 带宽受限区
+            │╱
+            └──────────────── 带宽利用率
+             
+  转折点 = 峰值算力 / 峰值带宽
+  A100: 312T/2T = 156 FLOPs/Byte
+  H100: 989T/3.35T = 295 FLOPs/Byte
+</div>
+<div class="tip"><strong>相关章节：</strong>
+一、系统架构 — 请求的完整生命周期与以下内容密切相关：<a href="00-框架总览.html">00-框架总览</a> | <a href="02-TensorRT-LLM.html">02-TensorRT-LLM</a> | <a href="03-SGLang.html">03-SGLang</a>。
+建议结合这些章节一起学习，形成完整的知识体系。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+在学习一、系统架构 — 请求的完整生命周期时，建议先建立整体认知框架，再深入细节。
+用最小化实验验证核心概念——比如用小模型+短序列跑通完整流程，
+确认理解正确后再扩展到生产规模。记录每一步的性能数据，
+建立自己的"优化知识库"，这些经验在后续项目中会反复用到。
+</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+  <li>请用自己的话解释<strong>一、系统架构 — 请求的完整生命周期</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>二、PagedAttention — vLLM 的灵魂</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>三、Scheduler 调度器 — 决定谁先跑</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>四、GPU 内存管理 — 每个 Byte 都不浪费</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>五、生产调优 — 80% 的性能来自这 4 个参数</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+一、系统架构 — 请求的完整生命周期的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body></html>

@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04-自回归生成与采样 | LLM 系统学习</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.deep{background:rgba(188,140,255,0.08);border-left:4px solid var(--purple)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+</head>
+<body>
+<div class="nav">
+  <a href="03-Embedding嵌入.html">&larr; 03-Embedding嵌入</a>
+  <span>01-语言模型基础 / 自回归生成与采样</span>
+  <a href="05-总结与练习.html">05-总结与练习 &rarr;</a>
+</div>
+<div class="container">
+<h1>🎲 4. 自回归生成与采样策略</h1>
+
+<h2>4.1 Prefill 与 Decode</h2>
+<div class="ascii">LLM 推理的两个阶段:
+
+阶段1: Prefill (预填充) — 并行，快
+  输入: "今天天气" (4个 token)
+  4个 token 一次性并行处理
+  计算所有位置的 K/V → 存入 KV Cache
+  输出: 第一个预测 token "很"
+  耗时: ~10ms (取决于输入长度)
+
+阶段2: Decode (解码) — 串行，慢
+  每次只输入 1 个新 token，复用 KV Cache
+  第1步: 输入 "很" → 预测 "好"    (复用 KV1~KV4)
+  第2步: 输入 "好" → 预测 ","      (复用 KV1~KV5)
+  第3步: 输入 "," → 预测 "适"      (复用 KV1~KV6)
+  ...直到 &lt;EOS&gt; 或最大长度
+  耗时: 每步 ~10-50ms</div>
+
+<div class="box warn"><div class="label">⚠️ 关键性能差异</div>
+Prefill 是并行的（快），Decode 是串行的（慢）。生成 100 个 token 需要 100 次前向传播。这就是为什么 LLM 推理需要 KV Cache 和各种优化技术。</div>
+
+<div class="box tip"><div class="label">💡 通俗类比：Prefill vs Decode 就像"读题"和"答题"</div>
+Prefill 像是"读题" — 你可以一次读完整个题目（并行处理所有输入 token）。Decode 像是"手写答题" — 你只能一个字一个字地写（每次生成一个 token）。读题很快，但写字很慢，尤其是长篇大论的回答。</div>
+
+<div class="ascii">KV Cache 的作用 — 避免重复计算:
+
+没有 KV Cache (浪费):
+  第1步: 处理 [今天天气] → 预测 "很"     ← 算了4个token的K/V
+  第2步: 处理 [今天天气很] → 预测 "好"    ← 重算前4个的K/V！
+  第3步: 处理 [今天天气很好] → 预测 ","   ← 又重算前5个的K/V！
+  复杂度: O(1+2+3+...+n) = O(n²)
+
+有 KV Cache (高效):
+  第1步: 处理 [今天天气] → KV1~4存入Cache → 预测 "很"
+  第2步: 只处理 [很]，从Cache读KV1~4 → 预测 "好"
+  第3步: 只处理 [好]，从Cache读KV1~5 → 预测 ","
+  复杂度: O(n) — 每步只算1个新token</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨：KV Cache 的内存瓶颈</div>
+KV Cache 虽然避免了重复计算，但代价是巨大的内存开销。对于 LLaMA-2 70B，处理 4K 上下文的 KV Cache 需要约 2.5GB 显存（每增加一个请求就多 2.5GB）。这就是为什么长上下文和高并发推理如此昂贵 — 不是计算不够，而是显存放不下 KV Cache。MQA (Multi-Query Attention) 和 GQA (Grouped-Query Attention) 等技术就是为了解决这个问题。</div>
+
+<h2>4.2 Temperature (温度)</h2>
+<p>模型输出的是 logits（未归一化的分数），需要转为概率分布。温度参数 τ 控制分布的"尖锐程度"：</p>
+<pre><code><span class="comment"># 温度缩放</span>
+scaled_logits = logits / temperature
+
+<span class="comment"># 然后 softmax</span>
+probabilities = softmax(scaled_logits)</code></pre>
+
+<table>
+<tr><th>温度</th><th>效果</th><th>概率分布形状</th><th>适用场景</th></tr>
+<tr><td>τ → 0</td><td>贪心，总选最高概率</td><td>尖锐 (接近 one-hot)</td><td>事实问答、代码</td></tr>
+<tr><td>τ = 0.3</td><td>稍有随机性</td><td>较尖锐</td><td>翻译、摘要</td></tr>
+<tr><td>τ = 1.0</td><td>按原始概率采样</td><td>原始分布</td><td>通用对话</td></tr>
+<tr><td>τ = 1.5</td><td>更随机</td><td>平坦</td><td>创意写作</td></tr>
+</table>
+
+<div class="box tip"><div class="label">💡 通俗类比：Temperature 就像"创意旋钮"</div>
+温度低 (τ→0) = 严谨的会计，每一步都选最稳妥的选项，结果可预测但可能死板。温度高 (τ=1.5) = 天马行空的艺术家，经常选意想不到的词，结果可能有创意但容易出错。调 Temperature 就是在"可靠性"和"创造性"之间找平衡。</div>
+
+<div class="ascii">不同温度下同一个 logits 的概率分布:
+
+原始 logits: [猫:3.0, 狗:2.5, 鱼:1.0, 鸟:0.5]
+
+τ=0.1 (极低):
+  猫 ██████████████████████████████████████ 92%
+  狗 ████  7%
+  鱼 · 0.5%
+  鸟 · 0.1%
+
+τ=1.0 (原始):
+  猫 ████████████████  38%
+  狗 ████████████  28%
+  鱼 ████  18%
+  鸟 ███  16%
+
+τ=2.0 (高):
+  猫 █████████  29%
+  狗 ████████  27%
+  鱼 ██████  23%
+  鸟 █████  21%</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨：Temperature = 0 真的是"贪心"吗？</div>
+严格来说，Temperature → 0 才是贪心（趋近于 one-hot）。实际 API 中 temperature=0 通常等价于 greedy decoding — 总是选概率最高的 token。但注意：贪心解码不保证找到全局最优序列，因为局部最优不一定组合成全局最优。Beam Search 通过保留多个候选序列来缓解这个问题，但计算开销更大。</div>
+
+<h2>4.3 Top-k 采样</h2>
+<p>只从概率最高的 k 个 token 中采样：</p>
+<pre><code><span class="comment"># Top-k 过滤</span>
+top_k_logits = logits.copy()
+top_k_logits[rank > k] = -inf   <span class="comment"># 只保留前 k 个</span>
+probs = softmax(top_k_logits)</code></pre>
+<p>问题: k 是固定的。当分布很尖锐时 (如 "1+1=")，k=50 太宽；当分布很平坦时，k=50 又太窄。</p>
+
+<div class="ascii">Top-k 采样的问题:
+
+情况1: 分布尖锐 ("1+1=" → 应该是 "2")
+  原始: [2:95%, 3:3%, 4:1%, ...]
+  Top-k(50): [2:95%, 3:3%, 4:1%, ..., 第50个:0.01%]
+  → k=50 太宽，可能选到荒谬的答案
+
+情况2: 分布平坦 (开放性问题)
+  原始: [A:8%, B:7%, C:6%, ..., Z:2%]
+  Top-k(50): 保留前50个
+  → k=50 可能太窄，排除了合理的低概率选项</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区：Top-k 越大越"安全"？</div>
+不是。Top-k 太大会引入噪声（低概率的荒谬 token），太小会限制多样性。而且"安全"的 k 值取决于具体上下文 — 数学计算需要小 k，创意写作需要大 k。这就是为什么 Top-p 采样更常用 — 它能自适应调整候选集大小。</div>
+
+<h2>4.4 Top-p (Nucleus) 采样</h2>
+<p>自适应选择候选集：从概率最高的 token 开始累加，直到累计概率达到 p：</p>
+<pre><code><span class="comment"># Top-p 过滤</span>
+sorted_probs = sort(probs, descending=True)
+cumulative = cumsum(sorted_probs)
+<span class="comment"># 找到累积概率超过 p 的位置</span>
+cutoff_index = first_index_where(cumulative >= p)
+probs[rank > cutoff_index] = 0   <span class="comment"># 只保留前面的</span>
+probs = probs / sum(probs)       <span class="comment"># 重新归一化</span></code></pre>
+
+<div class="box tip"><div class="label">💡 通俗类比：Top-p 就像"90% 信心区间"</div>
+Top-p=0.9 的意思是：只从模型"有 90% 信心"的候选词中选择。当模型很确定时（如 "1+1="），候选集可能只有 1-2 个词；当模型不确定时（如开放式问题），候选集会更大。它能自动适应不同上下文的需求。</div>
+
+<div class="ascii">Top-p 自适应候选集:
+
+情况1: 分布尖锐 ("1+1=")
+  P("2") = 0.95  ← 累计 0.95 > 0.9 → 候选集只有 ["2"]
+  P("3") = 0.03
+  P("4") = 0.01
+  → 自动收紧到 1 个选项
+
+情况2: 分布平坦 (开放问题)
+  P("A") = 0.15  ← 累计 0.15
+  P("B") = 0.12  ← 累计 0.27
+  P("C") = 0.10  ← 累计 0.37
+  P("D") = 0.09  ← 累计 0.46
+  P("E") = 0.08  ← 累计 0.54
+  P("F") = 0.07  ← 累计 0.61
+  P("G") = 0.06  ← 累计 0.67
+  P("H") = 0.05  ← 累计 0.72
+  P("I") = 0.04  ← 累计 0.76
+  P("J") = 0.04  ← 累计 0.80
+  P("K") = 0.04  ← 累计 0.84
+  P("L") = 0.04  ← 累计 0.88
+  P("M") = 0.04  ← 累计 0.92 > 0.9 → 候选集 13 个词
+  → 自动扩展到更多选项</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨：Top-p 的数学直觉</div>
+Top-p 本质上是在做"截断分布" — 把概率质量集中在最可能的 token 上，然后重新归一化。这保证了采样结果的概率分布仍然是合法的（和为 1）。一个有趣的观察：Top-p 的有效 k 值随上下文动态变化。在确定性高的位置，有效 k≈1（接近贪心）；在不确定的位置，有效 k 可能很大。这比固定 k 的 Top-k 优雅得多。</div>
+
+<h2>4.5 组合策略</h2>
+<p>实践中通常同时使用 Top-k + Top-p + Temperature：</p>
+<pre><code><span class="comment"># 典型的采样流程</span>
+1. Temperature: logits = logits / temperature
+2. Top-k: 保留前 50 个 token
+3. Top-p: 在 Top-k 基础上，进一步用 p=0.9 过滤
+4. 从最终分布中采样</code></pre>
+
+<div class="ascii">采样流水线:
+
+原始 logits (50K 个 token)
+    │
+    ▼
+┌──────────────┐
+│ Temperature  │  logits / τ
+│ τ = 0.7      │  ← 调节随机性
+└──────────────┘
+    │
+    ▼
+┌──────────────┐
+│   Top-k      │  只保留前 50 个
+│   k = 50     │  ← 硬性截断
+└──────────────┘
+    │  从 50K → 50 个候选
+    ▼
+┌──────────────┐
+│   Top-p      │  累积概率 < 0.9
+│   p = 0.9    │  ← 软性截断
+└──────────────┘
+    │  从 50 → 可能 10~30 个
+    ▼
+┌──────────────┐
+│   采样       │  按概率随机选 1 个
+└──────────────┘
+    │
+    ▼
+  输出 token</div>
+
+<div class="box tip"><div class="label">💡 通俗类比：组合策略就像"多层过滤网"</div>
+Temperature 是调节水流速度（控制随机性），Top-k 是粗滤网（去掉明显杂质），Top-p 是细滤网（只保留精华）。三层过滤后，水质（输出质量）才有保证。不同场景需要不同组合 — 写代码需要收紧（低温度、小 k、小 p），写故事需要放松（高温度、大 k、大 p）。</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区：先 Top-p 再 Top-k？</div>
+顺序很重要！标准做法是先 Temperature → Top-k → Top-p。如果反过来，Top-p 在 Temperature 之前应用的话，温度缩放会改变已筛选的分布形状，效果不可控。各框架（HuggingFace、vLLM、TGI）都是按 Temperature → Top-k → Top-p 的顺序实现的。</div>
+
+<table>
+<tr><th>场景</th><th>Temperature</th><th>Top-k</th><th>Top-p</th><th>理由</th></tr>
+<tr><td>代码生成</td><td>0.0~0.2</td><td>10</td><td>0.9</td><td>需要确定性，减少错误</td></tr>
+<tr><td>事实问答</td><td>0.0</td><td>1</td><td>1.0</td><td>贪心，确保准确</td></tr>
+<tr><td>通用对话</td><td>0.7</td><td>50</td><td>0.9</td><td>平衡准确性和自然感</td></tr>
+<tr><td>创意写作</td><td>1.0~1.5</td><td>100</td><td>0.95</td><td>鼓励多样性和创造力</td></tr>
+<tr><td>翻译</td><td>0.3</td><td>20</td><td>0.85</td><td>需要准确但允许灵活性</td></tr>
+</table>
+
+<h2>4.6 其他采样技术</h2>
+<table>
+<tr><th>技术</th><th>描述</th><th>用途</th></tr>
+<tr><td>Repetition Penalty</td><td>惩罚已出现的 token，减少重复</td><td>长文本生成</td></tr>
+<tr><td>Frequency Penalty</td><td>按出现频率惩罚</td><td>多样性控制</td></tr>
+<tr><td>Presence Penalty</td><td>只要出现过就惩罚</td><td>话题多样性</td></tr>
+<tr><td>Beam Search</td><td>保留多个候选序列，选最优</td><td>翻译、摘要</td></tr>
+</table>
+
+<div class="box tip"><div class="label">💡 通俗类比：惩罚机制就像"避免复读机"</div>
+Repetition Penalty 像老师提醒学生"你已经说过这个词了，换一个"。Frequency Penalty 更严格 — "这个词出现太多次了，扣分"。Presence Penalty 最温和 — "这个词用过了，稍微降低一点倾向"。它们都是为了解决 LLM 的通病：一旦开始重复就停不下来。</div>
+
+<div class="ascii">Beam Search vs 采样:
+
+贪心采样 (每次选最好的):
+  Step1: "今天" → "天气" (选最好的)
+  Step2: "天气" → "很好" (选最好的)
+  结果: "今天天气很好"  ← 可能不是全局最优
+
+Beam Search (beam_width=3, 同时保留3条路径):
+  Step1: "今天" → "天气"(0.4) "很好"(0.3) "上午"(0.2)
+  Step2: "天气" → "很好"(0.36) "不错"(0.28) "晴朗"(0.24)
+         "很好" → "的"(0.27) ...
+         "上午" → "好"(0.16) ...
+  Step3: 选概率最高的完整序列
+  结果: "今天天气很好"  ← 更接近全局最优</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨：Speculative Decoding — 用小模型加速大模型</div>
+传统 Decode 每步只能生成 1 个 token，串行瓶颈明显。Speculative Decoding 的思路是：用一个轻量"草稿模型"快速生成多个候选 token，再用大模型一次性验证。如果草稿正确（大模型也同意），就一次"吃掉"多个 token，显著减少前向传播次数。这在不改变输出质量的前提下，可以实现 2-3x 的推理加速。</div>
+
+
+<h2>4.7 推理优化技术概览</h2>
+<p>LLM 推理的瓶颈主要在于 Decode 阶段的串行特性。以下介绍几种关键的推理优化技术。</p>
+
+<h3>Continuous Batching（连续批处理）</h3>
+<p>传统的静态批处理要求一个批次中的所有请求同时开始、同时结束。但 LLM 的请求长度差异很大 — 一个请求可能只需要生成 10 个 token，另一个需要生成 1000 个。静态批处理会导致短请求等待长请求结束，造成严重的资源浪费。</p>
+<p>Continuous Batching 允许在 Decode 过程中动态地添加新请求和移除已完成的请求。当一个请求生成了 EOS token，立即释放其资源给新请求。这种方式可以将 GPU 利用率从 30-50% 提升到 80-90%。</p>
+
+<div class="ascii">静态批处理 vs 连续批处理:
+
+静态批处理 (Static Batching):
+  时间 →
+  请求1: [============]  完成
+  请求2: [====================]  完成
+  请求3: [========]  完成
+  GPU:   [████████░░░░░░░░████]  利用率低 (大量等待)
+
+连续批处理 (Continuous Batching):
+  时间 →
+  请求1: [====]完成
+  请求4:    [======]完成
+  请求2: [========]完成
+  请求5:        [====]完成
+  请求3: [====]完成
+  请求6:            [======]
+  GPU:   [████████████████████]  利用率高 (无空闲)</div>
+
+<h3>PagedAttention 与 vLLM</h3>
+<p>KV Cache 的内存管理是一个重要问题。传统方式为每个请求预分配一段连续内存，大小等于最大上下文长度。但实际生成长度通常远小于最大长度，导致大量内存浪费。</p>
+<p>PagedAttention 借鉴了操作系统的虚拟内存思想：将 KV Cache 分成固定大小的"页"（block），按需分配。当一个请求完成时，其页面可以立即被回收分配给新请求。这种方式将 KV Cache 的内存利用率从约 20-40% 提升到接近 100%。</p>
+
+<div class="box deep"><div class="label">🔬 深入探讨：PagedAttention 的工作原理</div>
+<p>PagedAttention 将每个请求的 KV Cache 分成多个固定大小的块（block），每个块存储固定数量的 token 的 KV 向量。这些块不需要在物理内存中连续存放 — 通过一个"块表"（block table）记录逻辑块到物理块的映射。当需要读取某个位置的 KV 向量时，先查块表找到物理地址，再读取数据。</p>
+<p>这种设计带来了三个关键优势：(1) 内存碎片化几乎为零；(2) 可以实现 Copy-on-Write — 当多个请求共享相同的前缀（如系统提示）时，它们的 KV Cache 可以共享同一组物理块，只在出现差异时才复制；(3) 内存分配是 O(1) 的，不需要预先知道请求的最终长度。</p>
+</div>
+
+<table>
+<tr><th>推理优化技术</th><th>解决的问题</th><th>加速倍数</th><th>代表框架</th></tr>
+<tr><td>KV Cache</td><td>避免重复计算</td><td>10-100x</td><td>所有框架</td></tr>
+<tr><td>Continuous Batching</td><td>GPU 利用率低</td><td>2-5x</td><td>vLLM, TGI</td></tr>
+<tr><td>PagedAttention</td><td>KV Cache 内存浪费</td><td>2-4x（吞吐量）</td><td>vLLM</td></tr>
+<tr><td>GQA/MQA</td><td>KV Cache 内存大</td><td>4-8x（内存节省）</td><td>LLaMA-3, Mistral</td></tr>
+<tr><td>Flash Attention</td><td>注意力计算慢</td><td>2-4x</td><td>FlashAttention-2</td></tr>
+<tr><td>投机解码</td><td>Decode 串行慢</td><td>2-3x</td><td>Speculative Decoding</td></tr>
+<tr><td>量化 (INT4/INT8)</td><td>模型太大</td><td>2-4x（内存）</td><td>GPTQ, AWQ</td></tr>
+</table>
+
+<h2>4.8 对比解码与引导生成</h2>
+<p>除了基本的采样策略外，还有一些高级的解码技术用于控制生成质量。</p>
+
+<h3>对比解码（Contrastive Decoding）</h3>
+<p>对比解码的核心思想是：用一个大模型和一个小模型的 logits 差值来采样。直觉是 — 大模型和小模型都认为好的 token 一定是"简单"的；只有大模型认为好而小模型认为不好的 token，才是"有信息量"的。</p>
+<div class="formula">logits_final = logits_large - α · logits_small</div>
+<p>这种方法可以减少模型生成"退化"内容（如重复、套话），提高生成质量。</p>
+
+<h3>引导生成（Guided Generation）</h3>
+<p>在很多应用场景中，我们需要模型的输出严格遵循某种格式（如 JSON、SQL、正则表达式）。引导生成通过在采样时屏蔽不符合格式要求的 token，确保输出100%格式正确：</p>
+
+<div class="ascii">引导生成的工作原理:
+
+目标格式: JSON
+期望输出: {"name": "xxx", "age": xx}
+
+已生成: {"name": "
+下一步只能选: 任何合法的 JSON 字符串内容字符
+
+已生成: {"name": "Alice"
+下一步只能选: " (引号，因为 JSON 字符串必须闭合)
+
+已生成: {"name": "Alice"
+下一步只能选: , (逗号) 或 } (闭合大括号)
+  → 屏蔽所有其他 token
+
+已生成: {"name": "Alice", "age": 
+下一步只能选: 数字字符 (0-9)
+
+结果: 100% 合法的 JSON 输出！</div>
+
+<div class="box tip"><div class="label">💡 引导生成的实际应用</div>
+<p>引导生成在以下场景中非常有用：(1) 结构化数据提取 — 确保输出是合法的 JSON；(2) SQL 生成 — 确保生成的 SQL 语法正确；(3) 代码生成 — 确保括号匹配、缩进正确；(4) 分类任务 — 将输出限制为预定义的类别标签。主流框架如 Outlines、Guidance、SGLang 都支持引导生成。在 vLLM 中，可以通过 guided_decoding 参数启用 JSON Schema 或正则表达式约束。</p>
+</div>
+
+<div class="box warn"><div class="label">⚠️ 引导生成可能降低输出质量</div>
+<p>引导生成保证了格式正确性，但可能降低内容质量。原因是：当某些"好"的 token 被格式约束屏蔽后，模型被迫选择次优的 token，这可能导致后续生成偏离最优路径。例如，模型本来想输出 "The answer is 42"，但格式约束要求输出 JSON，模型可能被迫生成 {"answer": "42"}，但后续的推理可能因为格式转换而偏离原始思路。在使用引导生成时，需要在格式保证和内容质量之间找到平衡。</p>
+</div>
+
+<div class="box exercise"><div class="label">🎯 练习：实现一个简单的 Top-p 采样器</div>
+<p>用 PyTorch 从零实现 Top-p 采样，并与 Top-k 和贪心解码对比：</p>
+<pre><code>import torch
+import torch.nn.functional as F
+
+def greedy_decode(logits):
+    """贪心解码：总是选概率最高的"""
+    return logits.argmax(dim=-1)
+
+def top_k_sample(logits, k=50, temperature=1.0):
+    """Top-k 采样"""
+    logits = logits / temperature
+    top_k_vals, top_k_ids = logits.topk(k)
+    # 将不在 top-k 中的 token 设为 -inf
+    probs = F.softmax(top_k_ids, dim=-1)
+    idx = torch.multinomial(probs, 1)
+    return top_k_ids.gather(-1, idx)
+
+def top_p_sample(logits, p=0.9, temperature=1.0):
+    """Top-p (Nucleus) 采样"""
+    logits = logits / temperature
+    sorted_logits, sorted_ids = logits.sort(descending=True)
+    cumulative_probs = F.softmax(sorted_logits, dim=-1).cumsum(dim=-1)
+    
+    # 找到累积概率超过 p 的位置
+    cutoff_mask = cumulative_probs - F.softmax(sorted_logits, dim=-1) >= p
+    sorted_logits[cutoff_mask] = float('-inf')
+    
+    probs = F.softmax(sorted_logits, dim=-1)
+    idx = torch.multinomial(probs, 1)
+    return sorted_ids.gather(-1, idx)
+
+# 对比测试
+logits = torch.randn(1, 1000)  # 模拟模型输出
+print("Greedy:", greedy_decode(logits).item())
+print("Top-k:", top_k_sample(logits, k=10).item())
+print("Top-p:", top_p_sample(logits, p=0.9).item())</code></pre>
+</div>
+
+<h2>学习路径建议</h2>
+<p>自回归生成与采样是 LLM 应用的核心。理解它之后建议继续学习：</p>
+<ol>
+<li><strong>总结与练习</strong>（下一节）：回顾整个语言模型基础章节的知识</li>
+<li><strong>Transformer 架构</strong>（下一章）：深入理解模型内部的计算过程</li>
+<li><strong>推理系统部署</strong>：学习 vLLM、TGI 等推理框架的使用</li>
+<li><strong>Prompt Engineering</strong>：学习如何通过提示词控制生成质量</li>
+</ol>
+<p>继续学习：<a href="05-总结与练习.html">下一节：总结与练习</a> → 回顾和巩固所学知识。</p>
+
+<div class="next-prev">
+  <a href="03-Embedding嵌入.html">← 03-Embedding</a>
+  <a href="05-总结与练习.html">05-总结 →</a>
+</div>
+</div>
+<div class="footer"><p>LLM 系统学习指南 · 04-自回归生成与采样</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="tip"><strong>相关章节：</strong>
+Prefill 与 Decode与以下内容密切相关：<a href="01-语言模型本质.html">01-语言模型本质</a> | <a href="02-Tokenization分词.html">02-Tokenization分词</a> | <a href="03-Embedding嵌入.html">03-Embedding嵌入</a>。建议结合学习。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+自回归生成的实际工程调优需要关注多个关键指标。首先，TTFT（首token延迟）主要由Prefill阶段决定，建议使用FlashAttention加速长prompt处理。其次，ITL（逐token延迟）由Decode阶段决定，可通过增大batch size和使用GQA减少KV Cache带宽来优化。在生产环境中，建议使用Continuous Batching替代静态批处理以提升GPU利用率至90%以上。温度参数的选择至关重要：事实问答类任务建议temperature=0，通用对话建议0.7，创意写作建议1.0-1.5。Top-p通常设为0.9，Top-k设为50即可覆盖大多数场景。此外，Repetition Penalty设为1.1-1.2可以有效减少重复生成。在多用户服务场景中，还需要合理设置max_model_len以控制KV Cache显存占用，避免因单个超长请求导致OOM。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+自回归生成的<strong>核心数学原理</strong>在于链式法则的分解：P(x₁,...,xₙ) = ∏P(xᵢ|x₁,...,xᵢ₋₁)。这一分解使得生成过程可以逐token进行，但也引入了<strong>暴露偏差（Exposure Bias）</strong>——训练时模型看到的是真实前文，推理时看到的是自己生成的可能有误的前文。<strong>推导</strong>：设模型在第t步的误差为εₜ，则累积误差随序列长度L呈指数增长：总误差 ≈ Σεₜ·(1+ε)^(L-t)。这就是为什么长文本生成质量会逐渐下降。<strong>数学本质</strong>上，Beam Search通过保留k条候选路径来缓解这一问题，但计算开销线性增加。Speculative Decoding则利用小模型的快速草稿和大模型的一次性验证，在不改变输出分布的前提下将延迟降低2-3倍。
+</div>
+
+<div class="tip"><strong>相关章节：</strong><a href="01-语言模型本质.html">01-语言模型本质</a> | <a href="02-Tokenization分词.html">02-Tokenization分词</a> | <a href="03-Embedding嵌入.html">03-Embedding嵌入</a></div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释Prefill 与 Decode的核心原理，并举一个实际应用场景。</li>
+<li>Prefill 与 Decode在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比Prefill 与 Decode与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+Prefill 与 Decode的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+从<strong>推理优化的角度</strong>看，自回归生成的核心挑战在于Decode阶段的内存带宽瓶颈。每生成一个token，模型需要读取全部KV Cache，这意味着<strong>生成速度受限于HBM带宽而非计算能力</strong>。<strong>推导</strong>：以A100为例，HBM带宽2TB/s，70B模型的KV Cache约20GB/请求，单次Decode读取需10ms。若batch_size=32，总KV Cache=640GB，读取需320ms，远超计算时间。这就是为什么GQA（减少KV head数）、KV Cache量化（FP8减半）和PagedAttention（优化内存布局）是推理优化的三大核心技术。Speculative Decoding通过"草稿+验证"模式将多次串行Decode合并为一次批量验证，从另一个角度突破了带宽瓶颈。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习自回归生成时，很多人只关注采样策略的理论描述而不实际测试不同参数的效果。建议用同一个prompt分别设置temperature=0/0.3/0.7/1.0/1.5生成10次，观察输出的确定性和多样性变化；对比Top-k=10/50/100和Top-p=0.8/0.9/0.95的组合效果，理解"多层过滤"的实际行为；用不同beam_width运行Beam Search对比输出质量。在实际运行中观察不同参数如何影响生成结果的连贯性、创造性和准确性。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为自回归生成只需设置好temperature和Top-p就万事大吉。理解Prefill和Decode的性能差异是优化推理系统的基础——不了解KV Cache的内存开销就无法合理规划并发数，不理解Decode的串行特性就无法理解为什么投机解码能加速。同样，不理解采样策略的数学原理（如Top-p的累积概率截断机制），就无法在实际应用中做出合理的参数选择。掌握这些基础概念是正确使用推理框架和调优参数的前提。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+Prefill 与 Decode与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04 Prompt Caching 成本优化 | Context Caching</title>
+<style>:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--heading:#f0f6fc;--blue:#58a6ff;--green:#3fb950;--yellow:#d29922;--red:#f85149;--purple:#a371f7;--cyan:#39d2c0}*{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.8;font-size:16px}.container{max-width:900px;margin:0 auto;padding:2rem 1.5rem}h1{color:var(--blue);font-size:2rem;margin:1rem 0 .5rem}h2{color:var(--heading);font-size:1.5rem;margin:2rem 0 .8rem;padding-left:.8rem;border-left:4px solid var(--blue)}h3{color:var(--cyan);font-size:1.2rem;margin:1.5rem 0 .5rem}p{margin:.6rem 0}a{color:var(--blue);text-decoration:none}code{background:#21262d;color:#79c0ff;padding:.15em .4em;border-radius:4px;font-size:.9em}pre{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;overflow-x:auto;margin:1rem 0;font-size:.9em;line-height:1.6}pre code{background:none;padding:0}table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9em}th,td{border:1px solid var(--border);padding:.5rem .8rem;text-align:left}th{background:#161b22;color:var(--blue);font-weight:600}tr:nth-child(even){background:rgba(22,27,34,.5)}.nav{background:var(--card);border-bottom:1px solid var(--border);padding:.6rem 1.5rem;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.nav a{color:var(--blue);font-size:.9rem}.nav span{color:var(--heading);font-weight:600;font-size:.95rem}.footer{text-align:center;margin-top:3rem;padding:1.5rem;border-top:1px solid var(--border);color:#8b949e;font-size:.85rem}.tip,.warn,.exercise,.deep{border-radius:8px;padding:1rem 1.2rem;margin:1rem 0}.tip{background:#0d1d30;border-left:4px solid var(--blue)}.warn{background:#2d1b00;border-left:4px solid var(--yellow)}.exercise{background:#0d2818;border-left:4px solid var(--green)}.deep{background:#1a1024;border-left:4px solid var(--purple)}.ascii{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;font-family:monospace;font-size:.85em;line-height:1.5;overflow-x:auto;white-space:pre}.badge{display:inline-block;padding:.15em .6em;border-radius:12px;font-size:.75em;font-weight:600;margin:0 .3em}.badge-blue{background:rgba(88,166,255,.15);color:var(--blue)}.badge-green{background:rgba(63,185,80,.15);color:var(--green)}.badge-yellow{background:rgba(210,153,34,.15);color:var(--yellow)}.badge-purple{background:rgba(163,113,247,.15);color:var(--purple)}.badge-red{background:rgba(248,81,73,.15);color:var(--red)}.badge-cyan{background:rgba(57,210,192,.15);color:var(--cyan)}.formula{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1.2rem;margin:1rem 0;text-align:center;font-size:1.1em;color:var(--cyan);font-family:monospace}.next-prev{display:flex;justify-content:space-between;margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border)}ul,ol{margin:.5rem 0 .5rem 1.5rem}li{margin:.3rem 0}</style>
+</head>
+<body>
+<div class="nav"><a href="02-Prefix-Caching原理.html">&larr; 02</a><span>模块 03 · 成本优化</span><a href="04-Semantic-Caching.html">04 &rarr;</a></div>
+<div class="container">
+
+<h1>💰 03 · Prompt Caching 成本优化</h1>
+<p><span class="badge badge-green">入门</span> <span class="badge badge-yellow">成本</span></p>
+
+<h2>1. API 级别的 Prompt Caching</h2>
+
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>就像餐厅的招牌菜需要提前备好半成品（高汤、酱料），API缓存也是把用户反复询问的相同前缀（如系统指令、知识库）预先处理好，直接调用结果，省时省电。</div>
+<div class="warn"><strong>常见误区：</strong>缓存的Key是精确匹配的。若用户指令多了一个空格或标点，都无法命中缓存，会导致成本瞬间飙升，相当于招牌菜配方每次微调，都得重新备料。</div>
+<div class="deep"><strong>深入探讨：</strong>例如，OpenAI的API在5分钟内重复请求相同的前1024个token可缓存，缓存命中价格为原价的50%。Anthropic的缓存有效期为5分钟，超过后自动失效。工程上需在请求头设置‘cache_control’等参数。</div>
+<div class="ascii"><pre>  [用户请求]-->[前缀缓存区]-->{命中?}-->是-->[返回结果] (成本低)
+                         |
+                         否-->[LLM推理]-->[返回结果] (成本高)</pre></div>
+<table><tr><th>特性</th><th>缓存命中</th><th>未命中（标准调用）</th></tr><tr><td>延迟</td><td>低（直接返回）</td><td>高（等待推理）</td></tr><tr><td>成本</td><td>低（如原价50%）</td><td>高（原价100%）</td></tr><tr><td>计算</td><td>服务端无计算</td><td>服务端完整推理</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>1.1 OpenAI Prompt Caching</h3>
+<table>
+<tr><th>特性</th><th>详情</th></tr>
+<tr><td>方式</td><td>自动缓存（无需配置）</td></tr>
+<tr><td>折扣</td><td>缓存命中 token 享 <strong>50% 折扣</strong></td></tr>
+<tr><td>最小长度</td><td>1024 tokens</td></tr>
+<tr><td>TTL</td><td>~5-10 分钟（自动刷新）</td></tr>
+<tr><td>适用模型</td><td>GPT-4o, GPT-4o-mini, o1, o3</td></tr>
+<tr><td>工作原理</td><td>精确前缀匹配（token-for-token）</td></tr>
+</table>
+
+<h3>1.2 Anthropic Prompt Caching</h3>
+<table>
+<tr><th>特性</th><th>详情</th></tr>
+<tr><td>方式</td><td>手动标记缓存断点</td></tr>
+<tr><td>折扣</td><td>缓存读取享 <strong>90% 折扣</strong></td></tr>
+<tr><td>TTL</td><td>5 分钟（免费）或 1 小时（额外收费）</td></tr>
+<tr><td>最小长度</td><td>1024 tokens (Claude 3.5) / 256 tokens (Claude 4.x)</td></tr>
+<tr><td>写入成本</td><td>5m: 1.25x / 1h: 2x 输入价</td></tr>
+</table>
+
+<h3>1.3 Gemini Context Caching</h3>
+<table>
+<tr><th>特性</th><th>详情</th></tr>
+<tr><td>方式</td><td>显式缓存管理 API</td></tr>
+<tr><td>最小长度</td><td>32,768 tokens (Pro) / 4,096 tokens (Flash)</td></tr>
+<tr><td>TTL</td><td>默认 1 小时，可自定义</td></tr>
+<tr><td>多模态</td><td>支持图像、视频、音频、PDF</td></tr>
+</table>
+
+<h2>2. 成本对比</h2>
+<h3>成本对比</h3>s="tip"><strong>通俗类比：</strong>这就像对比两种购物方式：一种是每次都临时叫车去超市买一瓶水（高单价、高交通成本），另一种是提前在电商平台囤一箱水（低单价、运费分摊），日积月累差距巨大。</div>
+<div class="warn"><strong>常见误区：</strong>不能只看单次调用差价。必须考虑缓存的‘失效’成本。如果缓存策略导致缓存命中率过低（如<30%），引入缓存的管理开销可能抵消其节省，甚至更贵。</div>
+<div class="deep"><strong>深入探讨：</strong>以日调用1万次，每次前缀1000 tokens为例。假设标准价$0.01/千token，缓存价$0.005/千token，命中率80%。日成本从$100降至$60，月省$1200。但若命中率仅20%，则成本为$90，节省有限。</div>
+<div class="ascii"><pre>  无缓存: 总成本 = 调用次数 * 单次价格
+  有缓存: 总成本 = (命中次数 * 缓存价) + (未命中次数 * 标准价)
+  节省 = 无缓存成本 - 有缓存成本</pre></div>
+<table><tr><th>场景</th><th>日调用量</th><th>日成本（无缓存）</th><th>日成本（80%命中）</th><th>月节省</th></tr><tr><td>案例A</td><td>10，000</td><td>$100</td><td>$60</td><td>$1200</td></tr><tr><td>案例B</td><td>100，000</td><td>$1，000</td><td>$600</td><td>$12，000</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+<tr><th>提供商</th><th>缓存写入</th><th>缓存读取</th><th>节省</th><th>最佳场景</th></tr>
+<tr><td>OpenAI</td><td>= 输入价</td><td>0.5x</td><td>50%</td><td>自动，零配置</td></tr>
+<tr><td>Anthropic (5m)</td><td>1.25x</td><td>0.1x</td><td>90%</td><td>高频相同前缀</td></tr>
+<tr><td>Anthropic (1h)</td><td>2x</td><td>0.1x</td><td>90%</td><td>低频长前缀</td></tr>
+<tr><td>Gemini</td><td>存储费</td><td>较低</td><td>~75%</td><td>多模态长上下文</td></tr>
+</table>
+
+<h2>3. 缓存断点设计</h2>
+<h3>缓存断点设计</h3>
+<div class="tip"><strong>通俗类比：</strong>好比准备一桌宴席，凉菜（稳定指令）可以提前一小时做好，热菜（动态用户问题）必须现炒。缓存断点就是分隔‘凉菜’和‘热菜’的那条线，决定哪部分能提前备好。</div>
+<div class="warn"><strong>常见误区：</strong>断点设计过于靠后，缓存的内容太少，收益低。设计过于靠前，将易变内容也缓存了，会导致内容‘陈旧’或不准确。需要仔细分析提示词中稳定和动态的边界。</div>
+<div class="deep"><strong>深入探讨：</strong>最佳实践是将系统指令、长文档、固定格式要求放在缓存断点前。用户查询、对话历史等可变部分放在断点后。例如：[缓存部分：系统指令+公司知识库前1000词] + [动态部分：用户最新问题]。这确保核心、昂贵的指令部分被重复利用。</div>
+<div class="ascii"><pre>  Prompt = [系统指令] + [长文档] + [对话历史] + [用户问题]
+          |__________________________|
+                可缓存前缀（稳定）</pre></div>
+<table><tr><th>设计要素</th><th>建议位置</th><th>示例</th><th>原因</th></tr><tr><td>系统指令</td><td>缓存前缀</td><td>‘你是一个客服专家...’</td><td>不变，收益最大</td></tr><tr><td>长文档</td><td>缓存前缀</td><td>产品手册全文</td><td>不变，token数多</td></tr><tr><td>用户查询</td><td>动态部分</td><td>‘我的订单号是...’</td><td>每次不同</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+
+
+<h2>4. 成本节省计算<在实际工程中做出更合理的技术选择和优化决策。</p>
+
+<h3>成本节省计算</h3>
+<div class="tip"><strong>通俗类比：</strong>计算节省就像算手机套餐：你每天用多少流量（tokens），多少在Wi-Fi环境下（缓存命中，便宜），多少用移动数据（未命中，贵），月账单自然就清楚了。</div>
+<div class="warn"><strong>常见误区：</strong>不要忽略缓存带来的额外网络和存储开销。虽然极小，但在高频场景下也需计入。计算公式必须区分缓存和非缓存token的价格，两者通常不同。</div>
+<div class="deep"><strong>深入探讨：</strong>节省公式：节省额 = (无缓存单价 - 有缓存单价) * 缓存命中的token数。例如，无缓存单价$0.015/千token，有缓存单价$0.005/千token，月缓存命中5百万token，则月节省额 = (0.015 - 0.005) * 5000 = $50。命中率=缓存命中的token数 / 总输入token数。</div>
+<div class="ascii"><pre>  月度节省计算:
+  总输入 Tokens = A
+  缓存命中 Tokens = B (B ≤ A)
+  节省额 = (P_std - P_cache) * B
+  其中 P_std：标准价，P_cache：缓存价</pre></div>
+<table><tr><th>指标</th><th>符号</th><th>示例值</th><th>说明</th></tr><tr><td>总输入Token</td><td>A</td><td>10，000，000</td><td>月度总消耗</td></tr><tr><td>缓存命中Token</td><td>B</td><td>7，000，000</td><td>可享受低价的部分</td></tr><tr><td>缓存命中率</td><td>B/A</td><td>70%</td><td>衡量缓存效率的关键</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<pre><code># 成本节省计算器
+def calculate_savings(
+    prefix_tokens=2000,        # 缓存前缀长度
+    requests_per_day=10000,    # 每日请求数
+    input_price_per_mtok=5.0,  # $5/MTok (GPT-4o)
+    hit_rate=0.9,              # 缓存命中率
+    cache_discount=0.5         # 缓存折扣 (OpenAI 50%)
+):
+    # 无缓存成本
+    daily_cost_no_cache = (
+        prefix_tokens * requests_per_day / 1e6 * input_price_per_mtok
+    )
+
+    # 有缓存成本
+    cached_tokens = prefix_tokens * requests_per_day * hit_rate
+    uncached_tokens = prefix_tokens * requests_per_day * (1 - hit_rate)
+
+    daily_cost_cache = (
+        cached_tokens / 1e6 * input_price_per_mtok * cache_discount +
+        uncached_tokens / 1e6 * input_price_per_mtok
+    )
+
+    savings = daily_cost_no_cache - daily_cost_cache
+    savings_pct = savings / daily_cost_no_cache * 100
+
+    return {
+        "no_cache": f"${daily_cost_no_cache:.2f}/天",
+        "with_cache": f"${daily_cost_cache:.2f}/天",
+        "savings": f"${savings:.2f}/天 ({savings_pct:.1f}%)"
+    }
+
+# 示例
+print(calculate_savings(
+    prefix_tokens=2000,
+    requests_per_day=10000,
+    hit_rate=0.9
+))
+# {'no_cache': '$100.00/天', 'with_cache': '$55.00/天', 'savings': '$45.00/天 (45.0%)'}</code></pre>
+
+<h2>5. 选择最优提供商</h2>
+<h3>选择最优提供商</h3>
+<div class="tip"><strong>通俗类比：</strong>选择API提供商就像选外卖平台：A平台免配送费但单价高，B平台单价低但配送费贵。你需要根据你点的‘菜量’（请求模式）和‘距离’（延迟要求）来计算哪个平台总价最划算。</div>
+<div class="warn"><strong>常见误区：</strong>价格不是唯一标准。必须考虑缓存的最小前缀长度要求（如1024 tokens vs 512 tokens）、缓存有效期（5分钟 vs 10分钟）、缓存命中率，以及服务商的稳定性和合规性。</div>
+<div class="deep"><strong>深入探讨：</strong>对比需创建标准化测试集。例如，用同一个包含典型前缀（2000 tokens）和用户问题（500 tokens）的prompt，分别测试不同提供商API。记录：1) 缓存命中率，2) 首字节延迟，3) 总成本（考虑缓存价格和命中率）。计算：单次平均成本 = (命中次数*缓存价 + 未命中次数*标准价) / 总次数。</div>
+<div class="ascii"><pre>  提供商选择矩阵:
+  维度1: 成本 (缓存价、标准价、最小前缀)
+  维度2: 性能 (缓存命中率、延迟)
+  维度3: 可靠性 (服务协议、合规)</pre></div>
+<table><tr><th>提供商</th><th>缓存价 ($/千token)</th><th>最小前缀</th><th>有效期</th><th>实测命中率*</th></tr><tr><td>Provider A</td><td>0.005</td><td>1024</td><td>5分钟</td><td>75%</td></tr><tr><td>Provider B</td><td>0.004</td><td>2048</td><td>10分钟</td><td>60%</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+
+
+<h2>6. 实际案例</h2>
+<h3>实际案例</h3>
+<p></pstrong>通俗类比：</strong>这就像看成功的理财案例：某人通过‘零存整取’（缓存积累）和‘精选低息平台’（优化提供商），一年下来省下了一台新手机的钱。看别人的方案，能优化自己的路径。</div>
+<div class="warn"><strong>常见误区：</strong>切勿直接照搬案例参数。不同业务场景（如客服vs代码生成）的提示词结构、长度、复用模式差异巨大。必须基于自身数据做A/B测试，小规模验证后再全面推广。</div>
+<div class="deep"><strong>深入探讨：</strong>案例：某SaaS客服机器人，日均调用5万次。原提示词包含2000词产品文档（稳定）。优化方案：1) 将文档部分设为缓存前缀；2) 选择缓存价最优的提供商。优化后，月度API成本从$1500降至$900，节省40%。同时，因前缀预计算，平均响应时间缩短15%。</div>
+<div class="ascii"><pre>  优化前: [完整Prompt] --> LLM --> 响应 (成本=原价)
+  优化后: [缓存: 文档] + [动态: 用户问] --> 命中 --> 响应 (成本=缓存价)</pre></div>
+<table><tr><th>案例行业</th><th>核心优化策略</th><th>成本节省</th><th>附加收益</th></tr><tr><td>智能客服</td><td>缓存产品知识库前缀</td><td>40%</td><td>响应提速15%</td></tr><tr><td>代码生成</td><td>缓存系统架构和规范</td><td>25%</td><td>生成一致性提高</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<pre><code># 案例: 客服机器人
+# 系统 prompt: 3000 tokens (产品知识库)
+# 每天: 50000 次请求
+# 命中率: 95% (所有用户共享同一系统 prompt)
+
+# OpenAI GPT-4o:
+无缓存: 3000 * 50000 / 1e6 * $5 = $750/天
+有缓存: $750 * (0.95*0.5 + 0.05*1) = $393.75/天
+节省: $356.25/天 (47.5%)
+
+# Anthropic Claude:
+有缓存: $750 * (0.95*0.1 + 0.05*1) = $108.75/天
+节省: $641.25/天 (85.5%)</code></pre>
+
+<div class="deep"><strong>API 级别的 Prompt Caching的技术原理与数学推导：</strong>
+从<strong>底层</strong>硬件角度分析，API 级别的 Prompt Caching的性能瓶颈通常在于内存带宽而非计算能力。
+<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
+因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
+这一<strong>数学本质</strong>决定了API 级别的 Prompt Caching的所有优化策略都应围绕减少内存访问展开。
+从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
+是提升算术强度的两大核心手段。
+</div>
+<div class="exercise">
+<p><strong>🧪 练习</strong>：计算你的应用在 OpenAI/Anthropic/Gemini 上的缓存成本节省，选择最优提供商。</p>
+</div>
+
+<div class="next-prev"><a href="02-Prefix-Caching原理.html">&larr; 上一模块</a><a href="04-Semantic-Caching.html">下一模块 &rarr;</a></div>
+</div>
+<div class="footer"><p><a href="index.html">返回总览</a></p></div>
+
+<div class="tip"><strong>向前串联：</strong>
+API 级别的 Prompt Caching的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习API 级别的 Prompt Caching建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

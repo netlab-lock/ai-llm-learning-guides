@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>05-XLA编译 | 编译优化</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #58a6ff; text-decoration: none; }
+.nav span { color: #8b949e; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+h1 { color: #58a6ff; font-size: 2em; margin: 24px 0 16px; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 12px; margin: 32px 0 16px; font-size: 1.5em; }
+h3 { color: #d2a8ff; margin: 24px 0 12px; font-size: 1.2em; }
+h4 { color: #79c0ff; margin: 16px 0 8px; }
+p { margin: 8px 0; }
+code { background: #21262d; color: #79c0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; margin: 12px 0; font-size: 0.85em; line-height: 1.5; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th { background: #21262d; color: #f0f6fc; padding: 10px 14px; text-align: left; border: 1px solid #30363d; font-weight: 600; }
+td { padding: 8px 14px; border: 1px solid #30363d; }
+tr:nth-child(even) { background: #161b22; }
+.tip { background: #0d1d30; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.exercise { background: #0d2818; border-left: 4px solid #238636; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.svg-diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; text-align: center; }
+.svg-diagram svg { max-width: 100%; height: auto; }
+.ascii { background: #161b22; border: 1px solid #30363d; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82em; line-height: 1.5; padding: 16px; overflow-x: auto; margin: 16px 0; white-space: pre; border-radius: 6px; }
+ul, ol { margin: 8px 0 8px 24px; }
+li { margin: 4px 0; }
+a { color: #58a6ff; }
+.keyword { color: #ff7b72; } .string { color: #a5d6ff; } .comment { color: #8b949e; } .cmd { color: #79c0ff; }
+.footer { text-align: center; color: #484f58; margin-top: 48px; padding: 24px 0; border-top: 1px solid #21262d; font-size: 0.9em; }
+.footer a { color: #58a6ff; }
+.next-prev { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 16px; border-top: 1px solid #21262d; }
+.next-prev a { padding: 8px 16px; background: #21262d; border-radius: 6px; }
+.tag { display: inline-block; background: #388bfd22; color: #58a6ff; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+.badge-blue { background: #1f6feb33; color: #58a6ff; }
+.badge-green { background: #23863633; color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="04-CUDA-Graphs.html">&larr; 04-CUDA-Graphs</a><span>编译优化栈</span><a href="06-编译优化实战.html">06-编译优化实战 &rarr;</a></div>
+<div class="container">
+
+<h1>🔧 XLA 编译</h1>
+
+<h2>1. 背景与动机</h2>
+<p>XLA (Accelerated Linear Algebra) 是 Google 开发的线性代数编译器，最初为 TPU 设计，后来扩展到 GPU 和 CPU。它是 JAX 的默认编译后端，也是 TensorFlow 的可选优化器。</p>
+
+<h3>1.1 为什么需要 XLA</h3>
+<p>深度学习框架（TensorFlow/PyTorch）通常以"逐算子"方式执行——每个算子单独编译、单独调度、单独执行。这种模式在早期足够用，但当模型规模达到千亿参数时，逐算子执行的开销（kernel launch、内存分配、CPU-GPU 同步）就成为瓶颈。XLA 的目标是将整个计算图"整体编译"为高效的机器码，就像 C++ 编译器将高级代码编译为汇编一样。</p>
+
+<h3>1.2 XLA 的定位与对比</h3>
+<div class="ascii">编译器栈的类比（以餐厅厨房为例）
+
+普通执行模式（逐算子）：
+  客人点一道菜 → 厨师找食材 → 切菜 → 烹饪 → 装盘 → 上菜
+  客人再点一道 → 厨师再找食材 → ...
+  问题：每道菜都有"找食材"和"装盘"的开销
+
+XLA 编译模式（整体优化）：
+  客人点一桌菜 → 厨师一次性规划所有菜 → 批量备料 → 并行烹饪 → 统一装盘
+  优势：减少重复准备，共享食材，优化烹饪顺序
+
+类比映射：
+  逐算子执行  → 每个 kernel 独立 launch（launch overhead 累积）
+  XLA 编译    → 整个计算图编译为一个/少数几个 kernel
+  "找食材"    → HBM 读取（内存带宽瓶颈）
+  "并行烹饪"  → 算子融合 + 操作调度优化</div>
+
+<div class="tip">
+<strong>一句话理解</strong>：如果 torch.compile 是 PyTorch 的编译器，那 XLA 就是 JAX/TPU 的编译器。两者目标相同（优化计算图），但架构和优化策略不同。torch.compile 用 Triton 生成 GPU kernel，XLA 用 LLVM 生成 PTX 代码。
+</div>
+
+<h3>1.3 XLA 的演进历史</h3>
+<p>XLA 从 2017 年随 TensorFlow 1.0 发布以来，经历了多次重大重构：</p>
+<table>
+<tr><th>时间</th><th>里程碑</th><th>意义</th></tr>
+<tr><td>2017</td><td>XLA 随 TF 1.0 发布</td><td>首次支持 TPU 编译</td></tr>
+<tr><td>2020</td><td>JAX 默认使用 XLA</td><td>XLA 成为 JAX 的唯一后端</td></tr>
+<tr><td>2023</td><td>OpenXLA 项目成立</td><td>跨硬件通用编译器目标</td></tr>
+<tr><td>2024</td><td>PJRT 统一运行时</td><td>解耦编译器与运行时</td></tr>
+</table>
+
+<h2>2. XLA 的编译流程</h2>
+
+<h3>2.1 端到端编译流水线</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 440 620" xmlns="http://www.w3.org/2000/svg" style="font-family:'Cascadia Code','Fira Code',monospace;">
+  <defs>
+    <marker id="arrow2" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#8b949e"/></marker>
+    <filter id="glow2"><feGaussianBlur stdDeviation="2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <!-- Python Code label -->
+  <text x="220" y="24" text-anchor="middle" fill="#c9d1d9" font-size="13" font-weight="600">Python 代码 (JAX jit)</text>
+  <line x1="220" y1="34" x2="220" y2="58" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+  <!-- JAX Tracer Box (amber - framework) -->
+  <rect x="60" y="62" width="320" height="72" rx="10" fill="#0d1117" stroke="#fbbf24" stroke-width="2" filter="url(#glow2)"/>
+  <text x="220" y="90" text-anchor="middle" fill="#fbbf24" font-size="14" font-weight="700">JAX Tracer</text>
+  <text x="220" y="112" text-anchor="middle" fill="#8b949e" font-size="11">← 捕获计算图 → jaxpr (JAX IR)</text>
+
+  <!-- Arrow -->
+  <line x1="220" y1="134" x2="220" y2="172" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+  <!-- XLA Client Box (emerald - CPU-side) -->
+  <rect x="60" y="176" width="320" height="72" rx="10" fill="#0d1117" stroke="#34d399" stroke-width="2" filter="url(#glow2)"/>
+  <text x="220" y="204" text-anchor="middle" fill="#34d399" font-size="14" font-weight="700">XLA Client</text>
+  <text x="220" y="226" text-anchor="middle" fill="#8b949e" font-size="11">← jaxpr → HLO (High Level Ops)</text>
+
+  <!-- Arrow -->
+  <line x1="220" y1="248" x2="220" y2="286" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+  <!-- XLA Optimizer Box (violet - memory/opt) -->
+  <rect x="60" y="290" width="320" height="148" rx="10" fill="#0d1117" stroke="#a78bfa" stroke-width="2" filter="url(#glow2)"/>
+  <text x="220" y="316" text-anchor="middle" fill="#a78bfa" font-size="14" font-weight="700">XLA Optimizer</text>
+  <text x="220" y="336" text-anchor="middle" fill="#8b949e" font-size="11">← 图优化 Pass</text>
+  <line x1="80" y1="346" x2="360" y2="346" stroke="#a78bfa" stroke-width="0.5" stroke-opacity="0.3"/>
+  <text x="80" y="366" fill="#c9d1d9" font-size="11">├── 常量折叠</text>
+  <text x="80" y="384" fill="#c9d1d9" font-size="11">├── 算子融合</text>
+  <text x="80" y="402" fill="#c9d1d9" font-size="11">├── 布局优化</text>
+  <text x="80" y="420" fill="#c9d1d9" font-size="11">├── 内存规划</text>
+  <text x="80" y="438" fill="#c9d1d9" font-size="11">└── 操作调度</text>
+
+  <!-- Arrow -->
+  <line x1="220" y1="438" x2="220" y2="476" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow2)"/>
+
+  <!-- Backend Compiler Box (multi-color targets) -->
+  <rect x="60" y="480" width="320" height="120" rx="10" fill="#0d1117" stroke="#f0f6fc" stroke-width="2" stroke-opacity="0.5" filter="url(#glow2)"/>
+  <text x="220" y="506" text-anchor="middle" fill="#f0f6fc" font-size="14" font-weight="700">Backend Compiler</text>
+  <text x="220" y="526" text-anchor="middle" fill="#8b949e" font-size="11">← HLO → 目标代码</text>
+  <line x1="80" y1="536" x2="360" y2="536" stroke="#f0f6fc" stroke-width="0.5" stroke-opacity="0.2"/>
+  <text x="80" y="556" fill="#c9d1d9" font-size="11">├── <tspan fill="#22d3ee">GPU</tspan> (LLVM → PTX)</text>
+  <text x="80" y="574" fill="#c9d1d9" font-size="11">├── <tspan fill="#22d3ee">TPU</tspan> (XLA TPU)</text>
+  <text x="80" y="592" fill="#c9d1d9" font-size="11">└── <tspan fill="#34d399">CPU</tspan> (LLVM → x86)</text>
+</svg>
+</div>
+
+<h3>2.2 编译时机与缓存策略</h3>
+<p>XLA 的编译是"首次调用时触发"（JIT），编译结果会被缓存。理解编译时机对优化推理延迟至关重要：</p>
+<pre><code><span class="keyword">import</span> jax
+<span class="keyword">import</span> jax.numpy <span class="keyword">as</span> jnp
+
+<span class="comment"># 第一次调用：触发编译（慢，几秒到几分钟）</span>
+@jax.jit
+<span class="keyword">def</span> f(x):
+    <span class="keyword">return</span> jnp.sin(x) + jnp.cos(x)
+
+result = f(jnp.array([1.0, 2.0]))  <span class="comment"># 编译 + 执行</span>
+
+<span class="comment"># 后续调用：直接使用缓存的编译结果（快）</span>
+result = f(jnp.array([3.0, 4.0]))  <span class="comment"># 仅执行，shape 必须匹配</span>
+
+<span class="comment"># 查看编译后的 HLO</span>
+print(jax.make_jaxpr(f)(jnp.array([1.0, 2.0])))
+
+<span class="comment"># 性能陷阱：每次 shape 变化都会重新编译！</span>
+<span class="comment"># 解决方案：使用 static_argnums 或 warmup 不同 shape</span>
+</code></pre>
+
+<div class="warn">
+<strong>XLA 的编译陷阱（类比 TensorFlow 的 graph mode）</strong>：XLA 的 JIT 编译与 TensorFlow 1.x 的 <code>tf.Session.run()</code> 有相似的"首次编译开销"问题。如果你的推理服务在启动后第一个请求延迟很高（冷启动），很可能就是 XLA 在编译。解决方案：(1) 预热时用不同 shape 调用一次；(2) 使用 <code>jax.jit(f, static_argnums=...)</code> 将变化的维度标记为静态参数；(3) TPU 上使用 <code>jax.experimental.pjit</code> 预编译。
+</div>
+
+<h3>2.3 与 torch.compile 的编译流程对比</h3>
+<div class="ascii">编译流程对比
+
+torch.compile 路径:
+  Python 代码 → TorchDynamo (FX Graph) → AOTAutograd
+    → TorchInductor (Triton IR) → Triton GPU Kernel
+
+XLA 路径:
+  Python 代码 → JAX Tracer (jaxpr) → XLA Client (HLO)
+    → XLA Optimizer → LLVM (GPU) / XLA TPU Compiler
+
+关键差异:
+  ┌──────────────┬─────────────────┬──────────────────┐
+  │              │ torch.compile   │ XLA              │
+  ├──────────────┼─────────────────┼──────────────────┤
+  │ IR 风格      │ 命令式 (FX)     │ 函数式 (HLO)     │
+  │ 代码生成     │ Triton (Python) │ LLVM (C++)       │
+  │ Graph Break  │ 支持            │ 不支持(全图编译) │
+  │ 动态 Shape   │ 较好            │ 有限支持          │
+  │ 编译速度     │ 较快            │ 较慢(但优化更深)  │
+  └──────────────┴─────────────────┴──────────────────┘</div>
+
+<h2>3. HLO (High Level Operations) IR</h2>
+<p>HLO 是 XLA 的核心中间表示，它是一种纯函数式的 IR：</p>
+
+<h3>3.1 HLO 的语法与语义</h3>
+<p>HLO 的每个操作都是一个"函数调用"，输入是张量，输出也是张量，没有副作用。这种设计使得编译器可以自由重排操作顺序：</p>
+
+<pre><code><span class="comment"># HLO 示例（简化）</span>
+<span class="comment"># 计算: y = relu(x @ w + b)</span>
+
+%param_0 = f32[128,512] parameter(0)     <span class="comment"># x</span>
+%param_1 = f32[512,256] parameter(1)     <span class="comment"># w</span>
+%param_2 = f32[256] parameter(2)         <span class="comment"># b</span>
+
+%dot = f32[128,256] dot(%param_0, %param_1),
+       lhs_contracting_dims={1}, rhs_contracting_dims={0}
+
+%broadcast = f32[128,256] broadcast(%param_2), dimensions={1}
+
+%add = f32[128,256] add(%dot, %broadcast)
+
+%result = f32[128,256] maximum(%add, f32[] constant(0))
+</code></pre>
+
+<h3>3.2 HLO 与 PyTorch FX Graph 的对比</h3>
+<div class="ascii">IR 设计哲学对比
+
+FX Graph (PyTorch):
+  torch.matmul(x, w)    ← 命令式，有执行顺序
+  torch.add(hidden, b)  ← 可能有副作用（in-place 操作）
+  torch.relu(hidden)    ← 编译器需要小心重排
+
+HLO (XLA):
+  %dot = dot(%x, %w)    ← 纯函数，无副作用
+  %add = add(%dot, %b)  ← 天然支持 CSE（公共子表达式消除）
+  %relu = max(%add, 0)  ← 编译器可自由重排
+
+为什么这很重要？
+  纯函数式 IR → 更强的优化能力（重排、融合、消除）
+  命令式 IR   → 更直观，但优化受限（需要 alias analysis）</div>
+
+<div class="deep">
+<strong>HLO 的设计哲学</strong>：HLO 是纯函数式的（无副作用），这使得编译器可以自由地重排、融合、优化操作顺序，而不用担心改变程序语义。这与 PyTorch 的 FX Graph（基于 Python 的命令式风格）形成对比。类比来看，HLO 就像 Haskell（纯函数式），FX Graph 就像 Python（命令式）——前者更容易做编译优化，后者更容易写代码。XLA 的这个设计选择也解释了为什么它在 TPU 上表现如此出色：TPU 的编译器需要对整个计算图做深度优化（如跨芯片通信调度），纯函数式 IR 让这种全局优化成为可能。
+</div>
+
+<h3>3.3 从 Python 到 HLO 的转换示例</h3>
+<pre><code><span class="comment"># 使用 jax.make_jaxpr 查看 jaxpr（XLA 的前端 IR）</span>
+<span class="keyword">import</span> jax
+<span class="keyword">import</span> jax.numpy <span class="keyword">as</span> jnp
+
+<span class="keyword">def</span> transformer_layer(x, w_q, w_k, w_v, w_o):
+    q = x @ w_q
+    k = x @ w_k
+    v = x @ w_v
+    attn = jax.nn.softmax(q @ k.T / jnp.sqrt(64.0), axis=-1)
+    out = attn @ v @ w_o
+    <span class="keyword">return</span> out
+
+<span class="comment"># 查看 jaxpr（类似 HLO 的前端表示）</span>
+x = jnp.ones((1, 128, 64))
+w = jnp.ones((64, 64))
+print(jax.make_jaxpr(transformer_layer)(x, w, w, w, w))
+<span class="comment"># 输出显示所有操作的类型和形状，编译器据此做优化</span>
+</code></pre>
+
+<h2>4. XLA 的优化 Pass</h2>
+
+<h3>4.1 算子融合</h3>
+<p>XLA 的融合策略与 TorchInductor 类似，但更激进：</p>
+<table>
+<tr><th>融合类型</th><th>XLA 术语</th><th>示例</th></tr>
+<tr><td>输入融合</td><td>Input Fusion</td><td>多个消费者共享同一个输入</td></tr>
+<tr><td>尾声融合</td><td>Epilogue Fusion</td><td>GEMM + bias + activation</td></tr>
+<tr><td>缩减融合</td><td>Reduction Fusion</td><td>多个 reduction 共享遍历</td></tr>
+<tr><td>循环融合</td><td>Loop Fusion</td><td>多个 element-wise 操作合并</td></tr>
+</table>
+
+<h3>4.2 布局优化</h3>
+<p>XLA 会自动选择最优的张量内存布局（layout）：</p>
+<ul>
+<li><strong>Tile 布局</strong>：将张量分块以匹配 Tensor Core 的矩阵大小</li>
+<li><strong>布局转换</strong>：在需要时插入 transpose kernel</li>
+<li><strong>布局传播</strong>：从消费端反向传播最优布局</li>
+</ul>
+
+<h3>4.3 内存规划</h3>
+<p>XLA 使用 <strong>内存调度算法</strong> 分配内存：</p>
+<ul>
+<li>分析每个张量的生命周期（从创建到最后使用）</li>
+<li>不重叠的张量共享同一内存区域</li>
+<li>对于 TPU 的 HBM（有限容量），内存规划至关重要</li>
+</ul>
+
+<div class="tip">
+<strong>XLA 内存规划 vs PagedAttention</strong>：XLA 的内存规划是"编译时"确定的——编译器在编译阶段就分析好所有张量的生命周期，分配固定内存。而 vLLM 的 PagedAttention 是"运行时"动态分配的——因为推理时请求的序列长度不确定。这两种方式各有优劣：编译时规划更高效（无运行时开销），但不灵活；运行时分配更灵活，但有额外开销。参见 <a href="../推理框架/02-内存管理/02-PagedAttention.html">PagedAttention</a> 的详细讨论。
+</div>
+
+<h3>4.4 操作调度优化</h3>
+<p>XLA 的调度器会重新排列操作顺序以最大化并行度：</p>
+<pre><code><span class="comment"># XLA 调度优化示例</span>
+<span class="comment"># 原始顺序（串行）：</span>
+a = expensive_op_1(x)     <span class="comment"># 10ms</span>
+b = expensive_op_2(y)     <span class="comment"># 10ms</span>
+c = combine(a, b)         <span class="comment"># 依赖 a, b</span>
+
+<span class="comment"># XLA 优化后（并行）：</span>
+<span class="comment"># GPU Stream 1: expensive_op_1(x) → a</span>
+<span class="comment"># GPU Stream 2: expensive_op_2(y) → b  (与 Stream 1 并行)</span>
+<span class="comment"># 然后: combine(a, b) → c</span>
+<span class="comment"># 总时间: max(10, 10) + combine ≈ 10ms（而非 20ms）</span>
+</code></pre>
+
+<h2>5. XLA vs TorchInductor</h2>
+
+<h3>5.1 架构对比</h3>
+<table>
+<tr><th>维度</th><th>XLA</th><th>TorchInductor</th></tr>
+<tr><td>开发者</td><td>Google</td><td>PyTorch (Meta)</td></tr>
+<tr><td>主要目标</td><td>TPU → GPU → CPU</td><td>GPU (NVIDIA) → CPU</td></tr>
+<tr><td>IR 设计</td><td>纯函数式 (HLO)</td><td>命令式 (FX Graph)</td></tr>
+<tr><td>代码生成</td><td>LLVM (GPU), 专用 (TPU)</td><td>Triton (GPU), C++ (CPU)</td></tr>
+<tr><td>编译策略</td><td>全图编译，不支持 graph break</td><td>支持 graph break，子图独立编译</td></tr>
+<tr><td>动态 Shape</td><td>有限支持（需要 symbolic shapes）</td><td>较好支持（automatic dynamic shapes）</td></tr>
+<tr><td>生态</td><td>JAX, TensorFlow</td><td>PyTorch</td></tr>
+<tr><td>成熟度</td><td>生产就绪（TPU），GPU 仍在改进</td><td>PyTorch 2.6 生产就绪</td></tr>
+</table>
+
+<h3>5.2 选择建议</h3>
+<div class="warn">
+<strong>选型误区</strong>：不要因为"XLA 在 TPU 上更快"就盲目迁移到 JAX。迁移成本包括：(1) 重写所有数据加载和预处理代码；(2) 学习 JAX 的函数式编程范式（与 PyTorch 的 OOP 风格差异很大）；(3) 生态工具链差异（Hugging Face Transformers 对 JAX 的支持不如 PyTorch）。建议：如果你已经在用 PyTorch，优先用 <code>torch.compile</code>；只有在 TPU 上训练/推理时才考虑 XLA。
+</div>
+
+<h2>6. XLA 在 LLM 中的应用</h2>
+
+<h3>6.1 TPU 上的 LLM 训练</h3>
+<p>Google 的 PaLM、Gemini 等模型都是在 TPU 上用 XLA 训练的：</p>
+<ul>
+<li><code>jax.jit</code> 自动将函数编译为 HLO</li>
+<li>TPU Pod 的多芯片编译：XLA 自动处理跨芯片通信</li>
+<li>XLA 的 <code>pjit</code> 支持跨芯片的模型并行</li>
+</ul>
+
+<h3>6.2 GPU 上的 XLA</h3>
+<p>PyTorch/XLA 让 PyTorch 模型也能用 XLA 编译：</p>
+<pre><code><span class="keyword">import</span> torch_xla
+<span class="keyword">import</span> torch_xla.core.xla_model <span class="keyword">as</span> xm
+
+<span class="comment"># 使用 TPU 设备</span>
+device = xm.xla_device()
+model = model.to(device)
+
+<span class="comment"># XLA 自动编译</span>
+<span class="comment"># 需要 xm.mark_step() 标记编译边界</span>
+output = model(input)
+xm.mark_step()
+</code></pre>
+
+<h3>6.3 XLA 在推理服务中的实际表现</h3>
+<div class="ascii">XLA 在不同硬件上的推理性能对比 (70B 模型, batch=1)
+
+硬件          框架         编译器       延迟(ms/token)   备注
+─────────────────────────────────────────────────────────────
+TPU v5e       JAX          XLA          ~15              Google 原生优化
+H100 GPU      PyTorch      torch.compile ~10             Triton 生成
+H100 GPU      JAX          XLA          ~12              LLVM 生成 PTX
+A100 GPU      PyTorch      torch.compile ~18             标准部署
+A100 GPU      PyTorch/XLA  XLA          ~20              额外桥接开销
+
+结论：XLA 在 TPU 上是最优选择，在 GPU 上 torch.compile 通常更优。
+但 XLA 的"全图编译"在某些复杂模型上可能产生更好的优化结果。</div>
+
+<h2>7. OpenXLA 项目</h2>
+<p>2023 年，Google 联合多家公司成立了 <strong>OpenXLA</strong> 项目，目标是将 XLA 打造为跨硬件的通用编译器：</p>
+<ul>
+<li>支持 NVIDIA GPU、AMD GPU、Apple GPU、AWS Inferentia 等</li>
+<li>与 MLIR (Multi-Level IR) 集成</li>
+<li>开源社区驱动</li>
+</ul>
+
+<h3>7.1 OpenXLA 的技术栈</h3>
+<div class="ascii">OpenXLA 编译器栈
+
+┌─────────────────────────────────────────────┐
+│  前端 (Frontend)                             │
+│  JAX / TensorFlow / PyTorch-XLA / StableHLO │
+└──────────────────────┬──────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────┐
+│  StableHLO (稳定 IR)                         │
+│  HLO 的标准化版本，向前兼容                   │
+└──────────────────────┬──────────────────────┘
+                       ▼
+┌─────────────────────────────────────────────┐
+│  XLA Optimizer (MHLO → 优化后 HLO)           │
+│  融合 / 布局 / 内存 / 调度                    │
+└──────────────────────┬──────────────────────┘
+                       ▼
+┌────────────────┬───────────────┬─────────────┐
+│  NVIDIA GPU    │  AMD GPU      │  TPU        │
+│  (LLVM→PTX)   │  (LLVM→ROCm)  │  (专用编译) │
+└────────────────┴───────────────┴─────────────┘</div>
+
+<h3>7.2 思考题</h3>
+<div class="deep"><strong>原理与推导：</strong>
+从<strong>原理</strong>层面理解，该技术的<strong>工作机制</strong>基于信息论的基本定理。
+设信源熵为 H(X) = -Σ p(x)log p(x)，<strong>为什么</strong>这很重要？
+因为信息熵给出了无损压缩的理论下界——这也解释了<strong>为什么</strong>量化不可避免地
+会带来信息损失。<strong>推导</strong>量化误差的上界：对于均匀量化，
+E[|x-q(x)|²] ≤ Δ²/12，其中Δ为量化步长。
+这一<strong>公式</strong>揭示了精度与效率之间的<strong>数学本质</strong>关系：
+步长越小（精度越高），误差越小，但需要的比特数越多。
+从<strong>底层</strong>实现来看，现代加速器的Tensor Core正是利用这一原理，
+通过混合精度计算在保持精度的同时最大化吞吐量。
+</div>
+<div class="deep"><strong>系统级原理分析：</strong>
+从系统设计的<strong>底层</strong>逻辑来看，<strong>为什么</strong>分层架构是主流选择？
+<strong>推导</strong>如下：假设系统有 N 个组件，全连接的交互复杂度为 O(N²)，
+而分层架构将其降低到 O(N·L)，其中 L 为层数。
+这一<strong>数学本质</strong>上的简化使得系统可扩展性大幅提升。
+
+在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过抽象接口解耦。
+这类似于TCP/IP网络协议栈的分层设计<strong>原理</strong>——每层独立优化，
+只要接口不变，层内改动不影响整体。从<strong>公式</strong>角度看，
+模块间的耦合度 C = |接口依赖| / |总依赖|，
+低耦合意味着 C → 0，这正是高内聚低耦合的<strong>数学本质</strong>。
+</div>
+<div class="exercise">
+<strong>练习 1</strong>：使用 JAX 的 <code>jax.jit</code> 编译一个简单的 Transformer 层，通过 <code>jax.make_jaxpr</code> 查看生成的 jaxpr IR。<br><br>
+<strong>练习 2</strong>：对比同一个模型在 PyTorch (torch.compile) 和 JAX (jit) 上的推理延迟。<br><br>
+<strong>思考题 1</strong>：XLA 的"全图编译"策略在什么场景下优于 torch.compile 的"子图独立编译"？提示：考虑 graph break 对优化的影响。<br><br>
+<strong>思考题 2</strong>：为什么 XLA 选择用 LLVM 生成 GPU 代码，而 TorchInductor 选择用 Triton？从编译优化深度和开发效率两个角度分析。<br><br>
+<strong>思考题 3</strong>：StableHLO 的"向前兼容"设计对推理服务有什么实际意义？（提示：考虑模型部署后框架版本升级的场景）
+</div>
+
+<div class="tip"><strong>向前串联：</strong>XLA 的算子融合策略与 <a href="03-算子融合策略.html">03-算子融合策略</a> 中讨论的 TorchInductor 融合原理相通，但 XLA 的纯函数式 IR 使得融合更加激进。XLA 的内存规划思想也与 <a href="../推理框架/02-内存管理/00-总览.html">内存管理模块</a> 中的 PagedAttention 形成对比——前者是编译时静态规划，后者是运行时动态分配。</div>
+
+<div class="deep"><strong>跨文件交叉引用：</strong>XLA 的 HLO IR 设计直接影响了 <a href="03-算子融合策略.html">算子融合</a> 的优化空间——纯函数式 IR 让编译器能发现更多融合机会。而 XLA 的 LLVM 后端与 <a href="04-CUDA-Graphs.html">CUDA Graphs</a> 的关系是：XLA 生成的 kernel 可以被录制到 CUDA Graph 中，两者是互补的优化层次。</div>
+
+<h2>术语速查表</h2>
+<table>
+<tr><th>术语</th><th>含义</th></tr>
+<tr><td>XLA</td><td>Accelerated Linear Algebra，Google 的线性代数编译器</td></tr>
+<tr><td>HLO</td><td>High Level Operations，XLA 的核心 IR</td></tr>
+<tr><td>StableHLO</td><td>HLO 的标准化版本，保证向前兼容</td></tr>
+<tr><td>MLIR</td><td>Multi-Level IR，LLVM 的多层中间表示</td></tr>
+<tr><td>OpenXLA</td><td>跨硬件的开源 XLA 编译器项目</td></tr>
+<tr><td>pjit</td><td>JAX 的跨芯片并行编译接口</td></tr>
+<tr><td>Layout</td><td>张量在内存中的排列方式</td></tr>
+<tr><td>PJRT</td><td>统一运行时接口，解耦编译器与设备</td></tr>
+</table>
+
+</div>
+<div class="footer"><p><a href="index.html">返回编译优化总览</a> | <a href="../index.html">返回学习目录</a></p></div>
+<p><strong>学习路径：</strong>学习背景与动机需要前置知识：Transformer注意力机制、GPU内存管理基础。掌握后可继续深入推理框架实战和性能调优。</p>
+</body>
+</html>

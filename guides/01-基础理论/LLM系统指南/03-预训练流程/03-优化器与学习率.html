@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03-优化器与学习率 | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.svg-diagram{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin:16px 0;overflow-x:auto;text-align:center}.svg-diagram svg{max-width:100%;height:auto}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.deep{background:rgba(188,140,255,0.08);border-left:4px solid var(--purple)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+</head>
+<body>
+<div class="nav"><a href="02-训练数据处理.html">&larr; 02-训练数据处理</a><span>03-预训练 / 优化器与学习率</span><a href="04-训练稳定性与精度.html">04-训练稳定性与精度 &rarr;</a></div>
+<div class="container">
+
+<h1>⚙️ 3. 优化器与学习率</h1>
+
+<h2>3.1 AdamW 优化器</h2>
+<p>LLM 训练的标准优化器。</p>
+<pre><code><span class="comment"># Adam 核心步骤</span>
+m = β1 * m + (1-β1) * grad           <span class="comment"># 一阶矩 (动量)</span>
+v = β2 * v + (1-β2) * grad**2        <span class="comment"># 二阶矩 (自适应学习率)</span>
+m_hat = m / (1 - β1**t)              <span class="comment"># 偏差修正</span>
+v_hat = v / (1 - β2**t)              <span class="comment"># 偏差修正</span>
+
+<span class="comment"># AdamW: 权重衰减从梯度更新中分离</span>
+param = param - lr * (m_hat / (sqrt(v_hat) + ε))  <span class="comment"># Adam 更新</span>
+param = param - lr * λ * param                     <span class="comment"># 权重衰减 (独立)</span>
+
+<span class="comment"># 典型超参数</span>
+β1=0.9, β2=0.95, ε=1e-8, λ(weight_decay)=0.1</code></pre>
+
+<div class="box info"><div class="label">💡 Adam vs AdamW</div>
+Adam 的原始实现中，L2 正则化和自适应学习率耦合了 — 权重衰减被自适应学习率"稀释"。AdamW 把权重衰减从梯度更新中分离出来，效果更好。这是 Loshchilov & Hutter (2019) 的发现。</div>
+
+<div class="ascii">Adam 优化器的核心机制:
+
+梯度 g_t
+  │
+  ├─→ m = β1·m + (1-β1)·g_t     (一阶矩: 方向 + 动量)
+  │     "记得最近的梯度方向"
+  │
+  ├─→ v = β2·v + (1-β2)·g_t²    (二阶矩: 步长自适应)
+  │     "记得最近的梯度大小"
+  │
+  └─→ 更新 = m / (√v + ε)
+        "方向由动量决定，步长由历史梯度大小决定"
+
+直觉:
+  - 梯度方向一致 → 动量大 → 加速 (像下坡滚动的球)
+  - 梯度大小大 → 步长自动缩小 (避免冲过头)
+  - 梯度大小小 → 步长自动增大 (加速收敛)</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区：AdamW 不是万能的</div>
+AdamW 的自适应学习率机制在训练初期非常有用，但后期可能出现问题：1）v 只记录历史梯度大小，可能无法反映当前 landscape；2）AdamW 的 weight decay 对所有参数一视同仁，但实际上不同参数需要不同的正则化强度。部分研究（如 AdEMAMix）正在探索更好的优化器，但目前 AdamW 仍然是最实用的选择。</div>
+
+<h2>3.2 学习率调度</h2>
+<div class="ascii">Warmup + Cosine Decay:
+
+lr
+ ↑
+ |      ___________
+ |     /           \
+ |    /             \       ← Cosine Decay
+ |   /               \
+ |  /                  \
+ | /                    \___
+ |/____________________________→ steps
+   ↑warmup    ↑peak     ↑min
+
+典型设置:
+  Warmup: 前 2000 步线性增长
+  Peak:   3e-4 (7B) 或 1.5e-4 (70B)
+  Min:    Peak 的 10% (如 3e-5)
+  Schedule: Cosine Decay 到 min</div>
+
+<pre><code><span class="comment"># 学习率调度实现</span>
+<span class="keyword">def</span> get_lr(step, warmup, total, peak_lr, min_lr):
+    <span class="keyword">if</span> step < warmup:
+        <span class="keyword">return</span> peak_lr * step / warmup
+    progress = (step - warmup) / (total - warmup)
+    <span class="keyword">return</span> min_lr + 0.5 * (peak_lr - min_lr) * (1 + math.cos(math.pi * progress))</code></pre>
+
+<div class="box tip"><div class="label">💡 通俗类比：学习率像"开车速度"</div>
+Warmup 阶段像"停车场起步"——刚启动时慢慢加速，避免一上来就猛踩油门（梯度不稳定）。Peak 阶段像"高速公路巡航"——稳定高速学习。Cosine Decay 像"进收费站前减速"——逐渐放慢速度，精确调整参数到最优位置。如果一上来就用最大学习率，模型可能"翻车"（loss 爆炸）；如果学习率一直很大，模型会在最优点附近"来回震荡"无法收敛。</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨：为什么 Cosine Decay 效果好？</div>
+Cosine Decay 的优势在于：1）前期保持较大学习率，充分探索参数空间；2）后期平滑衰减，精细调整参数；3）衰减曲线的"前慢后快再慢"形状与训练动态匹配——初期 loss 下降快需要大步，中期需要稳定学习，后期需要精细调优。但 2025 年的研究（"Beyond Cosine Decay"）发现，在某些场景下，WSD（Warmup-Stable-Decay）调度可能更好：先 warmup，再保持恒定学习率，最后快速衰减。这种调度更灵活，支持"随时中断训练然后继续"。</div>
+
+<h2>3.3 Batch Size</h2>
+<table>
+<tr><th>模型</th><th>Batch Size (tokens)</th><th>说明</th></tr>
+<tr><td>LLaMA-2 7B</td><td>4M tokens</td><td>逐步从 2M 增长到 4M</td></tr>
+<tr><td>LLaMA-2 70B</td><td>4M tokens</td><td>更大的 batch 需要更大 LR</td></tr>
+<tr><td>DeepSeek-V3</td><td>~60M tokens</td><td>超大 batch + 超多 GPU</td></tr>
+</table>
+
+<div class="box warn"><div class="label">⚠️ 常见误区：Batch Size 不是越大越好</div>
+增大 batch size 可以提高 GPU 利用率和训练吞吐量，但过大的 batch 会：1）降低模型的泛化能力（"大 batch 陷阱"）；2）需要同步更多 GPU，通信开销增大；3）可能需要调整学习率（线性缩放法则）。实践中通常先用小 batch warmup，再逐步增大。LLaMA-2 的 batch size 从 2M 逐步增长到 4M tokens。</div>
+
+<table>
+<tr><th>Batch Size 策略</th><th>思路</th><th>适用场景</th></tr>
+<tr><td>固定 Batch Size</td><td>全程使用相同大小</td><td>简单任务</td></tr>
+<tr><td>逐步增长</td><td>从小 batch 逐步增大</td><td>LLM 训练主流</td></tr>
+<tr><td>动态调整</td><td>根据 loss 变化调整</td><td>研究阶段</td></tr>
+<tr><td>梯度累积</td><td>多个小 batch 累积梯度</td><td>显存不足时</td></tr>
+</table>
+
+<h2>3.4 最新研究</h2>
+<ul>
+<li><strong>"Beyond Cosine Decay"</strong> (arxiv 2025): 探索替代 cosine 的学习率调度</li>
+<li><strong>"Simplifying Adam"</strong> (arxiv 2025): 在特定设置下，Adam 的偏差修正可能不必要</li>
+<li><strong>AdEMAMix</strong>: 混合不同动量的 Adam 变体</li>
+<li><strong>FlashOptim</strong> (arxiv 2025): 无额外显存开销的优化器</li>
+</ul>
+
+<div class="box tip"><div class="label">💡 通俗类比：优化器选择像"选车"</div>
+SGD 像"自行车"——简单可靠，但慢。SGD+Momentum 像"摩托车"——加了动量，更快。Adam 像"自动挡汽车"——自适应学习率，省心。AdamW 像"高端 SUV"——加了权重衰减，适合复杂地形。未来可能出现更好的"车"，但目前 AdamW 是最实用的"座驾"。</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨：优化器状态的显存开销</div>
+AdamW 需要为每个参数维护两个状态（m 和 v），这意味着优化器的显存开销是参数量的 2 倍。对于 7B 模型：参数本身需要 14GB（FP16），优化器状态需要 28GB（FP32 的 m 和 v），加上梯度 14GB，总共 56GB。这就是为什么 LLM 训练需要如此多的显存。ZeRO 优化器通过分布式存储优化器状态来缓解这个问题。FlashOptim 等新方法试图在不存储优化器状态的情况下达到同等效果。</div>
+
+<h2>3.5 梯度累积与分布式优化</h2>
+<p>在实际训练中，由于显存限制，往往无法使用理想的 batch size。梯度累积（Gradient Accumulation）技术通过在多个小 batch 上累积梯度，等效实现大 batch 训练。</p>
+
+<div class="ascii">梯度累积工作原理:
+
+理想的 Batch Size: 4096 tokens (需要 8 张 GPU)
+实际每张 GPU 显存: 只能放下 512 tokens
+
+解决方案: 梯度累积 8 步
+┌──────────────────────────────────────────────────┐
+│  Step 1: 前向+反向 (512 tokens) → 累积梯度         │
+│  Step 2: 前向+反向 (512 tokens) → 累积梯度         │
+│  Step 3: 前向+反向 (512 tokens) → 累积梯度         │
+│  ...                                              │
+│  Step 8: 前向+反向 (512 tokens) → 累积梯度         │
+│                                                   │
+│  Step 9: 累积梯度 ÷ 8 → 更新参数                   │
+│                                                   │
+│  等效 Batch Size = 512 × 8 = 4096 tokens ✓        │
+│                                                   │
+│  注意: 学习率可能需要按比例调整                      │
+│  或使用梯度缩放: grad = grad / accumulation_steps  │
+└──────────────────────────────────────────────────┘</div>
+
+<pre><code><span class="comment"># PyTorch 梯度累积实现</span>
+accumulation_steps = 8
+optimizer.zero_grad()
+
+<span class="keyword">for</span> i, batch <span class="keyword">in</span> enumerate(dataloader):
+    loss = model(batch) / accumulation_steps
+    loss.backward()  <span class="comment"># 梯度自动累积</span>
+
+    <span class="keyword">if</span> (i + 1) % accumulation_steps == 0:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        optimizer.zero_grad()</code></pre>
+
+<div class="box tip"><div class="label">💡 梯度累积不影响训练效果（理论上）</div>
+梯度累积在数学上等价于使用大 batch 训练——累积的梯度等于大 batch 梯度的精确值（不是近似）。唯一的差异来自 BatchNorm（LLM 使用 LayerNorm 所以不受影响）和随机种子（每个小 batch 的 dropout 掩码可能不同）。因此，梯度累积是 LLM 训练中实现大 batch 的标准方法，DeepSeek-V3 和 LLaMA-3 都使用了这一技术。</div>
+
+<h2>3.6 优化器状态管理与显存优化</h2>
+<p>AdamW 优化器为每个参数维护两个状态变量（一阶矩 m 和二阶矩 v），这意味着优化器状态的显存占用是参数量的 2 倍（FP32）。对于大模型来说，这是一个巨大的开销。</p>
+
+<table>
+<tr><th>模型规模</th><th>参数(BF16)</th><th>梯度(BF16)</th><th>优化器状态(FP32)</th><th>总显存</th></tr>
+<tr><td>1B</td><td>2 GB</td><td>2 GB</td><td>8 GB</td><td>12 GB</td></tr>
+<tr><td>7B</td><td>14 GB</td><td>14 GB</td><td>56 GB</td><td>84 GB</td></tr>
+<tr><td>13B</td><td>26 GB</td><td>26 GB</td><td>104 GB</td><td>156 GB</td></tr>
+<tr><td>70B</td><td>140 GB</td><td>140 GB</td><td>560 GB</td><td>840 GB</td></tr>
+</table>
+
+<p>从上表可以看出，70B 模型仅训练状态就需要 840 GB 显存，远超单张 GPU 的容量。这就是为什么 LLM 训练必须使用分布式策略。</p>
+
+<div class="ascii">ZeRO 优化器状态分片策略:
+
+ZeRO Stage 1 (优化器状态分片):
+  GPU0: [参数副本] [梯度] [优化器状态 1/N]
+  GPU1: [参数副本] [梯度] [优化器状态 1/N]
+  → 显存节省: 优化器状态除以 N
+
+ZeRO Stage 2 (+ 梯度分片):
+  GPU0: [参数副本] [梯度 1/N] [优化器状态 1/N]
+  GPU1: [参数副本] [梯度 1/N] [优化器状态 1/N]
+  → 显存节省: 优化器 + 梯度 除以 N
+
+ZeRO Stage 3 (+ 参数分片):
+  GPU0: [参数 1/N] [梯度 1/N] [优化器状态 1/N]
+  GPU1: [参数 1/N] [梯度 1/N] [优化器状态 1/N]
+  → 显存节省: 所有状态除以 N
+  → 代价: 需要 all-gather 通信收集完整参数</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨：混合精度优化器的实现细节</div>
+在 BF16 混合精度训练中，优化器状态的管理非常精细：1）<strong>主权重（Master Weights）</strong>以 FP32 存储，确保参数更新不损失精度；2）<strong>一阶矩 m</strong>和<strong>二阶矩 v</strong>也以 FP32 存储；3）<strong>梯度</strong>以 BF16 计算后转为 FP32 用于更新。这意味着每个参数需要 2 + 4 + 4 + 4 = 14 字节（BF16 参数 + BF16 梯度 + FP32 m + FP32 v）。通过 ZeRO Stage 3 优化，7B 模型可以在 8 张 80GB A100 上训练，而无需 ZeRO 则需要约 12 张。DeepSeek-V3 进一步使用了 FP8 训练，将参数和梯度的存储减半，极大降低了显存需求。</div>
+
+<div class="box warn"><div class="label">⚠️ ZeRO Stage 3 的通信开销</div>
+ZeRO Stage 3 虽然大幅降低显存，但引入了额外的通信开销：每次前向和反向传播都需要 all-gather 操作来收集完整的参数。这会增加约 30-50% 的通信时间。因此，实践中 Stage 2 更常用——它在显存节省和通信开销之间取得了平衡。只有当 Stage 2 仍然显存不足时才使用 Stage 3。对于 70B+ 模型，通常使用 ZeRO Stage 3 + CPU Offload 的组合。</div>
+
+<h2>3.7 学习率与模型规模的关系</h2>
+<p>学习率的选择与模型规模密切相关。经验法则是：模型越大，学习率越小。</p>
+
+<table>
+<tr><th>模型规模</th><th>推荐 Peak LR</th><th>Batch Size</th><th>说明</th></tr>
+<tr><td>125M</td><td>6e-4</td><td>0.5M</td><td>小模型可以用更大的 LR</td></tr>
+<tr><td>1.3B</td><td>3e-4</td><td>1M</td><td>GPT-3 小模型设置</td></tr>
+<tr><td>7B</td><td>3e-4</td><td>4M</td><td>LLaMA-2 7B 设置</td></tr>
+<tr><td>13B</td><td>3e-4</td><td>4M</td><td>LLaMA-2 13B 设置</td></tr>
+<tr><td>70B</td><td>1.5e-4</td><td>4M</td><td>LLaMA-2 70B 设置</td></tr>
+<tr><td>405B</td><td>8e-5</td><td>4M</td><td>LLaMA-3 405B 设置</td></tr>
+</table>
+
+<div class="box tip"><div class="label">💡 学习率缩放法则（Linear Scaling Rule）</div>
+当 batch size 增大 k 倍时，学习率也应相应增大 k 倍（在一定范围内）。直觉是：大 batch 的梯度方差更小、更准确，因此可以走更大的步长。但这个法则有上限——当 batch size 过大时（>数百万 token），继续增大 batch 不再带来收益，反而需要调整其他超参数。LLaMA-2 在训练初期使用 2M batch，逐步增长到 4M，同时学习率也做了相应调整。</div>
+
+<h3>3.8 Adam 优化器的数学原理推导</h3>
+<p>Adam 优化器的核心思想是结合动量法和自适应学习率的优点。其数学推导如下：</p>
+
+<div class="ascii">Adam 优化器的数学推导:
+
+  目标: 最小化损失函数 L(θ)
+
+  一阶矩估计 (动量):
+    m_t = β₁ · m_{t-1} + (1 - β₁) · g_t
+    m_t 近似梯度的指数移动平均 (方向)
+    β₁ = 0.9 → 约记住最近 10 步的梯度
+
+  二阶矩估计 (自适应):
+    v_t = β₂ · v_{t-1} + (1 - β₂) · g_t²
+    v_t 近似梯度平方的指数移动平均 (幅度)
+    β₂ = 0.95 → 约记住最近 20 步的梯度大小
+
+  偏差修正:
+    m̂_t = m_t / (1 - β₁ᵗ)
+    v̂_t = v_t / (1 - β₂ᵗ)
+
+  参数更新:
+    θ_{t+1} = θ_t - lr · m̂_t / (√v̂_t + ε)
+
+  AdamW (权重衰减解耦):
+    θ_{t+1} = θ_t - lr · m̂_t / (√v̂_t + ε) - lr · λ · θ_t</div>
+
+<h3>3.9 优化器状态的显存分析</h3>
+<p>理解优化器的显存占用对于规划训练基础设施至关重要。</p>
+
+<table>
+<tr><th>优化器</th><th>状态变量</th><th>状态大小/参数</th><th>显存效率</th><th>收敛速度</th></tr>
+<tr><td>SGD</td><td>无</td><td>0</td><td>最高</td><td>慢</td></tr>
+<tr><td>SGD+Momentum</td><td>m</td><td>4 bytes</td><td>高</td><td>中</td></tr>
+<tr><td>AdamW</td><td>m + v</td><td>8 bytes</td><td>中</td><td>快</td></tr>
+<tr><td>Lion</td><td>m</td><td>4 bytes</td><td>高</td><td>快</td></tr>
+<tr><td>SOPHIA</td><td>m + h</td><td>8 bytes</td><td>中</td><td>快</td></tr>
+<tr><td>Adafactor</td><td>分解二阶矩</td><td>~4 bytes</td><td>高</td><td>快</td></tr>
+</table>
+
+<h3>3.10 学习率与 Batch Size 的缩放法则</h3>
+<p>学习率和 Batch Size 之间存在密切的关系。理解这个关系对于分布式训练中的超参数调优至关重要。</p>
+
+<div class="box deep"><div class="label">🔬 线性缩放法则的理论基础</div>线性缩放法则（Linear Scaling Rule）的理论基础来自 SGD 的噪声分析。SGD 的梯度可以分解为：g = ∇L(θ) + σ/√B × noise，其中 B 是 batch size。当 B 增大 k 倍时，噪声项减小 √k 倍，梯度更准确，因此可以走更大的步长。但这个法则有两个重要前提：(1) 假设梯度噪声是高斯分布——在训练初期可能不成立；(2) 假设损失函数是局部线性的——在 sharp minima 附近可能不成立。实际中通常使用"平方根缩放"（LR ∝ √B）而非严格线性缩放。</div>
+
+<h3>3.11 梯度累积的等价性证明</h3>
+<p>梯度累积在数学上等价于大 batch 训练，这个等价性可以严格证明。</p>
+
+<div class="ascii">梯度累积等价性证明:
+
+  设: batch_size = K, 累积步数 = N
+  大 batch 梯度: g_big = (1/K) Σᵢ₌₁ᴷ ∇L(xᵢ)
+
+  梯度累积:
+    Step 1: g₁ = (1/K) Σᵢ₌₁ᵏ ∇L(xᵢ)
+    Step 2: g₂ = (1/K) Σᵢ₌ₖ₊₁²ᵏ ∇L(xᵢ)
+    ...
+    Step N: gN = (1/K) Σᵢ₌₍ₙ₋₁₎ₖ₊₁ᴷ ∇L(xᵢ)
+
+    累积: g_accum = g₁ + g₂ + ... + gN
+                = (1/K) Σᵢ₌₁ᴷ ∇L(xᵢ) = g_big ✓
+
+  结论: 梯度累积 = 大 batch (精确等价)</div>
+
+<h3>3.12 优化器的前沿研究方向</h3>
+<p>优化器领域的研究正在多个方向同时推进。</p>
+
+<ul>
+  <li><strong>无状态优化器</strong>：FlashOptim 等方法不存储优化器状态，通过运行时估算替代，将显存降低 50%+</li>
+  <li><strong>量化优化器</strong>：将优化器状态从 FP32 量化到 FP8/INT8，进一步压缩显存</li>
+  <li><strong>自适应权重衰减</strong>：不同参数组使用不同的权重衰减率</li>
+  <li><strong>二阶优化器复兴</strong>：SOPHIA、SOAP 等用 Hessian 对角线近似，收敛更快</li>
+</ul>
+
+<div class="box warn"><div class="label">⚠️ 优化器选择的实际考量</div>在实际项目中选择优化器时需要考虑：(1) 显存预算——AdamW 需要 8 bytes/参数的优化器状态；(2) 收敛速度——AdamW 通常比 SGD 快 2-3 倍；(3) 实现成熟度——AdamW 在所有框架中都有高度优化的实现；(4) 与分布式策略的兼容性——ZeRO 等策略需要与优化器状态管理配合。</div>
+
+<div class="box tip"><div class="label">🗺️ 学习路径</div>
+优化器是预训练的核心组件。建议：① 理解 SGD → Momentum → Adam 的演进逻辑 → ② 掌握 AdamW 的数学原理 → ③ 了解学习率调度 → ④ 学习梯度累积和分布式优化 → ⑤ 关注前沿研究。下一节：<a href="04-训练稳定性与精度.html">04-训练稳定性与精度</a>。进阶方向：继续学习<a href="05-总结与练习.html">总结与练习</a>巩固所学，然后进入<a href="../04-后训练对齐/01-SFT监督微调.html">后训练对齐</a>。
+</div>
+
+<h2>动手练习</h2>
+
+<div class="box exercise"><div class="label">🎯 练习1: 实现梯度累积</div>
+在 PyTorch 中实现梯度累积训练循环，验证累积梯度等于大 batch 梯度。
+<pre><code><span class="keyword">import</span> torch
+<span class="keyword">import</span> torch.nn <span class="keyword">as</span> nn
+
+model = nn.Linear(10, 2)
+x = torch.randn(16, 10)
+y = torch.randint(0, 2, (16,))
+criterion = nn.CrossEntropyLoss()
+
+<span class="comment"># 方法1: 大 batch (一次计算)</span>
+model.zero_grad()
+loss1 = criterion(model(x), y)
+loss1.backward()
+grad1 = [p.grad.clone() <span class="keyword">for</span> p <span class="keyword">in</span> model.parameters()]
+
+<span class="comment"># 方法2: 梯度累积 (分 4 步)</span>
+model.zero_grad()
+<span class="keyword">for</span> i <span class="keyword">in</span> range(4):
+    loss = criterion(model(x[i*4:(i+1)*4]), y[i*4:(i+1)*4]) / 4
+    loss.backward()
+grad2 = [p.grad.clone() <span class="keyword">for</span> p <span class="keyword">in</span> model.parameters()]
+
+<span class="comment"># 验证梯度相同</span>
+<span class="keyword">for</span> g1, g2 <span class="keyword">in</span> zip(grad1, grad2):
+    <span class="keyword">print</span>(f<span class="string">"差异: {(g1-g2).abs().max():.2e}"</span>)</code></pre></div>
+
+<div class="box exercise"><div class="label">🎯 练习2: 学习率调度对比</div>
+绘制 Cosine Decay、WSD（Warmup-Stable-Decay）和 Linear Decay 三种学习率调度的对比图。
+<pre><code><span class="keyword">import</span> numpy <span class="keyword">as</span> np, matplotlib.pyplot <span class="keyword">as</span> plt
+
+steps = np.arange(100001)
+warmup, peak, mn = 2000, 3e-4, 3e-5
+
+cosine = np.where(steps < warmup, peak * steps / warmup,
+    mn + 0.5*(peak-mn)*(1+np.cos(np.pi*(steps-warmup)/(100000-warmup))))
+
+stable_end = 80000
+wsd = np.where(steps < warmup, peak * steps / warmup,
+    np.where(steps < stable_end, peak,
+    mn + (peak-mn)*(1-(steps-stable_end)/(100000-stable_end))))
+
+plt.plot(steps, cosine, label='Cosine')
+plt.plot(steps, wsd, label='WSD')
+plt.legend(); plt.xlabel('Steps'); plt.ylabel('LR')
+plt.savefig('lr_comparison.png', dpi=150)</code></pre></div>
+
+<div class="box exercise"><div class="label">🎯 练习3: 计算优化器显存占用</div>
+编写脚本计算不同模型规模下 AdamW 优化器的显存占用。
+<pre><code><span class="keyword">def</span> calc_memory(params_b, precision='bf16'):
+    <span class="comment">"""计算训练显存需求 (GB)"""</span>
+    param_bytes = 2 <span class="keyword">if</span> precision == 'bf16' <span class="keyword">else</span> 4
+    params = params_b * 1e9
+    model_mem = params * param_bytes / 1e9      <span class="comment"># 模型参数</span>
+    grad_mem = params * param_bytes / 1e9       <span class="comment"># 梯度</span>
+    optim_mem = params * 4 * 2 / 1e9            <span class="comment"># m + v (FP32)</span>
+    master = params * 4 / 1e9                   <span class="comment"># FP32 主权重</span>
+    total = model_mem + grad_mem + optim_mem + master
+    <span class="keyword">print</span>(f<span class="string">"{params_b}B: 参数={model_mem:.1f}G, 梯度={grad_mem:.1f}G, "</span>
+          f<span class="string">"优化器={optim_mem:.1f}G, 主权重={master:.1f}G, 总计={total:.1f}G"</span>)
+
+<span class="keyword">for</span> size <span class="keyword">in</span> [1, 7, 13, 70, 405]:
+    calc_memory(size)</code></pre></div>
+
+<h2>学习路径</h2>
+<div class="box info"><div class="label">📍 建议学习路径</div>
+<ol>
+<li><strong>上一节</strong>：理解数据处理流程 → <a href="02-训练数据处理.html">02-训练数据处理</a></li>
+<li><strong>本节核心</strong>：掌握优化器和学习率调度 ← 你在这里</li>
+<li><strong>下一节</strong>：学习训练稳定性和精度管理 → <a href="04-训练稳定性与精度.html">04-训练稳定性与精度</a></li>
+<li><strong>回顾</strong>：总结与练习 → <a href="05-总结与练习.html">05-总结与练习</a></li>
+</ol>
+</div>
+
+<div class="next-prev"><a href="02-训练数据处理.html">← 02-数据</a><a href="04-训练稳定性与精度.html">04-稳定性 →</a></div>
+</div>
+<div class="footer"><p>LLM 系统学习 · 03-优化器与学习率</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="tip"><strong>实用技巧：</strong>
+优化器与学习率的工程实践建议：在大规模训练前，务必用小模型验证超参数配置。关键步骤包括：(1) 用125M模型测试不同peak learning rate（1e-4, 3e-4, 6e-4），观察loss曲线的收敛速度和最终值；(2) 验证warmup步数是否足够——如果warmup期间loss剧烈波动，说明warmup太短或peak LR太高；(3) 测试不同batch size（1M, 2M, 4M tokens）对训练稳定性的影响；(4) 监控优化器状态的显存占用是否符合预期（AdamW每个参数需要8字节优化器状态）。建议先用小规模实验确定最优学习率和batch size，再按线性缩放法则调整到大规模训练配置。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+AdamW优化器的<strong>数学原理</strong>结合了动量法和自适应学习率两个思想。<strong>推导</strong>：一阶矩m_t = β₁m_{t-1} + (1-β₁)g_t近似梯度的指数移动平均（方向信息），二阶矩v_t = β₂v_{t-1} + (1-β₂)g_t²近似梯度平方的指数移动平均（幅度信息）。更新规则 θ = θ - lr·m̂_t/(√v̂_t+ε) 的<strong>直觉</strong>是：方向由动量决定（梯度方向一致则加速），步长由历史梯度大小自适应调节（梯度大则步长小，梯度小则步长大）。AdamW的关键改进是将权重衰减从梯度更新中解耦：θ = θ - lr·m̂_t/(√v̂_t+ε) - lr·λ·θ，这避免了自适应学习率"稀释"正则化效果的问题。β₁=0.9意味着约记住最近10步的梯度方向，β₂=0.95意味着约记住最近20步的梯度幅度。
+</div>
+
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释AdamW 优化器的核心原理，并举一个实际应用场景。</li>
+<li>AdamW 优化器在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比AdamW 优化器与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+AdamW 优化器的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+从<strong>优化理论的角度</strong>看，AdamW优化器面临的核心挑战是在收敛速度和泛化能力之间寻找最优平衡。AdamW的自适应学习率机制虽然加速了收敛，但也可能导致模型收敛到sharp minima（尖锐的局部最优），这些点的泛化能力通常不如flat minima（平坦的局部最优）。<strong>推导</strong>：SGD的梯度噪声可以被建模为 σ/√B × ξ（B为batch size，ξ为标准正态噪声），这个噪声有助于跳出sharp minima。而AdamW的自适应步长会"抹平"这种噪声，可能导致泛化能力下降。这就是为什么有些研究者建议在训练后期从AdamW切换到SGD以提升泛化性。但在LLM预训练中，AdamW的收敛速度优势远大于其泛化劣势，因此仍然是标准选择。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习优化器与学习率时，很多人只理解Adam的公式而不实际观察其行为。建议动手实现以下实验：(1) 在简单二次函数上对比SGD、SGD+Momentum和Adam的收敛轨迹，用matplotlib绘制损失曲面上的优化路径；(2) 实现Warmup+Cosine Decay学习率调度，绘制不同warmup步数（0, 1000, 2000）和不同最小学习率（peak的10% vs 1%）的调度曲线；(3) 计算不同模型规模（1B, 7B, 70B）下AdamW优化器状态的显存占用，理解为什么70B模型需要840GB显存用于训练状态；(4) 验证梯度累积的数学等价性——分别用大batch和梯度累积小batch计算梯度，确认二者完全相同。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为优化器只是"选AdamW然后调参"这么简单。学习率调度的选择（Cosine vs WSD）直接影响训练的收敛速度和最终模型质量；batch size与学习率的缩放关系（线性缩放 vs 平方根缩放）决定了分布式训练的超参数配置；梯度裁剪的阈值设置（通常1.0）决定了训练是否能稳定进行。不理解这些基础原理，就无法在训练出现问题时（如loss spike、训练停滞）快速定位原因并采取正确的应对措施。
+</div>
+</body>
+</html>

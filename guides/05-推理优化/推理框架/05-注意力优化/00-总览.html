@@ -1,0 +1,403 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>注意力优化总览</title><style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff; --green: #3fb950; --orange: #d29922; --red: #f85149; --purple: #bc8cff; --pink: #f778ba; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+  .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
+  .nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0.8rem 1.5rem; position: sticky; top: 0; z-index: 100; display: flex; justify-content: space-between; align-items: center; font-size: 0.9rem; }
+  .nav a { color: var(--accent); text-decoration: none; } .nav a:hover { text-decoration: underline; } .nav .title { color: var(--text-dim); }
+  h1 { font-size: 1.8rem; color: var(--accent); margin: 1.5rem 0 1rem; }
+  h2 { font-size: 1.3rem; color: var(--text); margin: 2rem 0 0.8rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; color: var(--green); margin: 1.2rem 0 0.5rem; }
+  p { margin: 0.5rem 0; font-size: 0.95rem; }
+  ul, ol { padding-left: 1.5rem; margin: 0.5rem 0; font-size: 0.95rem; } li { margin-bottom: 0.3rem; }
+  code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; color: var(--green); }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; color: var(--text); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); } th { color: var(--accent); font-weight: 600; background: var(--surface); } tr:hover { background: rgba(88, 166, 255, 0.05); }
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+  .callout { background: var(--surface); border-left: 3px solid var(--accent); padding: 1rem 1.2rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .callout.warn { border-left-color: var(--orange); } .callout.tip { border-left-color: var(--green); }
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid var(--green); padding: 1rem 1.2rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .warn { background: rgba(210,153,34,0.08); border-left: 3px solid var(--orange); padding: 1rem 1.2rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .deep { background: rgba(188,140,255,0.08); border-left: 3px solid var(--purple); padding: 1rem 1.2rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+  .next-prev { display: flex; justify-content: space-between; margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+  .next-prev a { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+  footer { text-align: center; margin-top: 3rem; padding: 1.5rem 0; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.8rem; }
+</style></head><body>
+<div class="nav"><span></span><span class="title">模块 05 · 注意力优化总览</span><a href="01-FlashAttention.html">下一节 →</a></div>
+<div class="container"><h1>⚡ 注意力优化总览</h1>
+<div class="callout"><strong>本模块目标：</strong>理解注意力计算的优化技术——从 FlashAttention 到 GQA、线性注意力、Ring Attention 等。</div>
+
+<div class="tip"><strong>通俗类比：</strong>注意力机制就像一个会议室里所有人互相传纸条——人数越多（序列越长），纸条数量呈平方级增长。注意力优化就是想办法让这个传纸条的过程更高效：有的方法改变传纸条的方式（FlashAttention），有的减少传纸条的人数（GQA/MQA），有的则完全换一种沟通方式（线性注意力）。</div>
+
+<h2>注意力计算的瓶颈分析</h2>
+
+<h3>计算复杂度的数学分析</h3>
+<p>标准自注意力的计算分三步：(1) QK^T 计算：O(n²d)；(2) Softmax 归一化：O(n²)；(3) Attention×V 计算：O(n²d)。总计算量 O(n²d)，存储 O(n²)。当 d=128, n=128K 时，注意力矩阵大小为 128K×128K×2B ≈ 32GB，远超单个 GPU 的 SRAM 容量（~20MB/SM）。</p>
+
+<h3>内存带宽瓶颈的量化分析</h3>
+<p>在 decode 阶段（batch_size=1），注意力计算的算术强度为 O(n²d) / O(n²d+n²) ≈ d/(d+1) ≈ 1 FLOP/Byte。H100 的算力/带宽比约为 600 FLOP/Byte，因此注意力计算严重受内存带宽限制（算术强度远低于硬件平衡点）。FlashAttention 通过减少 HBM 读写来缓解这一瓶颈。</p>
+
+<h3>KV Cache 对注意力计算的实际影响</h3>
+<p>在自回归生成中，每生成一个新 token 都需要与所有历史 token 做注意力计算。KV Cache 通过缓存历史 token 的 K 和 V 向量避免重复计算，但缓存本身占用大量显存。以 LLaMA-70B 为例，单个请求的 KV Cache 在 4K 上下文时约占 2.4GB，128K 上下文时可达 76.8GB。</p>
+
+<p>标准自注意力的计算复杂度为 O(n²d)，其中 n 是序列长度，d 是 head dimension。当序列长度从 2K 增长到 128K 时，注意力计算量增长 4096 倍。同时，注意力矩阵的存储也需要 O(n²) 的空间。这些特性使得注意力成为长序列推理的主要瓶颈。</p>
+
+<div class="ascii">标准注意力 vs FlashAttention 的内存访问模式
+
+标准注意力 — 需要将完整的 n×n 注意力矩阵写入 HBM:
+
+  SRAM (快但小)           HBM (慢但大)
+  ┌─────────┐            ┌─────────────────┐
+  │ 计算 QK^T│ ──写入──→ │ 存储 n×n 矩阵   │
+  │         │ ←──读回── │ (可能几十 GB!)   │
+  │ 计算 softmax│ ──写入──→ │              │
+  │         │ ←──读回── │                 │
+  │ 计算 Attn×V│ ──写出──→ │               │
+  └─────────┘            └─────────────────┘
+  HBM 读写次数: O(n²d + n²)
+
+FlashAttention — 分块计算，中间结果不写回 HBM:
+
+  SRAM (快但小)           HBM (慢但大)
+  ┌─────────┐            ┌─────────────────┐
+  │ 加载 Q块 │ ←──读取── │ Q, K, V 矩阵    │
+  │ 加载 K块 │ ←──读取── │                 │
+  │ 在 SRAM 中│           │                 │
+  │ 完成全部 │            │ 只写最终输出    │
+  │ 注意力计算│ ──写出──→ │ O(n×d) 而非 O(n²)│
+  └─────────┘            └─────────────────┘
+  HBM 读写次数: O(n²d²/M)  M=SRAM大小</div>
+
+<div class="warn"><strong>常见误区：</strong>FlashAttention 并没有"减少计算量"——它计算的数学结果和标准注意力完全相同。它减少的是<strong>HBM 读写次数</strong>（IO 操作）。在 GPU 上，内存带宽往往是比算力更稀缺的资源，所以减少 IO 就能显著提速。不要把 FlashAttention 和"稀疏注意力"或"线性注意力"混淆——那些才是真正减少计算量的方法。</div>
+
+<div class="deep"><strong>深入探讨：</strong>FlashAttention 的核心算法是 tiling（分块）。它将 Q、K、V 矩阵分成小块，每次只在 SRAM 中加载一小块进行计算。关键技巧是 online softmax——在不看到完整行的情况下，通过维护 running max 和 running sum 来逐步计算正确的 softmax 值。这需要用到 log-sum-exp 技巧：将 softmax 分解为分子和分母分别累加，通过 rescaling 因子修正之前块的结果。FlashAttention-v2 进一步优化了并行度和 warp 调度，FlashAttention-3 则利用了 H100 的异步执行和 FP8 支持。</div>
+
+<table>
+<tr><th>FlashAttention 版本</th><th>发布年份</th><th>关键优化</th><th>相对速度</th><th>适用硬件</th></tr>
+<tr><td>FlashAttention-v1</td><td>2022</td><td>Tiling + Online Softmax</td><td>1.0x (基准)</td><td>A100</td></tr>
+<tr><td>FlashAttention-v2</td><td>2023</td><td>Warp 调度优化, 减少 non-matmul</td><td>2.0x</td><td>A100/H100</td></tr>
+<tr><td>FlashAttention-3</td><td>2024</td><td>TMA 异步, WGMMA, FP8</td><td>3.5x</td><td>H100/H200</td></tr>
+</table>
+
+<h2>模块知识地图</h2>
+
+<h3>技术演进时间线</h3>
+<p>注意力优化技术的发展脉络：2017 MHA（原始多头注意力）→ 2019 MQA（多查询注意力，减少 KV 头）→ 2020 GQA（分组查询注意力，MQA 的泛化）→ 2022 FlashAttention（IO-aware 分块计算）→ 2023 FlashAttention-2（优化并行度）→ 2024 FlashAttention-3（H100 异步执行 + FP8）→ 2024 线性注意力/Mamba（替代架构）→ 2024 Ring Attention（多 GPU 长序列）。</p>
+
+<h3>各技术的适用场景决策树</h3>
+<p>选择注意力优化技术的关键决策因素：(1) 序列长度 — 短序列（&lt;4K）用标准 FlashAttention 即可；中等序列（4K-128K）需要 GQA + FlashAttention；超长序列（&gt;128K）考虑 Ring Attention 或线性注意力。(2) 硬件条件 — 单卡用 FlashAttention，多卡用 Ring Attention。(3) 精度要求 — 精确场景用 FlashAttention，可容忍近似用线性注意力。</p>
+
+<div class="diagram">
+┌──────────────────────────────────────────────┐
+│              注意力优化技术                    │
+│                                              │
+│  ┌─────────────┐  IO-aware 分块计算          │
+│  │ 01-Flash    │  SRAM vs HBM 优化           │
+│  │ Attention   │  v1/v2/v3 演进              │
+│  └──────┬──────┘                             │
+│         ▼                                    │
+│  ┌─────────────┐  注意力头共享策略           │
+│  │ 02-GQA/MQA  │  减少 KV Cache              │
+│  │             │  (已在模块01-04详细介绍)     │
+│  └──────┬──────┘                             │
+│         ▼                                    │
+│  ┌─────────────┐  线性复杂度注意力           │
+│  │ 03-线性注意力│  核函数近似                 │
+│  └──────┬──────┘                             │
+│         ▼                                    │
+│  ┌─────────────┐  多 GPU 长序列              │
+│  │ 04-Ring     │  分块传递 KV                │
+│  │ Attention   │                             │
+│  └──────┬──────┘                             │
+│         ▼                                    │
+│  ┌─────────────┐  StreamingLLM              │
+│  │ 05-注意力   │  第一个 token 的特殊作用     │
+│  │ Sink        │                             │
+│  └─────────────┘                             │
+└──────────────────────────────────────────────┘</div>
+
+<div class="tip"><strong>通俗类比：</strong>GQA 和 MQA 的区别好比"工作组"模式。MHA（多头注意力）是每人各自研究（32 个 KV 头）；GQA（分组查询注意力）是 4 人一组共享笔记（8 个 KV 头，每 4 个 Q 头共享 1 个 KV 头）；MQA（多查询注意力）是全班只用一份笔记（1 个 KV 头）。GQA 在效率和质量之间取得了最佳平衡。</div>
+
+<h2>注意力优化技术全景对比</h2>
+
+<h3>FlashAttention 的版本演进对比</h3>
+<p>FlashAttention-v1（2022）引入了 tiling 和 online softmax，首次实现了精确的 IO-aware 注意力计算。v2（2023）优化了 warp 调度策略，减少非矩阵乘法操作，速度提升 ~2x。v3（2024）利用 H100 的 TMA（Tensor Memory Accelerator）和 WGMMA 指令，实现计算与数据搬运的流水线重叠，进一步提速 ~1.5-2x。</p>
+
+<h3>GQA/MQA 的工程实现细节</h3>
+<p>GQA 的实现核心是 KV 头的"广播"机制：当 4 个 Q 头共享 1 个 KV 头时，K 和 V 只需存储 1 份，但计算时需要广播到 4 个 Q 头。在 FlashAttention 的实现中，这个广播是通过 index mapping 在 kernel 内部完成的，不产生额外的内存拷贝。这也是为什么 GQA 的 KV Cache 减少 4x 但计算量几乎不变。</p>
+
+<h3>线性注意力的核函数选择</h3>
+<p>线性注意力通过核函数 φ 将 softmax(QK^T)V 分解为 φ(Q)(φ(K)^T V)，利用矩阵乘法的结合律将复杂度从 O(n²d) 降为 O(nd²)。常用的核函数包括：(1) elu+1 — 最简单的近似；(2) 随机特征映射 — 理论上更精确但方差大；(3) RetNet 的指数衰减 — 结合了 RNN 的递推特性。不同核函数的精度和效率差异很大，需要根据任务选择。</p>
+
+
+<table>
+<tr><th>技术</th><th>复杂度</th><th>KV Cache</th><th>精度</th><th>适用场景</th><th>代表实现</th></tr>
+<tr><td>标准 MHA</td><td>O(n²d)</td><td>n×d×num_heads</td><td>精确</td><td>短序列</td><td>PyTorch</td></tr>
+<tr><td>FlashAttention</td><td>O(n²d) 但 IO 优化</td><td>同 MHA</td><td>精确</td><td>通用</td><td>flash-attn</td></tr>
+<tr><td>GQA</td><td>O(n²d/G)</td><td>减少 G 倍</td><td>近似</td><td>长序列推理</td><td>LLaMA-2/3</td></tr>
+<tr><td>MQA</td><td>O(n²d/H)</td><td>减少 H 倍</td><td>近似</td><td>极致 KV 压缩</td><td>PaLM, Falcon</td></tr>
+<tr><td>线性注意力</td><td>O(nd²)</td><td>O(d²)</td><td>近似</td><td>超长序列</td><td>RetNet, Mamba</td></tr>
+<tr><td>Ring Attention</td><td>O(n²d/P)</td><td>分布式</td><td>精确</td><td>多卡超长序列</td><td>Ring-Attn</td></tr>
+</table>
+
+<div class="warn"><strong>常见误区：</strong>线性注意力 O(nd²) 看起来比标准注意力 O(n²d) 好，但当序列长度 n < d 时（d 通常为 64 或 128），标准注意力反而更快。线性注意力的优势只有在 n 远大于 d 时才能体现。此外，线性注意力的核函数近似会引入精度损失，在语言建模任务上通常比标准注意力差 1-3 个 perplexity 点。</div>
+
+<div class="ascii">不同注意力头策略的 KV Cache 对比 (LLaMA-70B, 32层, d=128)
+
+MHA (32 KV heads):
+┌──────────────────────────────────────────────────┐
+│ Head1 │ Head2 │ Head3 │ ... │ Head30│ Head31│ Head32│
+│  K,V  │  K,V  │  K,V  │     │  K,V  │  K,V  │  K,V  │
+└──────────────────────────────────────────────────┘
+KV Cache: 32 × n × 128 × 2(K+V) × 2bytes = 16384n bytes/layer
+
+GQA (8 KV heads, 每4个Q头共享):
+┌──────────────────────────────────────────────────┐
+│ Head1 │ Head2 │ Head3 │ Head4 │ Head5 │ ... │ Head8 │
+│  K,V  │  K,V  │  K,V  │  K,V  │  K,V  │     │  K,V  │
+│ ←Q1-4共享→  ←Q5-8共享→  ←Q9-12共享→     ←Q29-32共享→│
+└──────────────────────────────────────────────────┘
+KV Cache: 8 × n × 128 × 4 × 2 = 4096n bytes/layer (减少 75%)
+
+MQA (1 KV head):
+┌──────────────────────────────────────────────────┐
+│                    Head1                          │
+│                    K,V                            │
+│              ←所有32个Q头共享→                     │
+└──────────────────────────────────────────────────┘
+KV Cache: 1 × n × 128 × 4 × 2 = 512n bytes/layer (减少 97%)</div>
+
+<div class="deep"><strong>深入探讨：</strong>StreamingLLM 发现了一个有趣的现象：Transformer 的第一个 token（attention sink）即使语义无关紧要，也会被分配极大的注意力权重。这是因为 softmax 需要将注意力权重归一化到 1，当模型"不想关注任何 token"时，多余的概率质量会被 dump 到第一个 token。基于这个发现，StreamingLLM 提出只保留前几个 sink token 和最近的滑动窗口 token，就能实现无限长度的流式推理，而不需要重新训练模型。</div>
+
+
+<table>
+<tr><th>线性注意力方案</th><th>核函数</th><th>复杂度</th><th>Perplexity 差距</th><th>适用场景</th></tr>
+<tr><td>RetNet</td><td>指数衰减</td><td>O(nd²)</td><td>+0.5 ppl</td><td>长文本生成</td></tr>
+<tr><td>Mamba</td><td>选择性 SSM</td><td>O(nd)</td><td>+0.3 ppl</td><td>超长序列</td></tr>
+<tr><td>RWKV</td><td>线性 RNN</td><td>O(nd)</td><td>+0.8 ppl</td><td>流式推理</td></tr>
+<tr><td>GLA</td><td>门控线性</td><td>O(nd²)</td><td>+0.2 ppl</td><td>通用长序列</td></tr>
+<tr><td>标准 MHA</td><td>Softmax</td><td>O(n²d)</td><td>基准</td><td>短-中序列</td></tr>
+</table>
+
+<h2>学习建议</h2>
+
+<h3>FlashAttention 的核心算法理解路径</h3>
+<p>理解 FlashAttention 的关键是掌握三个概念：(1) Tiling — 将大矩阵分成小块在 SRAM 中计算；(2) Online Softmax — 不看完整行也能正确计算 softmax 的技巧；(3) 重计算（Recomputation）— 反向传播时重新计算中间结果而非存储。建议先手写一个简化版的 FlashAttention（如只支持单头、固定序列长度），再研究官方实现。</p>
+
+<h3>实践动手项目建议</h3>
+<p>推荐的实践项目：(1) 用 Triton 实现一个简化版 FlashAttention；(2) 对比 MHA/GQA/MQA 在相同模型上的推理速度和显存占用；(3) 测量不同序列长度下注意力计算占总推理时间的比例。这些实验能帮你建立对注意力瓶颈的直觉。</p>
+
+<p>注意力优化的学习路径：首先深入理解 FlashAttention 的分块算法（这是所有后续优化的基础），然后学习 GQA/MQA 的头共享策略（已在模块 01-04 详细介绍），接着了解线性注意力和 SSM（状态空间模型）的替代方案，最后学习 Ring Attention 如何在多 GPU 上处理超长序列。每个技术都有其适用场景，理解它们的 trade-off 比记住细节更重要。</p>
+
+<div class="tip"><strong>通俗类比：</strong>Ring Attention 就像接力赛——每个 GPU 处理序列的一段，处理完后把自己的 KV 块"接力"传给下一个 GPU，同时接收上一个 GPU 传来的 KV 块。通过这种环形传递，每个 GPU 都能访问到完整的 KV 信息，而不需要一次性把所有数据加载到显存中。</div>
+
+
+<pre><code># FlashAttention 的简化 Python 实现（帮助理解算法）
+import torch
+
+def flash_attention_simple(Q, K, V, block_size=64):
+    """简化版 FlashAttention - 展示核心算法思想
+    Q, K, V: [batch, heads, seq_len, head_dim]
+    """
+    batch, heads, n, d = Q.shape
+    O = torch.zeros_like(Q)       # 输出
+    l = torch.zeros(batch, heads, n, 1, device=Q.device)  # softmax 分母
+    m = torch.full((batch, heads, n, 1), float('-inf'), device=Q.device)  # running max
+
+    # 分块遍历 K, V
+    for j in range(0, n, block_size):
+        j_end = min(j + block_size, n)
+        Kj = K[:, :, j:j_end, :]  # 加载 K 块到 SRAM
+        Vj = V[:, :, j:j_end, :]  # 加载 V 块到 SRAM
+
+        # 在 SRAM 中计算 QK^T
+        S = torch.matmul(Q, Kj.transpose(-2, -1)) / (d ** 0.5)  # [B, H, n, block]
+
+        # Online Softmax 更新
+        m_new = torch.max(m, S.max(dim=-1, keepdim=True).values)
+        # 修正之前块的累加值
+        correction = torch.exp(m - m_new)
+        l_corrected = l * correction
+        # 当前块的 softmax 分子
+        P = torch.exp(S - m_new)
+        # 更新分母
+        l_new = l_corrected + P.sum(dim=-1, keepdim=True)
+        # 更新输出
+        O = O * correction + torch.matmul(P, Vj)
+        # 更新状态
+        m = m_new
+        l = l_new
+
+    # 最终归一化
+    O = O / l
+    return O
+
+# 验证正确性
+Q = torch.randn(1, 8, 256, 64, device='cuda')
+K = torch.randn(1, 8, 256, 64, device='cuda')
+V = torch.randn(1, 8, 256, 64, device='cuda')
+# flash_out = flash_attention_simple(Q, K, V)  # CPU 版本
+# 标准注意力对比
+# standard_out = torch.softmax(Q @ K.transpose(-2,-1) / 8, -1) @ V
+</code></pre>
+
+<pre><code># GQA vs MQA vs MHA 的 PyTorch 实现对比
+import torch
+import torch.nn as nn
+
+class GroupedQueryAttention(nn.Module):
+    """GQA: num_q_heads 个 Q 头共享 num_kv_heads 个 KV 头"""
+    def __init__(self, d_model=4096, num_q_heads=32, num_kv_heads=8):
+        super().__init__()
+        self.head_dim = d_model // num_q_heads
+        self.num_q_heads = num_q_heads
+        self.num_kv_heads = num_kv_heads
+        self.num_groups = num_q_heads // num_kv_heads
+
+        self.W_q = nn.Linear(d_model, num_q_heads * self.head_dim)
+        self.W_k = nn.Linear(d_model, num_kv_heads * self.head_dim)
+        self.W_v = nn.Linear(d_model, num_kv_heads * self.head_dim)
+        self.W_o = nn.Linear(d_model, d_model)
+
+    def forward(self, x, kv_cache=None):
+        B, L, _ = x.shape
+        Q = self.W_q(x).view(B, L, self.num_q_heads, self.head_dim)
+        K = self.W_k(x).view(B, L, self.num_kv_heads, self.head_dim)
+        V = self.W_v(x).view(B, L, self.num_kv_heads, self.head_dim)
+
+        # KV Cache 更新
+        if kv_cache is not None:
+            K = torch.cat([kv_cache[0], K], dim=1)
+            V = torch.cat([kv_cache[1], V], dim=1)
+
+        # 关键：将 KV 广播到 Q 的头数
+        K = K.repeat_interleave(self.num_groups, dim=2)  # [B, L, num_q_heads, D]
+        V = V.repeat_interleave(self.num_groups, dim=2)
+
+        # 标准注意力计算
+        Q, K, V = [t.transpose(1, 2) for t in (Q, K, V)]
+        attn = torch.matmul(Q, K.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        attn = torch.softmax(attn, dim=-1)
+        out = torch.matmul(attn, V)
+        out = out.transpose(1, 2).contiguous().view(B, L, -1)
+        return self.W_o(out), (K.transpose(1,2), V.transpose(1,2))
+</code></pre>
+
+
+<div class="deep"><strong>深入探讨注意力计算的瓶颈分析的核心机制：</strong>
+从<strong>底层原理</strong>看，注意力计算的瓶颈分析的设计<strong>为什么</strong>如此高效？<strong>推导</strong>其关键在于将计算复杂度和通信开销进行了巧妙的平衡。从<strong>数学本质</strong>角度，这一技术的核心<strong>工作机制</strong>可以用信息论的基本定理来解释。，负责将计算映射到具体的
+硬件单元（GPU SM、Tensor Core等）；中间是调度层，负责任务分配和资源管理；上层是应用接口层，
+提供用户友好的API。这种分层设计的数学本质是将一个复杂的优化问题分解为多个子问题，
+每一层独立优化，最终通过协同工作达到全局最优。根据Amdahl定律，系统的整体加速比
+S = 1 / ((1-p) + p/s)，其中 p 为可并行化比例，s 为并行加速倍数。
+当 p=0.95 且 s=100 时，理论加速比约为 16.8 倍。
+</div>
+
+<div class="ascii">
+注意力计算的瓶颈分析 性能瓶颈分析（屋顶模型）
+                    
+  计算吞吐  │
+  (TFLOPS)  │         ╱ 计算受限区
+            │       ╱
+            │     ╱   ← 实际工作点
+            │   ╱
+            │ ╱ 带宽受限区
+            │╱
+            └──────────────────── 带宽利用率
+             0%              100%
+             
+  关键指标:
+  · 算术强度 = FLOPS / Bytes (FLOPs/Byte)
+  · 转折点 = 峰值计算 / 峰值带宽
+  · H100: 转折点 ≈ 625 FLOPs/Byte
+  · 实际工作点越靠近右上角，效率越高
+</div>
+
+<div class="exercise">
+<strong>🎯 练习 1</strong>：实现一个简化版的 FlashAttention（参考上面的 Python 代码），在 CPU 上与标准注意力对比结果。验证两者在数值误差范围内一致（误差应 &lt;1e-5）。
+</div>
+
+<div class="exercise">
+<strong>🎯 练习 2</strong>：在同一个 LLaMA 模型上，分别使用 MHA、GQA（8 KV 头）和 MQA（1 KV 头）配置，测量不同序列长度（1K/4K/16K/64K）下的推理速度和显存占用。绘制图表对比。
+</div>
+
+<div class="exercise">
+<strong>🎯 练习 3</strong>：使用 <code>torch.profiler</code> 分析一个 7B 模型的推理过程，找出注意力计算占总推理时间的比例。分别在 prefill（128 token）和 decode（单 token）阶段测量。
+</div>
+
+<div class="tip">
+<strong>💡 向前串联：</strong>注意力优化是 LLM 推理性能的关键。在后续章节中，<a href="01-FlashAttention.html">FlashAttention</a> 的详细实现将展示如何用 Triton 写出高效的分块 kernel；<a href="02-GQA与MQA.html">GQA/MQA</a> 将深入头共享策略；而 <a href="../07-投机解码/02-Medusa.html">投机解码</a> 的验证阶段正是注意力计算的典型应用场景。
+</div>
+
+<p><strong>📚 交叉引用：</strong>
+• <a href="01-FlashAttention.html">FlashAttention 详解</a>——IO-aware 分块算法的完整实现
+• <a href="02-GQA与MQA.html">GQA/MQA 详解</a>——注意力头共享策略
+• <a href="../07-投机解码/05-树状验证.html">树状验证</a>——注意力掩码在投机解码中的应用
+• <a href="../../编译优化/01-编译优化总览.html">编译优化</a>——Triton 代码生成与注意力 kernel 优化
+</p>
+
+
+<pre><code># Ring Attention 的简化实现（展示多 GPU 长序列处理）
+import torch
+import torch.distributed as dist
+
+def ring_attention(Q, K, V, rank, world_size):
+    """Ring Attention: 在多个 GPU 上分布式计算注意力
+    每个 GPU 持有序列的一段 Q, K, V
+    通过环形传递 K, V 实现全局注意力
+    """
+    local_seq_len = Q.shape[1]
+    output = torch.zeros_like(Q)
+    lse = torch.full((Q.shape[0], Q.shape[1], 1), float('-inf'), device=Q.device)  # log-sum-exp
+
+    # 从本地 KV 开始
+    current_K = K
+    current_V = V
+
+    for step in range(world_size):
+        # 1. 计算本地 Q 与当前 KV 块的注意力
+        scores = torch.matmul(Q, current_K.transpose(-2, -1)) / (Q.shape[-1] ** 0.5)
+
+        # 2. Online Softmax 更新
+        max_scores = scores.max(dim=-1, keepdim=True).values
+        new_lse = torch.logsumexp(
+            torch.cat([lse.unsqueeze(-1).expand_as(scores[:, :, :1]),
+                       scores], dim=-1), dim=-1, keepdim=True
+        )
+        # 简化版: 直接累加
+        attn_weights = torch.softmax(scores, dim=-1)
+        local_output = torch.matmul(attn_weights, current_V)
+
+        # 3. 更新输出（带修正因子）
+        correction = torch.exp(lse - new_lse)
+        output = output * correction + local_output
+        lse = new_lse
+
+        # 4. 环形传递 K, V 到下一个 GPU
+        if step < world_size - 1:
+            next_rank = (rank + 1) % world_size
+            prev_rank = (rank - 1) % world_size
+            # 发送当前 KV 给下一个 GPU，接收上一个 GPU 的 KV
+            new_K = torch.empty_like(current_K)
+            new_V = torch.empty_like(current_V)
+            dist.isend(current_K, dst=next_rank)
+            dist.irecv(new_K, src=prev_rank)
+            dist.isend(current_V, dst=next_rank)
+            dist.irecv(new_V, src=prev_rank)
+            dist.barrier()
+            current_K = new_K
+            current_V = new_V
+
+    # 最终归一化
+    output = output / torch.exp(lse)
+    return output
+
+# 使用: torchrun --nproc_per_node=4 ring_attention.py
+</code></pre>
+
+<div class="next-prev"><a href="00-总览.html">← 返回模块总览</a><a href="../index.html">📚 返回总目录</a></div>
+<footer>LLM 推理框架系统学习指南 · 模块 05 · 2026</footer></div></body></html>

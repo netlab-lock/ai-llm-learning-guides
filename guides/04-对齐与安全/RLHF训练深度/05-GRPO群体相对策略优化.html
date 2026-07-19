@@ -1,0 +1,244 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>GRPO - RLHF</title><style>
+*{margin:0;padding:0;box-sizing:border-box}body{background:#0f1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;line-height:1.8;padding:20px;max-width:1000px;margin:0 auto}h1{color:#58a6ff;font-size:1.8em;margin:20px 0 10px;border-bottom:2px solid #30363d;padding-bottom:10px}h2{color:#79c0ff;font-size:1.4em;margin:25px 0 10px}h3{color:#d2a8ff;font-size:1.2em;margin:20px 0 8px}p{margin:10px 0}.nav{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:25px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}.nav a{color:#58a6ff;text-decoration:none;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;overflow-x:auto;margin:15px 0;font-size:0.9em}code{background:#161b22;padding:2px 6px;border-radius:4px;font-size:0.9em;color:#e6edf3}pre code{background:none;padding:0}table{border-collapse:collapse;width:100%;margin:15px 0}th,td{border:1px solid #30363d;padding:10px 12px;text-align:left}th{background:#161b22;color:#58a6ff}tr:nth-child(even){background:#161b22}.highlight{background:#1a2332;border-left:4px solid #58a6ff;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.formula{background:#1a1a2e;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;text-align:center;font-family:'Courier New',monospace;color:#e6edf3}.ascii-art{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto}ul,ol{margin:10px 0 10px 25px}li{margin:5px 0}.warning{background:#2d1b00;border-left:4px solid #d29922;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.tip{background:#0d2818;border-left:4px solid #3fb950;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.footer{margin-top:40px;padding-top:20px;border-top:1px solid #30363d;font-size:0.85em;color:#8b949e}.ref{margin-top:30px;padding:16px;background:#161b22;border-radius:8px;border:1px solid #30363d}.ref h2{margin-top:0}.ref a{color:#58a6ff}</style></head><body><div class="nav"><a href="04-KTO与单偏好优化.html">#KTO</a><a href="index.html">Index</a><a href="06-RLVR与推理增强训练.html">RLVR &raquo;</a></div><h1>05 GRPO</h1><h2>Algorithm</h2>
+<h3>Algorithm的核心组件与工作原理</h3>
+
+
+
+<h3>Algorithm的核心组件与工作原理</h3>
+
+
+<div class="formula">A_i = (r_i - mean(r)) / std(r)</div>
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「Algorithm」的常见陷阱：不要盲目照搬网上的配置参数。不同的数据分布和模型规模下，Algorithm的最优配置可能完全不同。务必在自己的场景下做充分的验证实验。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「Algorithm」的深层理解：GRPO（Group Relative Policy Optimization）的核心创新在于用组内相对排名替代了 PPO 中的 Critic Model 做基线估计。对于每个 prompt，GRPO 采样 G 个回答（通常 G=8-16），计算各自的规则奖励 r_1,...,r_G，然后归一化为优势：A_i = (r_i - mean(r)) / std(r)。这种设计的好处是双重的：(1) 去掉了 Critic Model，节省约 33% 的显存（从 4 模型降至 3 模型）；(2) 组内归一化天然适配可验证奖励场景——DeepSeek-R1 论文表明，仅用二值奖励（正确 +1 / 错误 -1）配合 GRPO，就能在数学推理上取得显著提升（MATH 从 15.6% 提升到 71.0%）。GRPO 的梯度公式中仍保留 KL 惩罚项 β·KL(π_θ ‖ π_ref)，典型 β 取值 0.01-0.04。</div>
+
+<div class="ascii">
+RLHF Pipeline (4个模型):
+  Prompt → [Actor] → Response → [Reward Model] → Score
+                          ↓                           ↓
+                    [Critic] → Value          PPO Update ← KL Penalty
+                          ↓
+                    [Reference] → KL
+
+DPO Pipeline (2个模型):
+  (Prompt, y_w, y_l) → [Policy] → log π(y_w), log π(y_l)
+                              ↓
+                        [Reference] → log π_ref(y_w), log π_ref(y_l)
+                              ↓
+                        DPO Loss (无需奖励模型)
+
+GRPO Pipeline (2个模型):
+  Prompt → [Actor] × G次采样 → {y_1,...,y_G}
+                              ↓
+              [Rule-based Reward] → {r_1,...,r_G}
+                              ↓
+              组内排名归一化 → 优势估计A_i
+                              ↓
+              GRPO Update (无需Critic)
+</div><h2>DeepSeek-R1 Pipeline</h2>
+
+<div class="ascii">
+系统架构与数据流
+
+Input → [预处理] → [核心计算] → [后处理] → Output
+  │         │           │           │
+  ▼         ▼           ▼           ▼
+编码     特征提取     推理决策     结果格式化
+
+优化方向:
+  ├─ 算法优化: 降低计算复杂度
+  ├─ 系统优化: 内存/调度/批处理
+  └─ 硬件优化: GPU/量化/编译
+</div>
+
+<h3>DeepSeek-R1 Pipeline的核心组件与工作原理</h3>
+
+
+
+
+<div class="ascii">
+系统架构与数据流
+
+Input → [预处理] → [核心计算] → [后处理] → Output
+  │         │           │           │
+  ▼         ▼           ▼           ▼
+编码     特征提取     推理决策     结果格式化
+
+优化方向:
+  ├─ 算法优化: 降低计算复杂度
+  ├─ 系统优化: 内存/调度/批处理
+  └─ 硬件优化: GPU/量化/编译
+</div>
+
+
+
+<div class="ascii-art">Cold SFT -> GRPO(reject) -> Reject Sample -> SFT -> GRPO(align) -> R1</div>
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「DeepSeek-R1 Pipeline」的常见陷阱：常见陷阱：忽略GRPO的边界条件和异常情况。这些在小规模测试中可能不会暴露，但在生产环境中往往是最先出问题的地方。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「DeepSeek-R1 Pipeline」的深层理解：GRPO背后的核心权衡是灵活性与效率之间的平衡。更灵活的方案通常计算开销更大，更高效的方案往往需要更强的假设。在Cold的设计中也能看到类似的权衡。</div>
+<h2>GRPO Training Code (TRL)</h2>
+<h3>GRPO Training Code (TRL)的训练流程与优化策略</h3>
+<p>GRPO Training Code (TRL)的训练流程通常分为三个阶段：预训练(Pre-training)在大规模无标注语料上学习语言表示，微调(Fine-tuning)在任务特定数据上适配下游任务，对齐(Alignment)通过人类偏好反馈优化输出质量。每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。</p>
+
+
+
+<table>
+<caption>对齐训练方法对比</caption>
+<thead><tr><th>方法</th><th>需要奖励模型</th><th>数据需求</th><th>训练稳定性</th><th>计算成本</th></tr></thead>
+<tbody>
+<tr><td>RLHF(PPO)</td><td>是</td><td>偏好对</td><td>低(调参难)</td><td>高(4模型)</td></tr>
+<tr><td>DPO</td><td>否</td><td>偏好对</td><td>高</td><td>低(2模型)</td></tr>
+<tr><td>KTO</td><td>否</td><td>好/坏标签</td><td>高</td><td>低</td></tr>
+<tr><td>GRPO</td><td>否</td><td>规则奖励</td><td>中</td><td>中(2模型)</td></tr>
+<tr><td>RLVR</td><td>否</td><td>可验证答案</td><td>高</td><td>中</td></tr>
+</tbody></table>
+
+<h3>GRPO Training Code (TRL)的训练流程与优化策略</h3>
+<p>GRPO Training Code (TRL)的训练流程通常分为三个阶段：预训练(Pre-training)在大规模无标注语料上学习语言表示，微调(Fine-tuning)在任务特定数据上适配下游任务，对齐(Alignment)通过人类偏好反馈优化输出质量。每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。</p>
+
+
+
+
+<h3>Key Hyperparameters的核心组件与工作原理</h3>
+
+
+<table><tr><th>Param</th><th>Value</th></tr><tr><td>G</td><td>8-16</td></tr><tr><td>beta</td><td>0.01-0.1</td></tr><tr><td>temp</td><td>0.6-1.0</td></tr></table><div class="tip"><strong>通俗类比：</strong>GRPO 的组内归一化就像"班级排名"——不需要知道全国平均分（Critic Model），只要知道你在班里的排名就够了。如果你比班里 80% 的人好，你就是优秀的；如果比 80% 的人差，就需要努力。这种"相对评价"比"绝对评价"更简单、更稳定。</div>
+
+<div class="warn"><strong>常见误区：</strong>① 认为 GRPO 完全不需要参考模型——实际上，GRPO 仍然需要参考模型来做 KL 惩罚，只是不需要 Critic Model；② 忽略采样数 K 的影响——K 太小（如 K=2），组内归一化的方差太大；K 太大（如 K=64），计算成本急剧增加。通常 K=8~16 是较好的平衡点。</div>
+
+<div class="ref">
+<div class="deep"><strong>🔍 深入理解：</strong>「Key Hyperparameters」的深层理解：从历史视角看，当前Hyperparameters的主流方法经历了多年的演进。早期被认为过时的技术在大规模场景下可能重新焕发生机。保持对经典方法的了解很重要。</div>
+<h2>Refs</h2>
+<h3>Refs的核心组件与工作原理</h3>
+
+
+
+<h3>Refs的核心组件与工作原理</h3>
+
+
+<ul><li>DeepSeek-R1 2025</li><li>HF GRPO Trainer</li></ul></div>
+<div class="tip"><strong>💡 实用技巧：</strong>关于「Refs」的实用建议：建议优先使用成熟的开源工具和框架，避免重复造轮子。Refs生态中有许多经过生产验证的工具可以选择。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「Refs」的常见陷阱：隐蔽的陷阱是评估数据泄漏。确保Refs的评估数据完全没有出现在训练集中。即使部分重叠也会导致评估结果严重失真。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「Refs」的深层理解：工程哲学：在Refs的实践中，简单但规模大往往胜过复杂但规模小。Chinchilla定律和Scaling Law都指向同一个方向——数据和计算的规模比精巧的算法设计更重要。</div>
+<div class="footer">RLHF &copy; 2026</div>
+
+<table>
+<caption>对齐训练方法对比</caption>
+<thead><tr><th>方法</th><th>需要奖励模型</th><th>需要偏好数据</th><th>训练稳定性</th><th>计算成本</th></tr></thead>
+<tbody>
+<tr><td>RLHF(PPO)</td><td>是</td><td>是</td><td>低(调参难)</td><td>高(4模型)</td></tr>
+<tr><td>DPO</td><td>否</td><td>是</td><td>高</td><td>低(2模型)</td></tr>
+<tr><td>KTO</td><td>否</td><td>否(只需标签)</td><td>高</td><td>低</td></tr>
+<tr><td>GRPO</td><td>否</td><td>否(规则奖励)</td><td>中</td><td>中(2模型)</td></tr>
+<tr><td>RLVR</td><td>否</td><td>否(可验证)</td><td>高</td><td>中</td></tr>
+</tbody></table>
+
+
+
+
+
+
+<div class="deep"><strong>深入探讨：</strong>
+
+</div>
+
+<p>GRPO的核心创新在于将PPO中的Critic Model做基线估计替换为组内统计量，这一设计带来了多重系统级优势。具体而言，对于每个prompt x，GRPO采样G个回答y_1到y_G（G通常取8-16），通过规则奖励函数计算各自的奖励r_1到r_G，然后归一化为优势估计：A_i = (r_i - mean(r)) / std(r)。这种设计的数学优雅性在于：当G趋近于无穷时，组内均值趋近于期望值，归一化后的优势函数近似于完整的GAE（Generalized Advantage Estimation）——而无需训练任何额外的神经网络。DeepSeek-R1的训练流程展示了GRPO的强大实践价值：第一阶段使用纯GRPO加二值奖励（正确加1/错误减1）在数学推理数据上训练，从DeepSeek-V3-Base出发，MATH准确率从15.6%提升到71.0%；第二阶段混合RLVR（可验证奖励）和人类偏好奖励进行多目标优化，同时保持推理能力和对话质量。与PPO相比，GRPO的显存节省约33%（从4个模型降至2-3个模型），训练吞吐量提升约40%（去掉了Critic前向/反向传播的开销），且训练稳定性更好（组内归一化天然提供了方差缩减，避免了PPO中Critic估计偏差导致的训练振荡）。GRPO的局限性在于：需要可量化的奖励函数（不适用于主观评价任务）、G值过小会导致优势估计噪声过大（G小于4时性能显著下降）、以及每步需要G倍的采样计算量（可通过异步采样和vLLM的continuous batching缓解）。</p>
+
+<p style="margin-top:1.5rem;padding:0.8rem;background:var(--surface-2,#1e1e2e);border-radius:6px;border-left:3px solid var(--accent,#7c3aed);">📌 <strong>学习目标：</strong>通过本节学习，掌握核心概念与技术原理，为后续进阶学习奠定基础。</p>
+<div class="deep"><strong>📐 05-GRPO群体相对策略优化的数学原理与形式化分析</strong>
+<p>从推导角度分析，05-GRPO群体相对策略优化的核心证明可以形式化表达。其工作机制基于严格的数学推导过程，通过定理证明了算法的正确性。具体推导过程中，运用归纳法对关键性质进行了证明，建立了完整的公理化体系。</p>
+</div>
+
+<h2>GRPO训练的工程实践与调参指南</h2>
+<h3>GRPO关键超参数详解</h3>
+<p>GRPO训练中最重要的超参数包括组采样数G、KL惩罚系数beta、采样温度temp和学习率lr。组采样数G直接决定了优势估计的方差——G越大，组内排名越稳定，但计算成本也线性增加。DeepSeek-R1论文中G=64是工程可行性和统计效率的最佳平衡点，但在资源受限的场景下G=8也可以接受（性能下降约3-5%）。KL惩罚系数beta控制策略偏离参考模型的程度：beta过小（&lt;0.01）会导致策略发散，生成质量退化；beta过大（&gt;0.1）则会限制策略探索，抑制推理能力的涌现。推荐从0.04开始，根据训练过程中KL散度的监控值动态调整。采样温度temp影响探索-利用权衡：温度越高，采样多样性越大，适合训练早期促进探索；温度越低，采样越集中，适合训练后期精细化。典型方案是采用退火策略，从temp=1.0逐步降低到temp=0.5。学习率通常设为1e-6到5e-6，使用cosine退火调度，warmup步数约占总步数的5%。</p>
+<pre><code># GRPO训练配置示例 (基于TRL框架)
+from trl import GRPOConfig, GRPOTrainer
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# 加载模型
+model = AutoModelForCausalLM.from_pretrained("deepseek-ai/DeepSeek-V3-Base")
+ref_model = AutoModelForCausalLM.from_pretrained("deepseek-ai/DeepSeek-V3-Base")
+tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V3-Base")
+
+# GRPO训练配置
+training_args = GRPOConfig(
+    output_dir="./grpo_output",
+    num_train_epochs=3,
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=8,
+    # GRPO核心参数
+    num_generations=16,           # G值: 每个prompt采样16个回答
+    max_completion_length=2048,   # 最大生成长度
+    beta=0.04,                    # KL惩罚系数
+    temperature=0.7,              # 采样温度
+    learning_rate=2e-6,           # 学习率
+    lr_scheduler_type="cosine",   # 学习率调度
+    warmup_ratio=0.05,            # warmup比例
+    # 优化
+    bf16=True,                    # 混合精度
+    gradient_checkpointing=True,  # 梯度检查点节省显存
+    optim="adamw_8bit",           # 8bit优化器
+)
+
+# 定义规则奖励函数 (以数学验证为例)
+def math_reward_fn(prompts, completions, **kwargs):
+    """二值奖励: 答案正确=1, 错误=-1"""
+    rewards = []
+    for prompt, completion in zip(prompts, completions):
+        predicted_answer = extract_answer(completion)
+        ground_truth = kwargs["ground_truth"][prompts.index(prompt)]
+        rewards.append(1.0 if predicted_answer == ground_truth else -1.0)
+    return rewards
+
+# 启动训练
+trainer = GRPOTrainer(
+    model=model,
+    ref_model=ref_model,
+    args=training_args,
+    train_dataset=train_dataset,
+    reward_fn=math_reward_fn,
+    processing_class=tokenizer,
+)
+trainer.train()</code></pre>
+
+<h3>GRPO vs PPO的工程对比与选型建议</h3>
+<p>在工程实践中，GRPO相比PPO的核心优势体现在三个方面：显存效率、训练稳定性和实现复杂度。显存方面，PPO需要同时加载Actor、Critic、Reference和Reward Model四个模型，以7B参数模型为例，BF16精度下约需4×14GB=56GB显存，最少需要4张A100 80GB GPU；GRPO仅需Actor和Reference两个模型（奖励用规则函数计算），约需2×14GB=28GB，2张A100即可运行。训练稳定性方面，PPO的Critic Model容易出现价值估计偏差，导致策略更新不稳定，需要复杂的技巧（如梯度裁剪、价值函数预训练）来稳定训练；GRPO的组内归一化天然提供了方差缩减，训练过程更平稳。实现复杂度方面，PPO的代码实现涉及GAE计算、Critic损失、PPO clip等多个组件，调参空间大；GRPO的核心逻辑仅需组采样、奖励计算和归一化三个步骤，代码量减少约40%。选型建议：对于有可验证奖励的任务（数学、代码、逻辑推理），优先选择GRPO；对于需要奖励模型的主观评价任务（对话质量、创意写作），仍需使用PPO配合训练好的奖励模型。</p>
+
+<pre><code class="language-python"># Algorithm 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="tip"><strong>相关章节：</strong>
+Algorithm与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+Algorithm与以下内容密切相关：<a href="01-对齐训练全景图.html">01-对齐训练全景图</a> | <a href="02-RLHF经典方法详解.html">02-RLHF经典方法详解</a> | <a href="03-DPO偏好优化原理.html">03-DPO偏好优化原理</a>。建议结合学习。
+</div>
+<pre><code class="language-python"># Algorithm - 性能基准测试
+import torch, time
+def benchmark(model, x, n=100):
+    for _ in range(10): model(x)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(n): model(x)
+    torch.cuda.synchronize()
+    print(f"Latency: {(time.perf_counter()-t0)/n*1000:.2f}ms")
+</code></pre>
+<div class="exercise"><strong>思考与练习：</strong><ol><li>用自己的话解释05-GRPO群体相对策略优化的核心原理和工作机制。</li><li>对比本节涉及的不同方案，分析各自的优缺点和适用场景。</li><li>设计一个实验验证本节介绍的关键技术，并记录实验结果。</li></ol></div>
+<div class="tip"><strong>学习路径建议：</strong><p>建议先理解本节的基础概念和核心原理，再深入学习数学推导和工程实现细节。可结合配套的代码示例进行动手实践，最后通过对比分析巩固所学知识。</p></div>
+</body></html>

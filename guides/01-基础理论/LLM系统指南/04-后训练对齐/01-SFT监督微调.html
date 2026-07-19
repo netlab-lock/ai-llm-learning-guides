@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01-SFT监督微调 | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.deep{background:rgba(188,140,255,0.08);border-left:4px solid var(--purple)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+</head>
+<body>
+<div class="nav"><span></span><span>04-后训练 / SFT监督微调</span><a href="02-RLHF经典方法.html">02-RLHF经典方法 &rarr;</a></div>
+<div class="container">
+
+<h1>📝 1. SFT (监督微调)</h1>
+
+<h2>1.1 为什么需要 SFT？</h2>
+<p>预训练模型只是"文字续写器" — 它会续写文本，但不会按指令回答问题。SFT（Supervised Fine-Tuning，监督微调）是后训练对齐的第一步，其核心目标是将预训练语言模型从一个通用的"文本补全器"转变为一个能够理解并遵循人类指令的"对话助手"。这个过程涉及数据准备、模型架构调整、训练策略设计等多个技术环节，是大语言模型工程中最基础也是最关键的步骤之一。SFT 的质量直接决定了后续 RLHF、DPO、GRPO 等对齐方法的效果上限。如果 SFT 阶段没有建立好基本的指令遵循能力，后续的偏好优化就如同在沙滩上建城堡——基础不牢，地动山摇。</p>
+
+<div class="ascii">预训练模型 vs SFT 后的模型:
+
+预训练模型:
+  用户: "请翻译成英文: 今天天气很好"
+  模型: "今天天气很好。明天可能会下雨。最近气温..."  ← 续写，不听指令
+
+SFT 后:
+  用户: "请翻译成英文: 今天天气很好"
+  模型: "The weather is very nice today."  ← 按指令回答</div>
+
+<div class="box tip"><div class="label">💡 通俗类比：预训练 vs SFT</div>
+<p>预训练就像让一个人读完所有百科全书 — 他知识渊博，但你问他问题时他只会继续背书。SFT 就像给他上"客服培训课" — 教他听问题、组织语言、给出有用的回答。知识量没变，但表达方式完全变了。换句话说，预训练阶段学习的是语言的统计规律和世界知识，而SFT阶段学习的是如何利用这些知识来服务人类的需求。</p>
+
+<div class="box warn"><div class="label">⚠️ 常见误区：SFT 不是"教新知识"</div>
+SFT 的主要目的不是注入新知识，而是激活预训练中已有的知识，并教会模型以"问答"格式输出。如果你需要模型掌握训练数据中没有的知识，应该用 RAG 或继续预训练，而不是 SFT。混淆这两者会导致"知识注入幻觉"——模型表面上能回答新问题，实际上是在"编造"看似合理的答案。</div>
+
+<h2>1.2 SFT 数据格式</h2>
+<p>SFT 数据格式决定了模型如何理解输入和输出的关系。选择合适的数据格式不仅影响训练效果，还影响模型在推理时的指令遵循能力。以下是主流数据格式的详细对比和选择建议。在实际项目中，建议先确定目标格式，然后将所有数据统一转换为该格式后再开始训练。</p>
+<pre><code><span class="comment"># 标准 SFT 数据格式</span>
+{
+  "instruction": "请将以下文本翻译成英文",
+  "input": "今天天气很好",
+  "output": "The weather is very nice today."
+}
+
+<span class="comment"># 多轮对话格式</span>
+{
+  "conversations": [
+    {"role": "user", "content": "什么是机器学习？"},
+    {"role": "assistant", "content": "机器学习是人工智能的一个分支..."},
+    {"role": "user", "content": "它和深度学习有什么区别？"},
+    {"role": "assistant", "content": "深度学习是机器学习的子集..."}
+  ]
+}</code></pre>
+
+<div class="box tip"><div class="label">💡 通俗类比：数据格式像"模板"</div>
+<p>SFT 数据格式就像给模型提供"填空模板"：instruction 是题目，input 是素材，output 是标准答案。模型学会的是：看到这类模板，就按这个格式回答。模板越一致，模型学得越快越准。实践中，数据格式的统一性对模型的指令遵循能力影响极大——格式混乱的数据会让模型困惑，不知道该以何种方式回答。</p>
+
+<h3>1.2.1 主流数据格式详解</h3>
+<table>
+<tr><th>数据格式</th><th>适用场景</th><th>示例框架</th><th>特点</th></tr>
+<tr><td>Alpaca (instruction/input/output)</td><td>单轮指令</td><td>Stanford Alpaca</td><td>简洁、适合简单任务</td></tr>
+<tr><td>ShareGPT (conversations)</td><td>多轮对话</td><td>Vicuna, LLaMA-Chat</td><td>支持复杂对话流</td></tr>
+<tr><td>ChatML (system/user/assistant)</td><td>通用对话</td><td>OpenAI, Qwen</td><td>支持系统提示词</td></tr>
+<tr><td>OpenAssistant</td><td>社区标注</td><td>OASST, Dolly</td><td>树形结构、支持分支</td></tr>
+<tr><td>UltraChat</td><td>多轮深度对话</td><td>Zephyr</td><td>高质量、主题多样</td></tr>
+<tr><td>WizardLM Evol-Instruct</td><td>指令进化</td><td>WizardLM</td><td>自动增加指令复杂度</td></tr>
+</table>
+
+<h2>1.3 SFT 训练细节</h2>
+<pre><code><span class="comment"># SFT 的损失函数: 只在 assistant 回答部分计算 loss</span>
+<span class="comment"># user 的部分不参与 loss 计算</span>
+
+token:  [user问] [assistant答] [user问] [assistant答]
+loss:    xxxxxx    ✓✓✓✓✓✓       xxxxxx    ✓✓✓✓✓✓
+         ↑不计算    ↑计算loss     ↑不计算    ↑计算loss
+
+<span class="comment"># 这叫做 "loss mask" — 只让模型学习如何回答</span></code></pre>
+
+<div class="box warn"><div class="label">⚠️ 常见误区：为什么不在 user 部分计算 loss？</div>
+如果在 user 部分也计算 loss，模型会学会"生成问题"而不是"回答问题"。这在多轮对话中尤其有害 — 模型可能学会自问自答。loss mask 确保模型只学习 assistant 的回答模式。此外，user 部分通常是模板化的（如"请帮我..."），如果让模型学习这些模板，会导致模型在推理时也倾向于生成类似的请求文本。</div>
+
+<div class="box deep"><div class="label">🔬 深入原理：SFT 的 Loss 计算与梯度传播机制</div>
+在 PyTorch 中，loss mask 的标准实现方式是将 user token 的 label 设为 -100（CrossEntropyLoss 的 ignore_index）。每个 token 位置的 loss 只在 label != -100 时计算。这意味着一个 batch 中实际参与 loss 计算的 token 可能远少于总 token 数，直接影响梯度的方差和训练稳定性。
+
+具体来说，假设 batch 中有 32 个样本，每个样本平均 1024 个 token，但只有 512 个 token 是 assistant 的回答。那么实际上只有 50% 的 token 参与梯度计算。这带来的问题是：
+1. 梯度方差增大——不同 batch 的有效 token 数量差异大
+2. 学习率需要相应调整——通常比全 token 训练时稍大
+3. 需要使用 gradient accumulation 来稳定训练
+
+一个常见的实现细节是：在计算 loss 时，对有效 token 数进行归一化（而非对总 token 数归一化），以确保不同 batch 的 loss 量级一致。Hugging Face 的 Trainer 默认使用这种策略（loss_type="token_mean"），而有些框架使用"sample_mean"策略，后者对长短不一的样本更公平。</div>
+
+<h3>1.3.1 SFT 的注意力机制与位置编码</h3>
+<p>在多轮对话中，模型应该只能看到当前轮次之前的对话历史，而不能"偷看"未来的回复。这通过因果注意力掩码（Causal Attention Mask）来实现，确保自回归生成的正确性。</p>
+
+<div class="ascii">多轮对话的注意力掩码:
+
+用户轮1  助手轮1  用户轮2  助手轮2
+  [u1]    [a1]     [u2]    [a2]
+
+[u1]:  ✓ ✗ ✗ ✗    ← 只看到自己
+[a1]:  ✓ ✓ ✗ ✗    ← 看到u1和自己
+[u2]:  ✓ ✓ ✓ ✗    ← 看到前面所有
+[a2]:  ✓ ✓ ✓ ✓    ← 看到全部历史
+
+✓ = 可以看到   ✗ = 被遮蔽
+
+这就是标准的 causal mask，确保自回归生成的正确性。</div>
+
+<div class="box tip"><div class="label">💡 实践技巧：Flash Attention 2 与 SFT 的结合</div>
+在 SFT 训练中使用 Flash Attention 2 可以显著降低显存占用（从 O(n²) 降到接近 O(n)），同时保持训练速度。对于长对话（4096+ tokens），Flash Attention 几乎是必需的。使用方法很简单：在训练配置中设置 <code>attn_implementation="flash_attention_2"</code> 即可。需要注意的是，Flash Attention 要求 CUDA 11.6+ 和特定的 GPU 架构（Ampere 或更新）。</div>
+
+<h3>1.3.2 LoRA 与全参数微调的对比</h3>
+<p>在 SFT 中，选择全参数微调（Full Fine-Tuning）还是参数高效微调（PEFT，如 LoRA）是一个关键决策。全参数微调更新模型的所有参数，效果最好但显存需求巨大；LoRA 只更新低秩分解的增量矩阵，显存需求小但效果可能略逊。</p>
+
+<table>
+<tr><th>对比维度</th><th>全参数微调</th><th>LoRA (rank=64)</th><th>QLoRA (4-bit)</th></tr>
+<tr><td>可训练参数占比</td><td>100%</td><td>~0.5-2%</td><td>~0.5-2%</td></tr>
+<tr><td>7B 模型显存需求</td><td>~120GB (bf16)</td><td>~24GB</td><td>~12GB</td></tr>
+<tr><td>训练速度</td><td>基准</td><td>~1.2x 快</td><td>~0.8x 慢</td></tr>
+<tr><td>最终效果</td><td>最好</td><td>接近全参数</td><td>略逊 LoRA</td></tr>
+<tr><td>适用场景</td><td>资源充足、追求最优</td><td>资源有限、快速迭代</td><td>消费级 GPU</td></tr>
+</table>
+
+<div class="box deep"><div class="label">🔬 深入原理：LoRA 的数学原理与秩的选择</div>
+LoRA（Low-Rank Adaptation）的核心思想是：将权重更新矩阵 ΔW 分解为两个低秩矩阵的乘积 ΔW = BA，其中 B ∈ R^(d×r)，A ∈ R^(r×k)，r 远小于 d 和 k。这样，原本需要 d×k 个参数的更新，现在只需要 r×(d+k) 个参数。
+
+直觉上，LoRA 假设微调过程中的权重变化是"低秩"的——即模型只需要在一个低维子空间中调整就能适应新任务。这个假设在实践中被证明是成立的，因为 SFT 本质上只是调整模型的"输出风格"，而非改变其核心知识表示。
+
+秩 r 的选择是一个重要超参数：
+- r=8-16：适合简单的风格转换任务
+- r=32-64：适合复杂的指令遵循训练
+- r=128-256：接近全参数微调，但显存优势减小
+实践中，r=64 是一个很好的默认值。可以通过观察 LoRA 矩阵的奇异值衰减速度来判断是否需要更大的秩——如果前几个奇异值包含了大部分能量，说明低秩假设成立。</div>
+
+<h2>1.4 SFT 数据质量</h2>
+<div class="box tip"><div class="label">💡 质量 > 数量</div>
+<ul>
+<li>LIMA 论文 (2023): 只用 1000 条高质量 SFT 数据就能训出很好的模型</li>
+<li>Alpaca: 用 GPT-4 生成 52K 条 SFT 数据，效果也不错</li>
+<li>关键: 数据多样性、回答质量、格式一致性</li>
+</ul></div>
+
+<div class="ascii">SFT 数据质量金字塔:
+
+            ▲
+           /  \
+          / 质量 \    ← 最重要: 回答准确性、无幻觉
+         /--------\
+        / 多样性   \   ← 覆盖不同任务类型、领域
+       /------------\
+      / 格式一致性   \  ← 统一的对话模板、长度分布
+     /----------------\
+    / 数量 (够用即可)  \ ← 1K~50K 条通常足够
+   /____________________\</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区：数据越多越好？</div>
+LIMA 论文证明 1000 条高质量数据 > 10万条低质量数据。低质量 SFT 数据会导致：模型学到错误的回答模式、格式不一致降低指令遵循能力、甚至注入错误知识。清洗数据比堆数据更重要。一个实用的数据质量检查清单包括：答案是否准确、是否包含幻觉、格式是否统一、长度是否合理、是否覆盖多种任务类型。</div>
+
+<h3>1.4.1 数据生成与清洗策略</h3>
+<p>在实际项目中，SFT 数据通常来自三个渠道：人工标注、模型生成（如用 GPT-4 生成）、以及从开源数据集中筛选。无论哪种来源，数据清洗都是必不可少的步骤。数据清洗的具体流程包括：首先进行去重处理，移除完全相同或高度相似的样本；然后进行质量筛选，通过自动化规则和人工抽检确保回答质量；最后进行格式规范化，确保所有样本遵循统一的对话模板。这三个步骤缺一不可，任何一个环节的疏忽都可能导致最终模型效果不佳。</p>
+
+<table>
+<tr><th>数据来源</th><th>优点</th><th>缺点</th><th>典型做法</th></tr>
+<tr><td>人工标注</td><td>质量最高、可控</td><td>成本高、速度慢</td><td>专业标注团队，多轮审核</td></tr>
+<tr><td>模型生成（Self-Instruct）</td><td>成本低、可扩展</td><td>可能有错误、多样性有限</td><td>GPT-4 生成 + 人工筛选</td></tr>
+<tr><td>开源数据集</td><td>免费、即用</td><td>质量参差不齐</td><td>OASST、ShareGPT 等筛选</td></tr>
+<tr><td>用户日志</td><td>真实场景</td><td>隐私问题、噪声多</td><td>脱敏 + 质量过滤</td></tr>
+</table>
+
+<div class="box deep"><div class="label">🔬 深入原理：数据去污染（Decontamination）与评测基准保护</div>
+一个容易被忽视但极其重要的问题是数据去污染。如果 SFT 数据中包含了评测基准（如 MMLU、GSM8K、HumanEval）的题目或答案，模型在这些基准上的表现就会虚高——这被称为"评测基准泄漏"（Benchmark Contamination）。
+
+去污染的标准做法是：
+1. 计算 SFT 数据与评测集之间的 n-gram 重叠（通常用 13-gram）
+2. 移除与评测集有高重叠度的样本
+3. 使用 MinHash 或 SimHash 进行高效的近似匹配
+4. 对于多语言评测集，需要对每个语言版本分别去污染
+
+OpenAI 和 Meta 在发布模型时都会详细说明其去污染流程。如果你自己构建 SFT 数据集，强烈建议在训练前进行去污染检查，否则你的模型评测结果将不可信。</div>
+
+<h2>1.5 SFT 的超参数</h2>
+<table>
+<tr><th>超参数</th><th>典型值</th><th>说明</th></tr>
+<tr><td>Learning Rate</td><td>1e-5 ~ 5e-5</td><td>比预训练小 10-100 倍</td></tr>
+<tr><td>Epochs</td><td>1~3</td><td>数据少，多轮会过拟合</td></tr>
+<tr><td>Batch Size</td><td>32~128</td><td>取决于数据量</td></tr>
+<tr><td>Max Length</td><td>2048~8192</td><td>取决于任务复杂度</td></tr>
+<tr><td>Warmup Ratio</td><td>0.03~0.1</td><td>训练初期的预热比例</td></tr>
+<tr><td>Weight Decay</td><td>0.0~0.1</td><td>L2 正则化系数</td></tr>
+<tr><td>LoRA Rank</td><td>16~64</td><td>LoRA 的秩，影响可训练参数量</td></tr>
+<tr><td>Gradient Accumulation</td><td>4~16</td><td>等效增大 batch size</td></tr>
+</table>
+
+<div class="box tip"><div class="label">💡 通俗类比：SFT 超参数的"火候"</div>
+<p>SFT 就像炒菜的最后一步"收汁" — 火候（学习率）太大容易糊（过拟合），太小收不住（欠拟合）。通常用小火（低 LR）快炒（少 epoch），因为预训练模型已经有很好的基础，SFT 只需要微调"表达方式"。对于 LoRA 微调，由于可训练参数少，可以适当使用较大的学习率（如 2e-4）来加速收敛。需要注意的是，学习率和 epoch 数之间存在交互关系——较大的学习率配合较少的 epoch 数通常效果更好，而较小的学习率则需要更多 epoch 来充分收敛。实践中建议先用默认参数训练一个基线模型，然后根据训练曲线和评测结果进行针对性调整。</p>
+
+<div class="box deep"><div class="label">🔬 深入原理：学习率调度与梯度裁剪策略</div>
+SFT 通常使用 cosine decay 或 linear decay 调度。一种高效的策略是：先用较大学习率快速收敛（warmup 5%~10% 步数），然后 cosine 衰减到初始值的 10%。总步数少时（如 1 epoch），可以直接用 constant LR + warmup。
+
+梯度裁剪（Gradient Clipping）在 SFT 中同样重要。通常设置 max_grad_norm=1.0，防止个别异常样本导致梯度爆炸。在使用 loss mask 时，由于有效 token 数量变化大，梯度方差也更大，建议使用更严格的裁剪阈值（如 0.5）。
+
+另一个高级技巧是使用 "Packing" 策略：将多个短样本拼接到一个序列中，用特殊 token 分隔。这可以显著提高 GPU 利用率（避免大量 padding），但需要注意在不同样本之间正确设置注意力掩码（防止跨样本的注意力）。</div>
+
+<h2>1.6 SFT 的评估方法</h2>
+<p>SFT 训练完成后，如何评估模型的效果？除了标准的 benchmark 评测外，还需要关注以下几个维度。评估的目的是确认模型是否真正学会了指令遵循能力，而不仅仅是记住了训练数据中的模式。一个全面的评估体系应该覆盖模型能力的多个方面，包括指令遵循的准确性、回答的质量和完整性、多轮对话的连贯性、以及输出格式的规范性。在评估过程中，建议同时使用自动评测和人工评测两种方式，因为自动评测虽然高效但可能遗漏一些主观质量维度。</p>
+
+<div class="ascii">SFT 评估维度:
+
+┌─────────────────────────────────────────────────┐
+│              SFT 评估框架                        │
+├─────────────┬─────────────┬─────────────────────┤
+│  指令遵循    │  回答质量    │  安全性             │
+│             │             │                     │
+│ • 格式遵循   │ • 准确性    │ • 拒绝有害请求      │
+│ • 多轮一致性 │ • 完整性    │ • 不生成有害内容    │
+│ • 指令理解   │ • 流畅性    │ • 隐私保护          │
+│ • 边界情况   │ • 幻觉率    │ • 偏见检测          │
+└─────────────┴─────────────┴─────────────────────┘
+            │
+            ▼
+┌─────────────────────────────────────────────────┐
+│  自动评测: MT-Bench, AlpacaEval, IFEval         │
+│  人工评测: A/B 测试, 李克特量表评分              │
+│  LLM-as-Judge: 用 GPT-4/Claude 打分            │
+└─────────────────────────────────────────────────┘</div>
+
+<table>
+<tr><th>评测基准</th><th>评测内容</th><th>评分方式</th><th>特点</th></tr>
+<tr><td>MT-Bench</td><td>多轮对话能力</td><td>GPT-4 打分 (1-10)</td><td>涵盖8个类别</td></tr>
+<tr><td>AlpacaEval</td><td>单轮指令遵循</td><td>GPT-4 胜率</td><td>快速、低成本</td></tr>
+<tr><td>IFEval</td><td>精确指令遵循</td><td>规则验证</td><td>客观、可复现</td></tr>
+<tr><td>HumanEval</td><td>代码生成</td><td>测试用例通过率</td><td>评测编程能力</td></tr>
+<tr><td>GSM8K</td><td>数学推理</td><td>答案正确率</td><td>评测推理能力</td></tr>
+</table>
+
+<div class="box warn"><div class="label">⚠️ 重要提醒：过拟合检测与应对策略</div>
+SFT 最容易犯的错误是过拟合。由于 SFT 数据量通常较少（1K-50K），模型很容易"记住"训练数据而非"学会"回答模式。过拟合的信号包括：训练 loss 持续下降但评测分数不升、模型开始输出与训练数据高度相似的回答、对措辞变化过度敏感。应对策略：使用 early stopping、增大 dropout、减少 epoch 数、增加数据多样性。</div>
+
+<h2>1.7 学习路径建议</h2>
+<h3>1.7.1 SFT 常见故障排查</h3>
+<p>在实际的 SFT 训练中，经常会遇到各种问题。以下是常见故障及其排查方法：</p>
+<table>
+<tr><th>故障现象</th><th>可能原因</th><th>排查方法</th><th>解决方案</th></tr>
+<tr><td>训练 loss 不下降</td><td>学习率过小 / loss mask 错误</td><td>检查 loss mask 是否正确覆盖回答部分</td><td>增大 LR 或修复 mask</td></tr>
+<tr><td>loss 突然爆炸</td><td>数据中有异常样本</td><td>检查最近加入的数据</td><td>清理异常样本，降低 LR</td></tr>
+<tr><td>模型输出重复</td><td>过拟合 / 数据重复</td><td>检查训练数据是否有大量重复</td><td>去重数据，减少 epoch</td></tr>
+<tr><td>格式不遵循</td><td>数据格式不一致</td><td>统计数据中各格式的比例</td><td>统一数据格式</td></tr>
+<tr><td>中英文混杂</td><td>训练数据语言不纯</td><td>分析数据语言分布</td><td>过滤非目标语言数据</td></tr>
+</table>
+
+<h3>1.7.2 SFT 数据质量检查清单</h3>
+<p>在开始 SFT 训练之前，务必完成以下数据质量检查：</p>
+<p>数据质量是 SFT 成功的基石。根据 LIMA 论文的研究，仅 1000 条精心准备的高质量数据就能训练出效果优秀的模型。相反，10 万条低质量数据反而会让模型学到错误的回答模式。因此，投入时间在数据质量上远比增加数据量更有价值。以下是经过实践验证的数据质量检查流程：首先进行格式一致性检查，确保所有样本遵循统一的对话模板；然后进行内容准确性验证，通过抽检和自动化工具确保回答事实正确；接着进行多样性评估，确保覆盖多种任务类型和难度级别；最后进行安全性审查，移除包含敏感信息或有害内容的样本。</p>
+<ul>
+<li><strong>准确性验证</strong>：抽检 5% 的数据，确认回答事实正确且无幻觉</li>
+<li><strong>格式一致性</strong>：确保所有数据使用统一的对话模板（如 ChatML）</li>
+<li><strong>长度分布</strong>：检查回答长度分布是否合理，移除过短（<10字）和过长（>4096字）的样本</li>
+<li><strong>多样性检查</strong>：确保覆盖多种任务类型，避免某一类任务过度集中</li>
+<li><strong>去污染检查</strong>：确保训练数据不包含评测基准的题目或答案</li>
+<li><strong>去重处理</strong>：使用 MinHash 或精确匹配移除重复或近似重复的样本</li>
+<li><strong>安全性审查</strong>：移除包含有害、偏见或隐私信息的样本</li>
+</ul>
+
+<p>对于初学者，推荐按以下顺序学习 SFT 相关知识：</p>
+<ol>
+<li>先理解预训练模型的工作原理（第一章节内容）</li>
+<li>掌握 SFT 的数据格式和 loss mask 机制</li>
+<li>动手实践：用 Unsloth 或 Hugging Face TRL 对小模型进行 SFT</li>
+<li>深入学习 LoRA/QLoRA 等 PEFT 方法</li>
+<li>了解数据清洗和质量控制的最佳实践</li>
+<li>进阶：学习 SFT 与 RLHF/DPO 的衔接</li>
+</ol>
+
+<div class="box exercise"><div class="label">🎯 动手练习</div>
+使用 Hugging Face 的 trl 库，对 Qwen2-0.5B 模型进行 SFT 微调。这个练习将帮助你理解 SFT 的完整流程，从数据准备到模型评估。
+
+<p><strong>详细步骤：</strong></p>
+<ol>
+<li>安装依赖：<code>pip install trl transformers peft datasets</code></li>
+<li>准备 Alpaca 格式的 SFT 数据集（至少 500 条）</li>
+<li>加载 Qwen2-0.5B 基座模型，配置 LoRA（rank=32, alpha=64, target_modules=["q_proj","v_proj"]）</li>
+<li>实现正确的 loss mask：只在 assistant 回答部分计算 loss</li>
+<li>设置训练参数：lr=2e-4, epochs=3, batch_size=4, max_length=1024</li>
+<li>开始训练，监控 loss 曲线是否正常下降</li>
+<li>在 MT-Bench 子集上评测微调前后的效果变化</li>
+<li>对比不同 LoRA rank（8, 32, 128）对效果的影响</li>
+</ol>
+<p>预期结果：微调后的模型应能正确遵循指令格式，在 MT-Bench 上获得 1-2 分的提升。如果 loss 不下降，检查 loss mask 是否正确设置。</p>
+</div>
+
+<div class="next-prev"><span></span><a href="02-RLHF经典方法.html">02-RLHF →</a></div>
+</div>
+<div class="footer"><p>LLM 系统学习 · 01-SFT监督微调</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="tip"><strong>相关章节：</strong>
+为什么需要 SFT？与以下内容密切相关：<a href="02-RLHF经典方法.html">02-RLHF经典方法</a> | <a href="03-DPO偏好优化.html">03-DPO偏好优化</a> | <a href="04-GRPO与RLVR.html">04-GRPO与RLVR</a>。建议结合学习。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+建议先在Alpaca-5K数据集上用LoRA微调Llama-3-8B，对比微调前后的指令遵循能力，理解loss mask和学习率选择的影响。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+从SFT的<strong>核心原理</strong>出发，监督微调通过在高质量指令-响应对上进行交叉熵损失优化，将预训练模型的通用能力适配到特定任务格式。<strong>为什么</strong>SFT不能简单等同于继续预训练？<strong>推导</strong>：预训练目标是下一个token预测，而SFT的目标是条件生成——给定指令生成符合人类期望的响应。损失函数仅在响应部分计算，指令部分作为前缀条件。<strong>数学本质</strong>上，SFT在预训练模型的参数空间中寻找一个使指令遵循能力最大化的局部最优点。
+</div>
+<h3>为什么需要 SFT？的技术要点 1</h3>
+<p>从<strong>底层原理</strong>分析，为什么需要 SFT？的这一方面涉及计算效率和资源利用的权衡。
+<strong>为什么</strong>这个权衡如此重要？因为在大规模系统中，每个环节的效率提升都会被放大数千倍。
+<strong>推导</strong>其关键指标：有效吞吐 = 计算量 / (计算时间 + 通信时间 + 等待时间)。
+</p>
+<h3>为什么需要 SFT？的技术要点 2</h3>
+<p>从<strong>底层原理</strong>分析，为什么需要 SFT？的这一方面涉及计算效率和资源利用的权衡。
+<strong>为什么</strong>这个权衡如此重要？因为在大规模系统中，每个环节的效率提升都会被放大数千倍。
+<strong>推导</strong>其关键指标：有效吞吐 = 计算量 / (计算时间 + 通信时间 + 等待时间)。
+</p>
+<h3>为什么需要 SFT？的技术要点 3</h3>
+<p>从<strong>底层原理</strong>分析，为什么需要 SFT？的这一方面涉及计算效率和资源利用的权衡。
+<strong>为什么</strong>这个权衡如此重要？因为在大规模系统中，每个环节的效率提升都会被放大数千倍。
+<strong>推导</strong>其关键指标：有效吞吐 = 计算量 / (计算时间 + 通信时间 + 等待时间)。
+</p>
+<div class="tip"><strong>相关章节：</strong><a href="02-RLHF经典方法.html">02-RLHF经典方法</a> | <a href="03-DPO偏好优化.html">03-DPO偏好优化</a> | <a href="04-GRPO与RLVR.html">04-GRPO与RLVR</a></div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释为什么需要 SFT？的核心原理，并举一个实际应用场景。</li>
+<li>为什么需要 SFT？在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比为什么需要 SFT？与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+为什么需要 SFT？的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<pre><code class="language-python"># 为什么需要 SFT？ 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="deep"><strong>深入探讨：</strong>
+从SFT的<strong>核心原理</strong>出发，监督微调通过在高质量指令-响应对上进行交叉熵损失优化，将预训练模型的通用能力适配到特定任务格式。<strong>为什么</strong>SFT不能简单等同于继续预训练？<strong>推导</strong>：预训练目标是下一个token预测，而SFT的目标是条件生成——给定指令生成符合人类期望的响应。损失函数仅在响应部分计算，指令部分作为前缀条件。<strong>数学本质</strong>上，SFT在预训练模型的参数空间中寻找一个使指令遵循能力最大化的局部最优点。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习SFT时，很多人只看数据格式不实际跑微调。建议用LoRA在小模型上微调一个指令遵循任务，观察训练loss下降过程和生成质量的变化。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为SFT就是简单的继续预训练。学习率选择、数据质量、loss mask策略（只在response部分计算loss）等细节直接影响微调效果。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+为什么需要 SFT？与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

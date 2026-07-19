@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>13 · ResNet — 残差连接，突破深度极限</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.7}
+a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;justify-content:space-between;position:sticky;top:0;z-index:100}
+.nav span{color:#8b949e;font-size:0.9em}
+.nav a{color:#58a6ff}
+.container{max-width:900px;margin:0 auto;padding:30px 20px}
+h1{color:#58a6ff;font-size:2em;margin:20px 0 10px}
+h2{color:#f0f6fc;border-left:4px solid #58a6ff;padding-left:14px;margin:35px 0 15px;font-size:1.4em}
+h3{color:#d2a8ff;margin:20px 0 10px;font-size:1.15em}
+p{margin:10px 0}
+ul,ol{margin:10px 0 10px 24px}
+li{margin:4px 0}
+code{background:#21262d;color:#79c0ff;padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;overflow-x:auto;margin:12px 0}
+pre code{background:none;color:#c9d1d9;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}.cmd{color:#79c0ff}
+table{border-collapse:collapse;width:100%;margin:12px 0}
+th{background:#161b22;color:#58a6ff;text-align:left;padding:10px 14px;border:1px solid #30363d}
+td{padding:10px 14px;border:1px solid #21262d}
+tr:nth-child(even){background:#161b2233}
+.tip{background:#0d1d30;border-left:4px solid #58a6ff;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}
+.tip strong{color:#58a6ff}
+.warn{background:#2d1b00;border-left:4px solid #d29922;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}
+.warn strong{color:#d29922}
+.exercise{background:#0d2818;border-left:4px solid #238636;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}
+.exercise strong{color:#3fb950}
+.deep{background:#1a1024;border-left:4px solid #a371f7;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}
+.deep strong{color:#a371f7}
+.ascii{background:#161b22;border:1px solid #30363d;padding:16px;font-family:'Cascadia Code',monospace;font-size:0.85em;line-height:1.4;overflow-x:auto;margin:12px 0;white-space:pre}
+.formula{background:#161b22;border:1px solid #30363d;padding:14px 18px;border-radius:6px;margin:12px 0;text-align:center;font-size:1.1em;color:#d2a8ff}
+.svg-diagram{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin:12px 0;text-align:center;overflow-x:auto}
+.svg-diagram svg{max-width:100%;height:auto}
+.next-prev{display:flex;justify-content:space-between;border-top:1px solid #21262d;padding-top:20px;margin-top:40px}
+.footer{text-align:center;padding:30px;border-top:1px solid #21262d;margin-top:30px;color:#8b949e;font-size:0.85em}</style>
+</head>
+<body>
+<div class="nav"><a href="12-注意力机制.html">&larr; 12-注意力机制</a><span>模型 13/25 · ResNet</span><a href="14-Transformer.html">14-Transformer &rarr;</a></div>
+<div class="container">
+
+<h1>🏔️ 13 · ResNet — 残差连接，突破深度极限</h1>
+<p style="color:#8b949e;font-size:1.05em;">2015 · Kaiming He 等 (Microsoft) · 152层CNN · 残差连接影响了所有后续深度网络</p>
+
+<h2>一、背景与动机</h2>
+<p>2015年，VGG 证明了19层CNN比8层更好，但更深的网络(30+层)反而性能下降——不是过拟合(训练误差也高)，而是<strong>退化问题(Degradation Problem)</strong>：更深的网络更难优化。</p>
+<p>Kaiming He 的洞察：如果加一层什么都不做(恒等映射)不会变差，那为什么加一层反而变差了？因为让网络学习恒等映射 H(x)=x 本身很难。解决方案：<strong>让网络学习残差 F(x)=H(x)-x</strong>，即学习"和恒等映射的差"——这比直接学习 H(x)=x 容易得多。</p>
+
+<div class="tip"><strong>💡 核心思想：</strong>不用学习"输出=输入"，只需学习"输出=0"——这太容易了！残差连接让网络在最坏情况下也不会比浅层网络差。</div>
+
+<h2>二、名字由来</h2>
+<div class="tip"><strong>💡 通俗类比：ResNet(Residual Network)的"Residual"是"残差"的意思。核心思想：不直接学习目标映射 H(x)，而是学习"残差" F(x) = H(x) - x，然后输出 F(x) + x。这就像"不重写文章，只修改需要改的地方"。</div>
+<div class="warn"><strong>⚠️ 常见误区：残差连接不是"简单地把输入加到输出上"。它是 H(x) = F(x) + x——F(x) 是"需要学习的变化"，x 是"恒等映射"。如果网络认为"不需要改变"，F(x) 可以轻松学到0——这比学到恒等映射容易得多。</div>
+<div class="deep"><strong>🔬 深入探讨：ResNet(2015)解决了"退化问题"——更深的网络反而更难训练。这不是过拟合(训练误差也更高)，而是优化困难。残差连接让损失曲面变得更"平滑"，优化器更容易找到好解。</div>
+
+<p><strong>ResNet</strong>：Res(Residual, 残差) + Net(网络)。</p>
+<p><strong>Residual(残差/残差)</strong>：统计学中指观测值与预测值之差。这里指"输出与输入之差"——F(x) = H(x) - x。恒等映射 x 是"直连通道"(shortcut/skip connection)。</p>
+
+<h2>三、核心原理</h2>
+
+
+<div class="tip"><strong>💡 通俗类比：残差学习就像"修路"——如果路已经不错了，你只需要做小修补(残差≈0)；如果路很差，你只需要重点修坏的部分。这比重建整条路(学习完整映射)容易得多。</div>
+<div class="warn"><strong>⚠️ 常见误区：很多人以为残差连接"只是让梯度更容易流动"。这确实是一个好处，但更深层的原因是：残差连接让网络可以选择性地"跳过"不需要的层——每层只需要学习"增量改进"。</div>
+<div class="deep"><strong>🔬 深入探讨：ResNet 的论文中有一个关键实验：把一个训练好的 ResNet 中间层删掉，性能几乎不变。这说明很多层学到了"接近恒等"的映射——残差连接让网络可以"选择不用"某些层。这种"自适应深度"是残差连接的深层优势。</div>
+<h3>3.1 残差块 (Residual Block)</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 620 220" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="310" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">ResNet 残差连接（Skip Connection）</text>
+  <!-- Plain block -->
+  <text x="155" y="50" text-anchor="middle" fill="#fb7185" font-size="10" font-weight="bold">普通网络</text>
+  <rect x="30" y="58" width="50" height="28" rx="4" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="55" y="76" text-anchor="middle" fill="#fbbf24" font-size="8">x</text>
+  <line x1="80" y1="72" x2="110" y2="72" stroke="#c9d1d9" stroke-width="1.5"/>
+  <rect x="110" y="58" width="130" height="28" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="175" y="76" text-anchor="middle" fill="#22d3ee" font-size="8">Conv→BN→ReLU</text>
+  <line x1="240" y1="72" x2="270" y2="72" stroke="#c9d1d9" stroke-width="1.5"/>
+  <rect x="270" y="58" width="40" height="28" rx="4" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/>
+  <text x="290" y="76" text-anchor="middle" fill="#fb7185" font-size="8">H(x)</text>
+  <!-- Residual block -->
+  <text x="465" y="50" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">残差网络（ResNet）</text>
+  <rect x="350" y="58" width="50" height="28" rx="4" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="375" y="76" text-anchor="middle" fill="#fbbf24" font-size="8">x</text>
+  <!-- Branch to Conv -->
+  <line x1="400" y1="65" x2="420" y2="65" stroke="#c9d1d9" stroke-width="1.5"/>
+  <rect x="420" y="53" width="130" height="28" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="485" y="71" text-anchor="middle" fill="#22d3ee" font-size="8">Conv→BN→ReLU</text>
+  <line x1="550" y1="65" x2="570" y2="100" stroke="#c9d1d9" stroke-width="1.5"/>
+  <text x="560" y="82" fill="#22d3ee" font-size="7">F(x)</text>
+  <!-- Shortcut branch -->
+  <line x1="375" y1="86" x2="375" y2="130" stroke="#34d399" stroke-width="2"/>
+  <line x1="375" y1="130" x2="555" y2="130" stroke="#34d399" stroke-width="2" stroke-dasharray="6,3"/>
+  <text x="465" y="125" text-anchor="middle" fill="#34d399" font-size="7">shortcut（恒等映射）</text>
+  <!-- Add -->
+  <rect x="555" y="95" width="30" height="30" rx="15" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="570" y="114" text-anchor="middle" fill="#34d399" font-size="10">+</text>
+  <line x1="570" y1="125" x2="570" y2="130" stroke="#34d399" stroke-width="1.5"/>
+  <!-- Output -->
+  <line x1="570" y1="130" x2="590" y2="130" stroke="#c9d1d9" stroke-width="1.5"/>
+  <rect x="590" y="116" width="30" height="28" rx="4" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="605" y="134" text-anchor="middle" fill="#34d399" font-size="8">H(x)</text>
+  <text x="590" y="155" fill="#8b949e" font-size="7">= F(x)+x</text>
+  <!-- Key insight -->
+  <rect x="30" y="165" width="560" height="40" rx="8" fill="rgba(6,78,59,0.15)" stroke="#34d399" stroke-width="1"/>
+  <text x="310" y="183" text-anchor="middle" fill="#34d399" font-size="9" font-weight="bold">H(x) = F(x) + x — 学习残差比学习完整映射更容易</text>
+  <text x="310" y="200" text-anchor="middle" fill="#8b949e" font-size="8">梯度可以通过 shortcut 直接回传 → 解决深层网络梯度消失问题 → ResNet-152 层</text>
+</svg>
+</div>
+
+<h3>3.2 为什么残差有效？</h3>
+<div class="ascii">梯度传播对比:
+
+普通网络:
+  ∂L/∂x = ∂L/∂H · ∂H/∂x   ← 梯度经过多个层的乘法，容易消失
+
+残差网络:
+  ∂L/∂x = ∂L/∂H · (∂F/∂x + 1)
+                             ↑
+                          +1 保证梯度至少为 1，不会消失！
+
+即使 F(x) 的梯度为 0，还有 shortcut 的梯度 1
+→ 信息和梯度可以"无损"地跳过任何层</div>
+
+<h3>3.3 Bottleneck 结构</h3>
+<p>对于更深的网络(50+层)，用 Bottleneck 块减少计算量：</p>
+<div class="svg-diagram"><svg viewBox="0 0 700 280" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+<rect width="700" height="280" rx="8" fill="#161b22" stroke="#30363d"/>
+<text x="175" y="28" text-anchor="middle" fill="#22d3ee" font-size="13" font-weight="bold">Basic Block (ResNet-18/34)</text>
+<text x="525" y="28" text-anchor="middle" fill="#34d399" font-size="13" font-weight="bold">Bottleneck Block (ResNet-50/101/152)</text>
+<!-- Basic Block layers -->
+<rect x="75" y="45" width="200" height="36" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="175" y="68" text-anchor="middle" fill="#22d3ee" font-size="12">3×3 Conv, 64</text>
+<line x1="175" y1="81" x2="175" y2="95" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arr-g2)"/>
+<rect x="75" y="95" width="200" height="36" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="175" y="118" text-anchor="middle" fill="#22d3ee" font-size="12">3×3 Conv, 64</text>
+<!-- Bottleneck Block layers -->
+<rect x="390" y="45" width="220" height="32" rx="6" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+<text x="500" y="66" text-anchor="middle" fill="#34d399" font-size="11">1×1 Conv, 64  ← 降维</text>
+<line x1="500" y1="77" x2="500" y2="87" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arr-g2)"/>
+<rect x="390" y="87" width="220" height="32" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="500" y="108" text-anchor="middle" fill="#22d3ee" font-size="11">3×3 Conv, 64  ← 空间卷积</text>
+<line x1="500" y1="119" x2="500" y2="129" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arr-g2)"/>
+<rect x="390" y="129" width="220" height="32" rx="6" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+<text x="500" y="150" text-anchor="middle" fill="#34d399" font-size="11">1×1 Conv, 256  ← 升维</text>
+<!-- Arrow defs -->
+<defs><marker id="arr-g2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#8b949e"/></marker></defs>
+<!-- Parameters -->
+<rect x="50" y="180" width="270" height="40" rx="6" fill="rgba(8,51,68,0.2)" stroke="#22d3ee" stroke-width="1"/>
+<text x="185" y="200" text-anchor="middle" fill="#fbbf24" font-size="11">参数: 2×(3²×64²) = 73K</text>
+<text x="185" y="215" text-anchor="middle" fill="#8b949e" font-size="9">通道数: 64</text>
+<rect x="380" y="180" width="270" height="40" rx="6" fill="rgba(6,78,59,0.2)" stroke="#34d399" stroke-width="1"/>
+<text x="515" y="200" text-anchor="middle" fill="#fbbf24" font-size="11">参数: 1×256×64+3²×64²+1×64×256 = 69K</text>
+<text x="515" y="215" text-anchor="middle" fill="#8b949e" font-size="9">通道数: 256</text>
+<!-- Comparison note -->
+<rect x="50" y="235" width="600" height="32" rx="6" fill="rgba(167,139,250,0.1)" stroke="#a78bfa" stroke-width="1"/>
+<text x="350" y="256" text-anchor="middle" fill="#a78bfa" font-size="11">计算量相当，但 Bottleneck 通道数更多(256 vs 64)，表达能力更强</text>
+</svg></div>
+
+<h3>3.4 ResNet 架构</h3>
+<table>
+<tr><th>网络</th><th>层结构</th><th>参数</th><th>Top-5 错误率</th></tr>
+<tr><td>ResNet-18</td><td>[2,2,2,2] Basic</td><td>11.7M</td><td>~5.5%</td></tr>
+<tr><td>ResNet-34</td><td>[3,4,6,3] Basic</td><td>21.8M</td><td>~4.5%</td></tr>
+<tr><td>ResNet-50</td><td>[3,4,6,3] Bottleneck</td><td>25.6M</td><td>~3.6%</td></tr>
+<tr><td>ResNet-101</td><td>[3,4,23,3] Bottleneck</td><td>44.5M</td><td>~3.0%</td></tr>
+<tr><td>ResNet-152</td><td>[3,8,36,3] Bottleneck</td><td>60.2M</td><td>~2.8%</td></tr>
+</table>
+
+<h2>四、技术细节</h2>
+
+
+<div class="tip"><strong>💡 通俗类比：Bottleneck 结构(1×1→3×3→1×1)就像"漏斗"——先用1×1降维(减少计算)，再用3×3做空间卷积，最后用1×1升维(恢复维度)。这比直接做3×3高效得多。</div>
+<div class="warn"><strong>⚠️ 常见误区：ResNet 的 Batch Normalization(BN)层放在卷积之后、激活之前(不是之后)。这个顺序很重要——先归一化再激活，才能保证每层输入的分布稳定。放错顺序会严重影响性能。</div>
+<div class="deep"><strong>🔬 深入探讨：为什么 ResNet 能训练到152层而 VGG 只能到19层？数学上，残差连接让反向传播的梯度可以"跳过"中间层直接回传——∂L/∂x = ∂L/∂H · (∂F/∂x + 1)。这个"+1"确保梯度永远不会完全消失。</div>
+<h3>4.1 Projection Shortcut</h3>
+<p>当输入和输出维度不匹配时(如通道数变化)，用 1×1 卷积做投影：</p>
+<div class="formula">y = F(x, W) + Wₛ·x    (Wₛ 是 1×1 卷积投影)</div>
+
+<h3>4.2 Pre-Activation ResNet</h3>
+<p>2016年 Kaiming He 提出改进：把 BN 和 ReLU 放到卷积前面(BN-ReLU-Conv)，效果更好。</p>
+
+<h3>4.3 残差连接在其他模型中的应用</h3>
+<table>
+<tr><th>模型</th><th>残差连接形式</th></tr>
+<tr><td>Transformer</td><td>每个 Sub-layer 都有: output = LayerNorm(x + Sublayer(x))</td></tr>
+<tr><td>U-Net</td><td>编码器和解码器之间的跳跃连接</td></tr>
+<tr><td>DenseNet</td><td>所有层之间都有连接(比 ResNet 更激进)</td></tr>
+<tr><td>Inception-ResNet</td><td>Inception 模块 + 残差连接</td></tr>
+</table>
+
+<h2>五、使用场景</h2>
+
+<div class="tip"><strong>💡 通俗类比：ResNet 就像"高速公路的匝道"——主路(残差路径)畅通无阻，辅路(卷积路径)负责"调整方向"。如果不需要调整，车直接走主路；需要调整时，辅路发挥作用。</div>
+<div class="warn"><strong>⚠️ 常见误区：不是所有任务都需要很深的网络。ResNet-18(11M参数)在很多任务上就够用了。用 ResNet-152(60M参数)处理简单分类任务是浪费——选择合适的深度很重要。</div>
+<div class="deep"><strong>🔬 深入探讨：残差连接的思想已经"无处不在"——Transformer 的每个子层都有残差连接(Add & Norm)，U-Net 的跳跃连接本质上也是残差连接。这个"简单而深刻"的设计已经成为深度学习的"标准配置"。</div>
+<ul>
+<li><strong>图像分类</strong>：ImageNet SOTA 保持多年</li>
+<li><strong>目标检测</strong>：Faster R-CNN、YOLO 的标准骨干网络</li>
+<li><strong>语义分割</strong>：FCN、DeepLab 的特征提取器</li>
+<li><strong>人脸识别</strong>：ArcFace 用 ResNet 做 backbone</li>
+<li><strong>风格迁移、超分辨率</strong>：残差块用于各种图像处理网络</li>
+<li><strong>Transformer 中</strong>：每个 Attention/FFN 层都用残差连接</li>
+</ul>
+
+<h2>六、相似技术对比</h2>
+
+<div class="tip"><strong>💡 通俗类比：ResNet vs DenseNet vs PlainNet 就像三种"团队协作"方式——PlainNet 是"流水线"(信息只往前传)，ResNet 是"跳级"(可以直接跳到后面)，DenseNet 是"全连接"(每个人都能看到前面所有人的输出)。</div>
+<div class="warn"><strong>⚠️ 常见误区：DenseNet 的"密集连接"比 ResNet 的"跳跃连接"更激进——每层都能访问所有前面层的输出。但 DenseNet 的内存消耗远大于 ResNet——"更多信息共享"的代价是"更多内存"。</div>
+<div class="deep"><strong>🔬 深入探讨：残差连接的成功启发了一个更一般的"高速公路网络"(Highway Network)概念——用门控机制控制"多少信息走捷径，多少信息走变换"。这与 LSTM 的门控思想异曲同工——"控制信息流动"是深度学习的核心设计模式。</div>
+<table>
+<tr><th>对比</th><th>ResNet</th><th>DenseNet</th><th>Highway Net</th></tr>
+<tr><td>连接方式</td><td>跳跃1-2层</td><td>所有层互相连接</td><td>门控跳跃连接</td></tr>
+<tr><td>参数量</td><td>中</td><td>多(特征复用)</td><td>中</td></tr>
+<tr><td>梯度流</td><td>好</td><td>最好</td><td>好</td></tr>
+<tr><td>实际使用</td><td>最广泛</td><td>医学图像</td><td>较少</td></tr>
+</table>
+
+<h2>七、关联技术</h2>
+
+<div class="tip"><strong>💡 通俗类比：ResNet 与 BatchNorm 的关系就像"盐和胡椒"——几乎总是一起使用。BN 稳定训练，残差连接缓解退化，两者相辅相成，共同让深层网络成为可能。</div>
+<div class="warn"><strong>⚠️ 常见误区：ResNet 的预训练权重在迁移学习中非常有用——但要注意，ImageNet 预训练假设输入是224×224的RGB图像。如果你的数据不同(如医学灰度图、高光谱图)，需要调整第一层。</div>
+<div class="deep"><strong>🔬 深入探讨：ResNet 论文(2015)是计算机视觉领域引用量最高的论文之一(超过17万次)。它的影响力不仅在于"解决了退化问题"，更在于改变了深度学习的"可训练深度上限"——从20层提升到1000+层。</div>
+<ul>
+<li><strong>BatchNorm</strong>：ResNet 配合 BN 才能训练极深网络</li>
+<li><strong>Transformer(模型14)</strong>：Transformer 的每一层都用残差连接</li>
+<li><strong>U-Net</strong>：跳跃连接是 U-Net 语义分割成功的关键</li>
+<li><strong>ViT(模型19)</strong>：Transformer 的 FFN 层用残差连接</li>
+</ul>
+
+<h2>八、实际效果</h2>
+
+<div class="warn"><strong>⚠️ 常见误区："超越人类"不等于"比人类更理解图像"。ResNet 可能被对抗样本(添加微小噪声)轻易欺骗，而人类不会。"在特定指标上超越人类"和"真正理解"是两回事。</div>
+<div class="deep"><strong>🔬 深入探讨：ResNet 的训练使用了"学习率 warmup"策略——前几个 epoch 用很小的学习率，然后逐渐增大。这个看似微小的工程细节对训练稳定性影响巨大。"魔鬼在细节中"——好的论文不仅有好的 idea，还有精心设计的训练流程。</div>
+<table>
+<tr><th>模型</th><th>深度</th><th>ImageNet Top-5</th><th>Top-1</th></tr>
+<tr><td>VGG-16</td><td>16</td><td>7.3%</td><td>28.5%</td></tr>
+<tr><td>ResNet-50</td><td>50</td><td>3.6%</td><td>24.7%</td></tr>
+<tr><td>ResNet-152</td><td>152</td><td>2.8%</td><td>21.7%</td></tr>
+</table>
+
+<div class="tip"><strong>向前串联：</strong>
+一、背景与动机的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="ascii">
+一、背景与动机 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+</div>
+<div class="tip"><strong>相关章节：</strong>
+一、背景与动机与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+<div class="exercise"><strong>✏️ 练习题：</strong>
+<ol>
+<li>为什么恒等映射 H(x)=x 对深层网络很难学习？从优化空间的角度分析。</li>
+<li>证明残差连接保证了梯度至少为 1：∂(F(x)+x)/∂x = ∂F/∂x + 1。</li>
+<li>在 Transformer 中，为什么每个 Sub-layer 都要用残差连接？如果去掉会怎样？</li>
+<li>对比 ResNet 和 DenseNet 的参数效率。DenseNet 的特征复用有什么优势和劣势？</li>
+</ol></div>
+
+<div class="tip"><strong>💡 推荐阅读：</strong>Kaiming He 等《Deep Residual Learning for Image Recognition》(CVPR 2016 Best Paper)。这是深度学习领域引用最高的论文之一(15万+引用)。</div>
+
+
+<h2>九、残差连接的数学分析</h2>
+
+<div class="tip"><strong>💡 数学直觉：残差连接的本质是将学习目标从"映射 H(x)"变为"学习残差 F(x) = H(x) - x"。当最优映射接近恒等映射时(深层网络中很常见)，学习"接近零的残差"比学习"接近恒等的映射"容易得多。</div>
+
+<h3>9.1 梯度传播分析</h3>
+<p>标准网络的梯度传播：∂Loss/∂xₗ = ∂Loss/∂x_L · Πᵢ₌ₗᴸ ∂Fᵢ/∂xᵢ。连乘项导致梯度消失或爆炸。有残差连接时：∂Loss/∂xₗ = ∂Loss/∂x_L · (1 + ∂ΣFᵢ/∂xₗ)。其中的"1"保证了梯度至少为 1，不会消失！这就是残差连接能训练极深网络的根本原因。</p>
+
+<div class="deep"><strong>🔬 数学推导：设残差块为 x_{l+1} = x_l + F(x_l)。展开到 L 层：x_L = x_l + Σ_{i=l}^{L-1} F(x_i)。对 x_l 求梯度：∂x_L/∂x_l = 1 + Σ_{i=l}^{L-1} ∂F(x_i)/∂x_l。即使 ∂F/∂x 很小，"1"仍然保证梯度不会完全消失。同时，如果 F 恒为零(最坏情况)，网络退化为恒等映射，不会比浅层网络更差。</div>
+
+<h3>9.2 残差块的变体</h3>
+<p>残差块有多种设计变体：Basic Block(两个 3×3 卷积)用于 ResNet-18/34，Bottleneck Block(1×1 + 3×3 + 1×1 卷积)用于 ResNet-50/101/152。Bottleneck 通过 1×1 卷积先降维再升维，减少了计算量。</p>
+<p>Pre-Activation ResNet(He, 2016)将 BN 和 ReLU 移到卷积之前：x_{l+1} = x_l + F(BN(ReLU(x_l)))。这种顺序对训练更深的网络更友好，因为恒等映射路径完全不经过非线性变换。</p>
+
+<div class="ascii">残差块变体对比:
+
+Basic Block (ResNet-18/34):
+  x ──┬──→ [3×3 Conv → BN → ReLU → 3×3 Conv → BN] ──→ + → ReLU → output
+      │                    F(x)                         ↑
+      └──────────────────────────────────────────────────┘
+                         恒等映射
+
+Bottleneck Block (ResNet-50/101/152):
+  x ──┬──→ [1×1 Conv → BN → ReLU]     降维(d→d/4)
+      │    [3×3 Conv → BN → ReLU]     空间卷积
+      │    [1×1 Conv → BN]            升维(d/4→d)
+      │                    F(x)                         ↑
+      └──────────────────────────────────────────────────┘
+
+Pre-Activation Block:
+  x ──┬──→ [BN → ReLU → 1×1 Conv → BN → ReLU → 3×3 Conv → 1×1 Conv] ──→ + → output
+      │                              F(x)                                   ↑
+      └─────────────────────────────────────────────────────────────────────┘
+</div>
+
+<h3>9.3 残差连接与梯度缩放</h3>
+<p>在实践中，残差连接有时会配合一个缩放因子 α：x_{l+1} = α · x_l + F(x_l)。在初始化阶段使用 α < 1(如 0.1)可以防止初始阶段特征值过大，稳定训练。随着训练进行，α 逐渐增大到 1。</p>
+
+<table>
+<tr><th>残差块变体</th><th>结构</th><th>适用模型</th><th>参数量</th></tr>
+<tr><td>Basic Block</td><td>2 × (3×3 Conv)</td><td>ResNet-18/34</td><td>较少</td></tr>
+<tr><td>Bottleneck</td><td>1×1 + 3×3 + 1×1</td><td>ResNet-50/101/152</td><td>中等</td></tr>
+<tr><td>Pre-Activation</td><td>BN→ReLU→Conv</td><td>ResNet-200+</td><td>中等</td></tr>
+<tr><td>ResNeXt</td><td>分组卷积 Bottleneck</td><td>ResNeXt-101</td><td>较多</td></tr>
+</table>
+
+<h2>十、残差连接在 Transformer 中的应用</h2>
+
+<div class="tip"><strong>💡 关键联系：Transformer 的每个子层(自注意力、前馈网络)都使用了残差连接：output = LayerNorm(x + Sublayer(x))。没有残差连接，Transformer 根本无法训练。</div>
+
+<h3>10.1 Pre-Norm vs Post-Norm</h3>
+<p>原始 Transformer 使用 Post-Norm：x + Sublayer(x) → LayerNorm。GPT 系列使用 Pre-Norm：x + Sublayer(LayerNorm(x))。Pre-Norm 的梯度传播更稳定，训练更容易收敛，但最终性能可能略低于精心调参的 Post-Norm。</p>
+<p>为什么 Pre-Norm 更稳定？因为 Pre-Norm 中残差路径完全不经过 LayerNorm，梯度可以直接从深层传到浅层。Post-Norm 中梯度需要经过 LayerNorm，可能导致梯度幅值变化。DeepNet (2022) 通过特殊的初始化方法使 Post-Norm 可以训练 1000 层 Transformer。</p>
+
+<div class="warn"><strong>⚠️ 设计选择：大多数现代大模型(LLaMA、GPT、PaLM)使用 Pre-Norm，因为训练稳定性在大规模训练中比微小的性能差异更重要。一个训练不稳定的模型根本无法收敛，而 Pre-Norm 保证了训练的稳定性。</div>
+
+<h3>10.2 残差连接与网络深度</h3>
+<p>残差连接使得训练任意深度的网络成为可能，但这不意味着更深总是更好。ResNet 论文的实验表明：1202 层 ResNet 的测试误差高于 110 层，原因是过拟合。网络深度的选择需要在表达能力和泛化能力之间权衡。</p>
+
+<div class="deep"><strong>🔬 深入探讨：残差连接可以看作是一种"集成学习"——L 层残差网络等价于 2^L 个不同深度的路径的隐式集成。每条路径通过不同的残差块组合，最终输出是所有路径的平均。这解释了为什么残差网络具有更好的泛化能力——它天然地进行了路径级别的 Dropout 正则化。</div>
+
+<h2>十一、学习建议与推荐顺序</h2>
+
+<div class="tip"><strong>💡 学习路径建议：ResNet 是理解现代深度学习架构(包括 Transformer)的基础。残差连接的思想已经成为几乎所有深度学习架构的标配。建议在学习 CNN 之后、学习 Transformer 之前掌握 ResNet。</div>
+
+<h3>11.1 推荐学习顺序</h3>
+<ol>
+<li><strong>第一步</strong>：理解退化问题——为什么更深的网络反而更难训练</li>
+<li><strong>第二步</strong>：理解残差连接如何通过"捷径"解决梯度消失</li>
+<li><strong>第三步</strong>：学习 Basic Block 和 Bottleneck 的设计</li>
+<li><strong>第四步</strong>：理解残差连接在 Transformer 中的应用</li>
+<li><strong>第五步</strong>：学习 Pre-Norm vs Post-Norm 的权衡</li>
+</ol>
+
+<h3>11.2 推荐阅读</h3>
+<ul>
+<li>He 等: <strong>Deep Residual Learning for Image Recognition</strong>(CVPR 2016 Best Paper)</li>
+<li>He 等: <strong>Identity Mappings in Deep Residual Networks</strong>(2016)</li>
+<li>Xie 等: <strong>Aggregated Residual Transformations for Deep Neural Networks</strong>(ResNeXt)</li>
+<li>Wang 等: <strong>DeepNet: Scaling Transformers to 1,000 Layers</strong>(2022)</li>
+</ul>
+
+<h3>12.0 残差连接的代码实现</h3>
+
+<pre><code># PyTorch BasicBlock
+import torch, torch.nn as nn
+
+class BasicBlock(nn.Module):
+    expansion = 1
+    def __init__(self, in_ch, out_ch, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, stride, 1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, 1, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_ch != out_ch:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 1, stride, bias=False),
+                nn.BatchNorm2d(out_ch))
+    def forward(self, x):
+        out = torch.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += self.shortcut(x)
+        return torch.relu(out)</code></pre>
+
+<pre><code># Transformer Pre-Norm 残差连接
+class TransformerBlock(nn.Module):
+    def __init__(self, d_model, nhead, d_ff):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
+        self.ffn = nn.Sequential(nn.Linear(d_model, d_ff), nn.GELU(), nn.Linear(d_ff, d_model))
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x), self.norm1(x), self.norm1(x))[0]
+        x = x + self.ffn(self.norm2(x))
+        return x</code></pre>
+
+<pre><code># 残差连接梯度验证
+x = torch.randn(1, 64, requires_grad=True)
+F_x = torch.nn.Linear(64, 64)(x)
+y = x + F_x; y.sum().backward()
+print(f"残差梯度范数: {x.grad.norm():.4f}")
+x.grad = None
+y2 = F_x; y2.sum().backward()
+print(f"无残差梯度范数: {x.grad.norm():.4f}")</code></pre>
+
+<h2>十二、相关阅读与下一步</h2>
+<p>完成本章学习后，建议继续学习以下内容以深化理解：</p>
+<ul>
+<li><strong>Transformer(模型14)</strong>：理解残差连接如何在 Transformer 中发挥作用</li>
+<li><strong>BERT(模型15)</strong>：理解预训练模型中的残差连接</li>
+<li><strong>Layer Normalization</strong>：理解与残差连接配合的归一化技术</li>
+</ul>
+<p>下一步学习推荐：进入 <a href="14-Transformer.html">Transformer</a>章节，理解残差连接如何在全注意力架构中发挥作用。继续学习将帮助你理解从 CNN 到 Transformer 的架构演进。</p>
+
+
+</div>
+<div class="footer"><p>🧠 从深度学习到LLM · 13 · ResNet — 残差连接，突破深度极限</p><p><a href="index.html">返回模型总览</a></p></div>
+</body>
+</html>

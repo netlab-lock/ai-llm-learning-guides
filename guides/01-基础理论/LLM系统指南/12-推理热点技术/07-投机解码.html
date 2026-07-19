@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>07-投机解码 | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box.deep{background:rgba(188,140,255,0.08);border-left:4px solid var(--purple)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+</head>
+<body>
+<div class="nav"><a href="06-量化技术.html">&larr; 06-量化技术</a><span>12-推理热点 / 投机解码</span><a href="08-KV-Cache进阶.html">08-KV-Cache进阶 &rarr;</a></div>
+<div class="container">
+
+<h1>🎲 7. 投机解码 (Speculative Decoding)</h1>
+
+<h2>7.1 问题：一次只出一个 token</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>标准解码就像「一个人写作业，每写一个字都要翻一遍整本教材」——非常慢，因为大部分时间花在翻书（读取模型权重）上，写字（计算）的时间几乎可以忽略。投机解码的策略是：先让一个「学渣」（小模型）快速写一版草稿，再让「学霸」（大模型）一次性检查修改。学霸不用每字都亲自写，只需审核，效率大幅提升。</div>
+<div class="box warn"><div class="label">⚠️ 常见误区</div>投机解码<strong>不是近似方法</strong>——通过拒绝采样（Rejection Sampling），最终输出的 token 分布与直接用大模型生成<strong>完全一致</strong>。这是数学上可以证明的。它「投机」的是先猜后验，而不是牺牲质量。另一个常见误区是认为投机解码需要很大的额外显存——实际上草稿模型通常比目标模型小10倍以上，额外显存开销很小。</div>
+<p>标准 LLM 推理的 decode 阶段是<strong>逐 token 自回归生成</strong>：每生成一个 token，都要完整跑一遍模型前向传播。这意味着每次前向传播需要读取几十GB的模型权重，但只产生一个token——内存带宽成为瓶颈，GPU算力大量空闲。这个问题的本质是「内存墙」（Memory Wall）：现代 GPU 的计算能力（FLOPS）增长速度远快于内存带宽（GB/s），导致越来越多的计算处于「等待数据」的状态。对于 LLM 推理来说，decode 阶段的算术强度（Arithmetic Intensity）极低——每个 token 只需要约 2N 次浮点运算（N 为参数量），但需要读取 2N 字节的权重（FP16），算术强度约为 1 FLOP/Byte。而 A100 的算力/带宽比约为 312T/2T = 156 FLOP/Byte。这意味着 GPU 在 decode 阶段的理论利用率不到 1%，其余 99% 的时间都在等待数据从 HBM 传到 SRAM。投机解码通过让小模型快速生成多个候选 token，使大模型一次验证多个 token，从而将多次内存读取「分摊」到多个 token 上，显著提高了内存带宽的利用率。</p>
+
+<div class="ascii">标准 Decode:
+
+  Step 1: 模型前向传播 → 生成 token₁
+  Step 2: 模型前向传播 → 生成 token₂
+  Step 3: 模型前向传播 → 生成 token₃
+  ...
+  每步都要读取全部模型权重 (几十GB)
+  但只生成 1 个 token
+  → 内存带宽是瓶颈，计算几乎空闲
+
+  生成 200 个 token = 跑 200 次前向传播
+  每次前向传播: ~30ms (受带宽限制)
+  总时间: 200 × 30ms = 6 秒</div>
+
+<h2>7.2 核心思想：先猜后验</h2>
+<p>投机解码的核心思想：<strong>用一个便宜的小模型快速"猜"多个 token，再用大模型一次性验证。</strong></p>
+
+<div class="ascii">投机解码（Speculative Decoding）:
+
+  标准 Decode（慢）:
+  [每步只出1个token · GPU 95%空闲等数据搬运]
+  200步 × 30ms = 6秒
+
+  投机解码（快）:
+  ┌───────────┐    ┌───────────┐
+  │① 草稿阶段  │ →  │② 验证阶段  │
+  │小模型(1B)  │    │大模型(70B) │
+  │× 5步≈5ms  │    │× 1步≈30ms │
+  └───────────┘    └───────────┘
+  5ms + 30ms = 35ms → 3-5个有效token
+
+  加速比: 150ms / 35ms ≈ 4.3×
+  输出分布与大模型完全一致（无损！）
+  数学保证: 拒绝采样 → P_output = P_target
+  不是近似，是精确无损</div>
+
+<h2>7.3 验证的数学保证</h2>
+<div class="box deep"><div class="label">🔬 深入原理</div>投机解码的数学证明基于「拒绝采样」定理。设目标模型分布为 q(x)，草稿模型分布为 p(x)，对于草稿模型生成的 token t_i，接受概率定义为 α = min(1, q(t_i)/p(t_i))。如果接受，输出 t_i；如果拒绝，从修正分布 r(x) = norm(max(0, q(x)-p(x))) 中重新采样。可以证明，无论 p(x) 是什么分布，最终输出的 token 的边际分布恰好等于 q(x)。这个定理的直觉是：当 p(t_i) > q(t_i) 时，草稿模型"高估"了该 token，需要按比例拒绝以补偿；当 p(t_i) < q(t_i) 时，草稿模型"低估"了该 token，总是接受。修正分布 r(x) 负责处理被拒绝的情况，确保总体分布正确。</div>
+
+<div class="ascii">投机解码的数学保证:
+
+  大模型分布: P(target)
+  小模型分布: P(draft)
+
+  验证策略 (拒绝采样):
+    对于第 i 个 token:
+      接受概率 = min(1, P_target(t_i) / P_draft(t_i))
+
+    如果 P_target(t_i) >= P_draft(t_i):  一定接受
+    如果 P_target(t_i) < P_draft(t_i):   按概率接受
+
+  数学证明: 最终输出的 token 分布与直接用大模型生成完全一致！
+  → 无损！不是近似！
+
+  直觉解释:
+    草稿猜对 → 直接用 (省了大模型的计算)
+    草稿猜错 → 大模型纠正 (回到标准解码)
+    平均下来: 大部分 token 被接受 → 整体更快</div>
+
+<h2>7.4 草稿模型的选择</h2>
+
+<table>
+<tr><th>方案</th><th>草稿来源</th><th>优点</th><th>缺点</th><th>加速比</th></tr>
+<tr><td>独立小模型</td><td>同系列的小模型 (如 70B 用 7B)</td><td>简单直接</td><td>需要额外加载模型</td><td>1.5-2x</td></tr>
+<tr><td>Medusa</td><td>在大模型上加多个预测头</td><td>不需要额外模型</td><td>需要微调</td><td>2-2.5x</td></tr>
+<tr><td>EAGLE</td><td>用大模型的特征预测未来 token</td><td>接受率高</td><td>需要训练轻量网络</td><td>3-3.5x</td></tr>
+<tr><td>自投机</td><td>大模型跳过部分层作为草稿</td><td>零额外参数</td><td>加速比较小</td><td>1.5-2.5x</td></tr>
+<tr><td>Sequoia</td><td>树状结构多路径探索</td><td>加速比最高</td><td>实现复杂</td><td>4-5x</td></tr>
+</table>
+
+<h2>7.5 EAGLE 系列</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>EAGLE 的核心洞察是：「预测一个人下一步会想什么（特征空间），比预测他会说什么（token 空间）更容易」。就像观察一个人的表情和肢体语言（内部状态）比听他说的话（外部输出）更能准确判断他的意图。EAGLE 在模型的「思维层面」做预测，准确率远高于在「语言层面」做预测。</div>
+<p>EAGLE 是目前效果最好的投机解码方法之一。核心发现：<strong>在特征空间（模型内部表示）预测比在 token 空间预测更容易。</strong></p>
+
+<div class="ascii">EAGLE 的思路:
+
+  标准投机解码: 小模型预测 token → 容易猜错
+  EAGLE:        用轻量网络预测模型的特征 → 更准确
+
+  工作机制:
+    1. 大模型生成第 t 个 token 的隐藏状态 h_t
+    2. 轻量网络用 h_t 预测 h_{t+1} (特征级预测)
+    3. 用预测的特征生成候选 token
+    4. 大模型一次性验证所有候选 token
+
+  EAGLE-1 (2024): 基础版本，特征空间预测
+  EAGLE-2 (2024): 动态调整草稿长度，接受率更高
+  EAGLE-3 (2025): 进一步优化，2.5-3.5x 加速
+
+  实测 (LLaMA-2 70B):
+    标准投机解码: 1.8x 加速
+    EAGLE-2:     2.5-3.0x 加速
+    EAGLE-3:     3.0-3.5x 加速
+
+  为什么特征空间预测更准确?
+    token 空间: 离散的 (32K 个选项)
+    特征空间: 连续的 (4096维向量)
+    连续空间的插值/外推比离散空间更容易</div>
+
+<h2>7.6 自投机解码 (Self-Speculative)</h2>
+<div class="box deep"><div class="label">🔬 深入原理</div>自投机解码的理论基础是「层间冗余」——研究表明，大模型的相邻层之间的表示变化很小（余弦相似度 > 0.95），这意味着跳过部分层对输出质量的影响有限。从优化理论看，深度神经网络的层间表示可以被视为一个「平滑流形」——在流形上，相邻点（相邻层的表示）高度相似。自投机解码利用了这个平滑性：用跳层后的「粗糙」表示做草稿，再用完整模型做验证。FractalLLM (EMNLP 2025) 进一步将这个思想推广——在大模型中嵌入共享参数的压缩子模型，子模型复用大模型的部分层权重，实现零额外参数的投机解码。最新的研究还发现，不同层的冗余程度不同——浅层的冗余度较低（表示变化大），深层的冗余度较高（表示变化小）。因此，最优的跳层策略是保留浅层、跳过深层。这种自适应跳层策略可以在保持零额外参数的同时将加速比从 1.5x 提升到 2.5x。</div>
+<p><strong>不需要额外模型，大模型自己跳过部分层作为草稿。</strong></p>
+
+<div class="ascii">自投机解码:
+
+  大模型有 80 层:
+    验证模式: 跑全部 80 层 → 正常推理
+    草稿模式: 只跑第 1,5,10,15,...,75 层 (跳过大部分层)
+             → 速度快 3-4x，但质量下降
+             → 用来"猜"候选 token
+
+  优势: 不需要额外加载任何模型
+  劣势: 加速比通常不如独立草稿模型 (1.5-2.5x)
+
+  FractalLLM (EMNLP 2025):
+    在大模型中嵌入压缩子模型
+    子模型共享大模型的部分层
+    → 零额外参数 + 较高加速比
+
+  层间冗余的证据:
+    相邻层表示余弦相似度: 0.95-0.99
+    跳过 50% 的层: PPL 退化 < 10%
+    → 大模型有大量"可压缩"的冗余</div>
+
+<h2>7.7 树状验证</h2>
+<p>当小模型不确定时，可以用<strong>树状结构</strong>探索多个可能路径。树状验证的数学原理是将单路径的拒绝采样扩展为多路径的蒙特卡洛树搜索——同时探索多条候选路径，用大模型一次性评估所有路径的概率，选择最优路径。</p>
+
+<div class="ascii">树状验证:
+
+  小模型不确定第 3 个 token 是 "cat" 还是 "dog"
+  → 同时猜测两条路径:
+
+         t₁ ─── t₂ ─── t₃(=cat) ─── t₄
+                │
+                └── t₃(=dog) ─── t₅
+
+  大模型一次性验证整个树
+  → 选择概率最高的路径
+
+  Sequoia (2024): 最优树结构搜索
+  → 在 H100 上实现 4-5x 加速
+
+  树状验证 vs 线性验证:
+    线性: 一次只猜一条路径 → 错了就全部重来
+    树状: 一次猜多条路径 → 更高的接受率
+    代价: 需要更多显存存储树结构</div>
+
+<h2>7.8 实际效果与性能分析</h2>
+
+<table>
+<tr><th>方法</th><th>加速比</th><th>是否无损</th><th>额外内存</th><th>适用场景</th></tr>
+<tr><td>标准投机解码</td><td>1.5-2x</td><td>✅ 无损</td><td>小模型大小</td><td>通用</td></tr>
+<tr><td>EAGLE-3</td><td>3-3.5x</td><td>✅ 无损</td><td>轻量网络</td><td>延迟敏感</td></tr>
+<tr><td>Medusa</td><td>2-2.5x</td><td>✅ 无损</td><td>多个预测头</td><td>不想加载额外模型</td></tr>
+<tr><td>自投机</td><td>1.5-2.5x</td><td>✅ 无损</td><td>零</td><td>显存紧张</td></tr>
+<tr><td>树状验证</td><td>4-5x</td><td>✅ 无损</td><td>中等</td><td>H100 等高端GPU</td></tr>
+</table>
+
+<div class="ascii">投机解码的性能分析框架:
+
+  总延迟 = 草稿生成时间 + 验证时间 + 重试时间
+
+  草稿生成: T_draft = n × t_small (n步, 每步t_small)
+  验证:     T_verify = 1 × t_large (一次性验证)
+  接受率:   α = 平均接受的 token 数 / n
+
+  有效加速比 = n × t_large / (T_draft + T_verify)
+             = n × t_large / (n × t_small + t_large)
+
+  当 t_small << t_large 时:
+    加速比 ≈ n (理想情况，所有草稿都被接受)
+
+  实际接受率受以下因素影响:
+    - 草稿模型与目标模型的分布相似度
+    - 生成内容的"确定性" (代码 > 自然语言)
+    - 采样温度 (温度低 → 接受率高)</div>
+
+<h2>7.9 与其他技术的关联</h2>
+<ul>
+  <li><strong>FlashAttention</strong> — 验证阶段需要快速算注意力，FA 是基础设施</li>
+  <li><strong>连续批处理</strong> — 草稿模型也需要调度，和连续批处理配合</li>
+  <li><strong>量化</strong> — 草稿模型通常用量化版本，进一步降低成本</li>
+  <li><strong>PagedAttention</strong> — 草稿阶段的 KV Cache 也需要管理</li>
+</ul>
+
+<h3>7.16 投机解码的接受率数学模型</h3>
+<p>投机解码的性能核心指标是接受率 α，其数学定义为平均每次草稿验证中被接受的 token 数量与草稿长度 K 的比值。设草稿模型分布为 p(x)，目标模型分布为 q(x)，则单个 token 的接受概率为 E[α_i] = Σ_x min(p(x), q(x)) = 1 - TV(p,q)，其中 TV(p,q) 是两个分布之间的全变差距离（Total Variation Distance）。这个公式的数学推导基于拒绝采样的性质：接受概率等于两个分布重叠区域的面积。从信息论角度看，全变差距离与 KL 散度存在不等式关系：TV(p,q)² ≤ KL(p,q)/2。这意味着当草稿模型与目标模型的 KL 散度越小时，接受率越高。实践中，同系列小模型（如 LLaMA-3 7B 作为 LLaMA-3 70B 的草稿）的 KL 散度远小于异系列模型，因此接受率通常高出 15-25%。此外，采样温度 τ 对接受率有显著影响：当 τ → 0 时，两个分布都趋向 one-hot 分布，接受率趋向 1；当 τ 增大时，分布变得更均匀，两个分布的差异增大，接受率下降。工程上的最佳实践是在投机解码中使用较低的采样温度（τ ≤ 0.3）以最大化接受率。</p>
+
+<div class="box warn"><div class="label">⚠️ 投机解码的局限</div>投机解码主要优化<strong>延迟</strong>（每个请求更快），不一定提升<strong>吞吐</strong>（系统每秒处理的 token 数）。因为它需要额外的草稿计算，可能占用本可以服务其他请求的 GPU 资源。在高吞吐场景下需要权衡延迟和吞吐。另一个重要局限是：投机解码的效果高度依赖草稿模型的质量——如果草稿模型与目标模型分布差异太大，接受率很低，加速效果微乎其微。选择合适的草稿模型是投机解码工程实践中的关键决策。此外，投机解码在批量推理场景中的收益有限——因为多个请求可以合并为一次前向传播，GPU 的计算利用率已经很高，投机解码带来的额外并行度收益被摊薄。在流式生成场景中，投机解码还需要特殊处理——因为用户期望逐 token 接收输出，而投机解码的验证阶段可能一次产出多个 token，需要在用户体验和延迟之间做平衡。总的来说，投机解码最适合单请求低延迟场景（如实时聊天），而在高吞吐批处理场景中应该谨慎使用。最后，投机解码的实现复杂度也高于其他优化技术——需要同时管理两个模型的状态、处理草稿被拒绝时的 KV Cache 回滚、以及与连续批处理的集成。这些工程挑战使得投机解码的部署门槛较高。</div>
+
+<h2>7.10 学习路径建议</h2>
+<div class="ascii">推荐学习路径:
+
+  入门: 理解为什么 decode 是 memory-bound (带宽瓶颈)
+   ↓
+  原理: 学习拒绝采样的数学证明 (确保无损)
+   ↓
+  实践: 在 vLLM 中启用投机解码，观察加速效果
+   ↓
+  进阶: 对比不同草稿方案 (EAGLE vs Medusa vs 自投机)
+   ↓
+  前沿: 研究树状验证和 FractalLLM 等最新方法</div>
+
+<div class="box exercise"><div class="label">✏️ 练习</div>(1) 在 vLLM 中配置投机解码（使用独立小模型作为草稿），比较有无投机解码时的 TTFT（首 token 延迟）和 TPOT（每 token 延迟）。(2) 推导拒绝采样的数学证明：证明对于任意草稿分布 p(x)，经过拒绝采样后的输出分布等于目标分布 q(x)。(3) 分析：在什么条件下投机解码的加速比会接近理论上限？什么条件下几乎无加速？</div>
+
+<div class="box tip"><div class="label">✅ 本章要点</div>
+<ol>
+  <li><strong>先猜后验</strong>：小模型快速生成候选 token，大模型一次性验证——延迟降低 2-3x</li>
+  <li><strong>数学无损</strong>：拒绝采样保证输出分布与大模型完全一致，不是近似</li>
+  <li><strong>EAGLE 最强</strong>：在特征空间预测，EAGLE-3 实现 3-3.5x 加速</li>
+  <li><strong>多种草稿方案</strong>：独立小模型、Medusa 多头、EAGLE 特征级、自投机（零额外参数）</li>
+  <li><strong>主要优化延迟</strong>：不一定提升吞吐，高吞吐场景需权衡</li>
+</ol>
+</div>
+
+<h3>7.11 拒绝采样的数学证明</h3>
+<p>拒绝采样（Rejection Sampling）是投机解码数学无损性的理论基础。</p>
+
+<div class="ascii">拒绝采样数学证明:
+
+  目标: 证明 P_output(x) = P_target(x)
+
+  定义:
+    α(x) = min(1, P_target(x) / P_draft(x))
+
+  证明 (对任意 token x₀):
+    P_output(x₀) = α(x₀)·P_draft(x₀)
+                 + (1-Σα(x)·P_draft(x))·Q(x₀)
+                 = P_target(x₀)  ✓
+
+  结论: 无论草稿分布如何,
+  输出分布严格等于目标分布！</div>
+
+<h3>7.12 接受率的影响因素分析</h3>
+<p>接受率（Acceptance Rate）是投机解码性能的核心指标。</p>
+
+<table>
+<tr><th>影响因素</th><th>影响方式</th><th>优化策略</th></tr>
+<tr><td>草稿模型质量</td><td>模型越接近目标, 接受率越高</td><td>选择同系列小模型</td></tr>
+<tr><td>任务确定性</td><td>代码 > 结构化文本 > 自然语言</td><td>对确定性高的任务效果更好</td></tr>
+<tr><td>采样温度</td><td>温度越低, 接受率越高</td><td>推理场景通常低温度</td></tr>
+<tr><td>上下文长度</td><td>上下文越长, 接受率越高</td><td>长上下文场景更有效</td></tr>
+<tr><td>草稿长度</td><td>越长越容易猜错</td><td>动态调整草稿长度</td></tr>
+</table>
+
+<h3>7.13 投机解码的工程实现细节</h3>
+<p>在推理引擎中实现投机解码需要解决多个工程挑战。</p>
+
+<div class="box deep"><div class="label">🔬 工程实现的关键决策</div>投机解码的工程实现涉及：(1) <strong>草稿模型加载</strong>——EAGLE 轻量网络只有目标模型 1-5% 参数量，显存开销小；(2) <strong>验证并行化</strong>——将草稿序列作为一次前向传播输入同时获取所有位置 logits；(3) <strong>KV Cache 管理</strong>——草稿被拒绝时需要回滚到上一个已接受位置，PagedAttention 的页回收机制天然支持；(4) <strong>动态草稿长度</strong>——EAGLE-2 根据上下文确定性动态调整草稿长度；(5) <strong>与连续批处理集成</strong>——不同请求草稿长度不同需要特殊调度策略。</div>
+
+<pre><code><span class="comment"># 投机解码核心循环 (伪代码)</span>
+<span class="keyword">def</span> speculative_generate(target, draft, prompt, max_tokens):
+    output = prompt
+    <span class="keyword">while</span> len(output) < max_tokens:
+        <span class="comment"># 阶段1: 草稿模型快速生成 K 个候选</span>
+        candidates = []
+        <span class="keyword">for</span> _ <span class="keyword">in</span> range(K):
+            logits = draft.forward(output)
+            token = sample(logits)
+            candidates.append(token)
+        
+        <span class="comment"># 阶段2: 目标模型一次性验证</span>
+        all_logits = target.forward(
+            output + tokens_to_str(candidates))
+        
+        <span class="comment"># 阶段3: 拒绝采样</span>
+        <span class="keyword">for</span> i, token <span class="keyword">in</span> enumerate(candidates):
+            p_t = softmax(all_logits[i])[token]
+            p_d = softmax(draft_logits[i])[token]
+            <span class="keyword">if</span> random() < min(1.0, p_t / p_d):
+                output += tokens_to_str([token])
+            <span class="keyword">else</span>:
+                corrected = resample(all_logits[i])
+                output += tokens_to_str([corrected])
+                <span class="keyword">break</span>
+    <span class="keyword">return</span> output</code></pre>
+
+<h3>7.14 投机解码与其他加速技术的组合</h3>
+<p>投机解码可以与多种推理优化技术组合使用实现叠加加速效果。</p>
+
+<pre><code><span class="comment"># 投机解码接受率估算工具</span>
+<span class="keyword">import</span> numpy <span class="keyword">as</span> np
+
+<span class="keyword">def</span> estimate_acceptance_rate(p_draft, p_target):
+    <span class="string">"""估算投机解码的平均接受率
+    数学原理: α = Σ_x min(p_draft(x), p_target(x)) = 1 - TV(p, q)
+    TV(p,q) 为全变差距离"""</span>
+    <span class="comment"># 全变差距离: TV = 0.5 * Σ|p(x) - q(x)|</span>
+    tv_distance = 0.5 * np.sum(np.abs(p_draft - p_target))
+    acceptance_rate = 1.0 - tv_distance
+    <span class="keyword">return</span> acceptance_rate
+
+<span class="keyword">def</span> expected_speedup(acceptance_rate, K, t_draft, t_verify):
+    <span class="string">"""计算投机解码的期望加速比
+    原理: 有效吞吐 = E[接受token数] / 总延迟"""</span>
+    <span class="comment"># 期望接受的 token 数 (含 bonus token)</span>
+    E_accepted = K * acceptance_rate + acceptance_rate
+    total_time = K * t_draft + t_verify
+    baseline_time = E_accepted * t_verify
+    <span class="keyword">return</span> baseline_time / total_time
+
+<span class="comment"># 示例: 70B 目标 + 7B 草稿, K=5, 接受率 0.75</span>
+alpha = 0.75
+speedup = expected_speedup(alpha, K=5, t_draft=2, t_verify=30)
+<span class="keyword">print</span>(f<span class="string">"接受率: {alpha:.0%}, 加速比: {speedup:.1f}x"</span>)
+<span class="comment"># 输出: 接受率: 75%, 加速比: 3.4x</span></code></pre>
+
+<div class="ascii">投机解码的组合加速:
+
+  技术组合                    加速比      备注
+  ─────────────────────────────────────────
+  标准投机解码               1.5-2x     基线
+  + 量化草稿模型             1.8-2.5x   草稿更快
+  + EAGLE 特征预测           3-3.5x     接受率更高
+  + 连续批处理               吞吐↑      系统级优化
+  + FlashAttention           计算↓      IO 优化
+  ─────────────────────────────────────────
+  全部组合                   4-6x       端到端加速</div>
+
+<h3>7.15 投机解码的延迟与吞吐权衡</h3>
+<p>投机解码主要优化延迟（Latency），但对吞吐（Throughput）的影响需要仔细分析。</p>
+
+<div class="ascii">延迟 vs 吞吐分析:
+
+  延迟 (Latency):
+    标准解码: 200 tokens × 30ms = 6s
+    投机解码: 200/3.5 × 35ms = 2s
+    → 延迟降低 3x ✓
+
+  吞吐 (Throughput):
+    标准解码: 1 GPU → 1 请求 → 33 tokens/s
+    投机解码: 1 GPU → 1 请求 → 100 tokens/s (单请求)
+    
+    但: 草稿模型占用部分 GPU 资源
+    高并发时: 草稿计算资源本可服务更多请求
+    
+    结论:
+    · 低并发 (延迟敏感): 投机解码收益大
+    · 高并发 (吞吐优先): 需要权衡资源分配</div>
+
+<div class="box tip"><div class="label">💡 投机解码的部署建议</div>在实际部署中，投机解码的最佳实践是：(1) 延迟敏感的在线服务（如聊天机器人）——启用投机解码，用户体验显著提升，特别是首 token 延迟（TTFT）和每 token 延迟（TPOT）都会显著降低；(2) 高吞吐批处理场景（如数据标注）——关闭投机解码，将资源用于处理更多请求；(3) 混合场景——使用动态策略，在低负载时启用投机解码，高负载时关闭；(4) 代码生成场景——代码的确定性高于自然语言，投机解码的接受率通常可以达到 70-85%，加速效果最为显著；(5) 多轮对话场景——随着对话历史增加，模型对后续生成的确定性提高，投机解码的效率也随之提升。EAGLE-3 的最新版本支持"投机解码即服务"——可以独立部署草稿模型，通过网络 API 提供草稿生成，避免占用目标模型的 GPU 资源。</div>
+
+<div class="next-prev"><a href="06-量化技术.html">← 06-量化技术</a><a href="08-KV-Cache进阶.html">08-KV-Cache进阶 →</a></div>
+
+</div>
+<div class="footer"><p>LLM 系统学习 · 07-投机解码</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="tip"><strong>相关章节：</strong>
+问题：一次只出一个 token与以下内容密切相关：<a href="01-总览.html">01-总览</a> | <a href="02-连续批处理.html">02-连续批处理</a> | <a href="03-Chunked-Prefill.html">03-Chunked-Prefill</a>。建议结合学习。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+建议先用小draft模型（如1B）搭配大target模型（如7B）实现投机解码，测量接受率和端到端加速比。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+从投机解码的<strong>核心原理</strong>出发，使用小型草稿模型（draft model）快速生成多个候选token，再由大模型一次性验证。<strong>为什么</strong>投机解码能加速？<strong>推导</strong>：大模型一次前向可同时验证N个token（与生成1个token的延迟相同），若草稿模型的接受率为α，则平均每次验证可接受1/(1-α)个token。当α=0.7时，加速约3.3倍。<strong>数学本质</strong>上，这利用了自回归模型的并行验证能力——验证N个token的FLOPs与生成1个token几乎相同，但每个被接受的token都省去了一次完整的大模型前向传播。
+</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释问题：一次只出一个 token的核心原理，并举一个实际应用场景。</li>
+<li>问题：一次只出一个 token在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比问题：一次只出一个 token与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+问题：一次只出一个 token的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<pre><code class="language-python"># 问题：一次只出一个 token 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="deep"><strong>深入探讨：</strong>
+从投机解码的<strong>核心原理</strong>出发，使用小型草稿模型（draft model）快速生成多个候选token，再由大模型一次性验证。<strong>为什么</strong>投机解码能加速？<strong>推导</strong>：大模型一次前向可同时验证N个token（与生成1个token的延迟相同），若草稿模型的接受率为α，则平均每次验证可接受1/(1-α)个token。当α=0.7时，加速约3.3倍。<strong>数学本质</strong>上，这利用了自回归模型的并行验证能力——验证N个token的FLOPs与生成1个token几乎相同，但每个被接受的token都省去了一次完整的大模型前向传播。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习投机解码时，很多人只看理论加速比不测量实际接受率。建议在具体任务上统计draft model的token接受率，计算实际加速比与理论上限的差距。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为投机解码就是简单地用小模型猜大模型的输出。draft model选择、接受-拒绝采样的正确性保证、batch场景下的适用性等都是关键问题。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+问题：一次只出一个 token与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

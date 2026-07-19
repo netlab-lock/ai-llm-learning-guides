@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03-PRM与搜索策略 | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+</head>
+<body>
+<div class="nav"><a href="02-DeepSeek-R1详解.html">&larr; 02-DeepSeek-R1详解</a><span>08-推理 / PRM与搜索策略</span><a href="04-总结与练习.html">04-总结与练习 &rarr;</a></div>
+<div class="container">
+
+<h1>🔎 3. PRM 与搜索策略</h1>
+
+<div class="box tip"><strong>通俗类比：</strong>ORM（结果奖励）就像一个只看最终答案的老师——不管你中间过程对不对，只要答案对就给满分。PRM（过程奖励）则像一个逐行批改的老师——每一步推理都会被打分，哪里出错一目了然。显然，逐行批改的老师更能帮助学生找到问题所在。搜索策略则是"做题策略"——Best-of-N 就像"先做 N 遍选最好的"，Tree-of-Thought 就像"画思维导图找最优路径"。</div>
+
+<h2>3.1 ORM vs PRM</h2>
+<div class="ascii">ORM (Outcome Reward Model): 只对最终答案评分
+  问题 → 推理步骤1 → 步骤2 → ... → 答案 → RM评分 ✓/✗
+  问题: 不知道哪步出错
+  适用: 答案易验证 (数学/代码)
+
+PRM (Process Reward Model): 对每步评分
+  问题 → 步骤1(0.9) → 步骤2(0.7) → 步骤3(0.2) → ... → 答案
+                     ↑                     ↑
+                   有点可疑              这步可能错了!
+  优势: 精确定位错误步骤，指导搜索</div>
+
+<p>ORM 和 PRM 的核心区别在于<strong>奖励信号的粒度</strong>。ORM 只提供"全局信号"——整个推理链是否正确。PRM 提供"局部信号"——每个推理步骤的质量。这种粒度差异对搜索策略的影响是巨大的：</p>
+
+<ul>
+<li><strong>ORM 的局限</strong>：假设模型生成了 10 步推理，第 7 步出错了。ORM 只会说"最终答案错误"，但不会指出是第 7 步的问题。如果用 ORM 来指导搜索，模型可能在错误的步骤上浪费大量计算资源。</li>
+<li><strong>PRM 的优势</strong>：PRM 会在第 7 步就给出低分，搜索算法可以立即"剪枝"——不再继续探索这条路径，而是回溯到第 6 步尝试其他方向。这大幅提高了搜索效率。</li>
+</ul>
+
+<div class="box warn"><strong>常见误区：</strong>PRM 的训练难度远大于 ORM。ORM 只需要判断"最终答案对不对"，这可以自动化（例如数学题对答案）。但 PRM 需要标注"每一步是否正确"，这需要大量人工标注，而且标注者之间的一致性（inter-annotator agreement）往往不高——同一步推理，不同的人可能给出不同的评分。OpenAI 的"Let's Verify Step by Step"论文使用了大量人工标注来训练 PRM，成本非常高。</div>
+
+<h3>PRM 的训练方法</h3>
+<table>
+<tr><th>方法</th><th>描述</th><th>数据来源</th><th>成本</th></tr>
+<tr><td>人工标注</td><td>人类标注每步正确性</td><td>人工标注数据</td><td>极高</td></tr>
+<tr><td>自动化 PRM</td><td>用 Monte Carlo 估计步骤正确率</td><td>自动生成</td><td>中等</td></tr>
+<tr><td>隐式 PRM</td><td>从推理模型中提取过程奖励</td><td>推理模型输出</td><td>低</td></tr>
+<tr><td>ORM→PRM 蒸馏</td><td>用 ORM 分数推导 PRM 分数</td><td>ORM 训练数据</td><td>低</td></tr>
+</table>
+
+<div class="box deep"><strong>深入探讨：</strong>自动化 PRM 的核心思想是 Monte Carlo 估计：对于一个推理链的第 i 步，从这一步开始随机采样多个后续推理路径，然后看这些路径中有多少比例能得到正确答案。如果大部分路径都正确，说明第 i 步是"好的"；如果大部分都错，说明第 i 步有问题。这种方法不需要人工标注，但需要大量的推理采样，计算成本不低。DeepSeek 的 R1 论文中暗示了类似的方法——用 RL 训练后的模型自动评估推理过程的质量。</div>
+
+<h2>3.2 搜索策略</h2>
+
+<h3>Best-of-N (BoN)</h3>
+<p>最简单的搜索策略：生成 N 个独立回答，选择奖励最高的那个。</p>
+<div class="ascii">Best-of-N 流程:
+
+  问题 → 模型生成 N 个回答
+           ├── 回答1 (奖励: 0.3) ✗
+           ├── 回答2 (奖励: 0.8) ← 选这个
+           ├── 回答3 (奖励: 0.5)
+           ├── ...
+           └── 回答N (奖励: 0.6)
+
+  计算量: N × 单次推理
+  优势: 简单，不需要复杂算法
+  局限: 效率低，不利用中间信息</div>
+
+<h3>Tree-of-Thought (ToT)</h3>
+<p>将推理过程建模为一棵树：每个节点是一个"思考状态"，每条边是一个"思考步骤"。搜索算法（DFS 或 BFS）在树上探索，用评估函数（可以是 PRM）估计每个节点的"前景"，决定继续探索还是回溯。</p>
+
+<div class="ascii">Tree-of-Thought 搜索树:
+
+           问题
+          / | \
+        S1  S2  S3     ← 第一步: 3种思考方向
+       /|\   |   |
+      .. S2a S2b  S3a   ← 第二步: 每种方向继续展开
+      |
+     S1b (PRM: 0.9) ← 高分路径, 继续
+     S1a (PRM: 0.3) ← 低分路径, 剪枝!
+
+  关键: PRM 评分指导"往哪个方向搜索"</div>
+
+<h3>Monte Carlo Tree Search (MCTS)</h3>
+<p>MCTS 是 AlphaGo 使用的搜索算法，被应用到了 LLM 推理中。它通过反复的"模拟-评估-回传"来平衡"探索"（尝试新路径）和"利用"（深耕已知好路径）。</p>
+
+<div class="ascii">MCTS 四步循环:
+
+  1. 选择 (Selection)
+     从根节点出发，用 UCB 公式选择子节点
+     平衡"高奖励"和"少探索"
+
+  2. 扩展 (Expansion)
+     到达叶节点后，生成新的子节点
+
+  3. 模拟 (Simulation/Rollout)
+     从新节点开始随机模拟到终点
+     (或用 PRM 直接评估)
+
+  4. 回传 (Backpropagation)
+     将模拟结果沿路径回传
+     更新每个节点的访问次数和累计奖励
+
+  循环多次后: 选择访问次数最多的路径作为最终答案</div>
+
+<h3>Self-Consistency (SC)</h3>
+<p>Self-Consistency 是最轻量的"搜索"策略：生成多个回答后，不使用奖励模型，而是直接<strong>投票</strong>——哪个答案出现的次数最多，就选哪个。它的核心假设是"正确答案比错误答案更一致"——因为错误可能有很多种，但正确答案通常只有一个。</p>
+
+<div class="ascii">Self-Consistency 投票机制:
+
+  问题: 2x + 3 = 7, x = ?
+
+  采样5次:
+  路径1: ... → x = 2  ✓
+  路径2: ... → x = 2  ✓
+  路径3: ... → x = 5  ✗
+  路径4: ... → x = 2  ✓
+  路径5: ... → x = 3  ✗
+
+  投票: x=2 出现3次 (最多)
+  最终答案: x = 2</div>
+
+<h2>3.3 搜索策略全面对比</h2>
+<table>
+<tr><th>策略</th><th>奖励模型</th><th>计算量</th><th>效果</th><th>适用场景</th></tr>
+<tr><td>Best-of-N</td><td>ORM 或 PRM</td><td>N 倍推理</td><td>好</td><td>简单任务</td></tr>
+<tr><td>Self-Consistency</td><td>不需要</td><td>N 倍推理</td><td>中等</td><td>答案可数的任务</td></tr>
+<tr><td>ToT (BFS)</td><td>PRM</td><td>可变(宽优先)</td><td>好</td><td>需要全局搜索</td></tr>
+<tr><td>ToT (DFS)</td><td>PRM</td><td>可变(深优先)</td><td>好</td><td>路径明确的任务</td></tr>
+<tr><td>MCTS</td><td>PRM</td><td>可变(自适应)</td><td>最好</td><td>极难推理任务</td></tr>
+<tr><td>Beam Search</td><td>PRM</td><td>固定宽度</td><td>好</td><td>平衡效率和质量</td></tr>
+</table>
+
+<div class="box tip"><strong>通俗类比：</strong>不同搜索策略就像不同的解题方法。Best-of-N 是"暴力枚举"——做 N 遍选最好的。Self-Consistency 是"少数服从多数"——听大家的。ToT 是"画思维导图"——先列出所有可能方向，再逐步深入。MCTS 是"下棋式思考"——先凭直觉走几步看看，再回来想有没有更好的走法。</div>
+
+<h2>3.4 PRM 与搜索策略的结合</h2>
+<p>PRM 和搜索策略的结合是推理增强的核心范式。PRM 提供"评价能力"，搜索策略提供"探索策略"，两者互补：</p>
+
+<div class="ascii">PRM + 搜索策略的协作:
+
+  ┌───────────────────────────────┐
+  │         推理增强系统           │
+  │                               │
+  │  搜索策略 ←→ PRM ←→ 生成模型   │
+  │  (探索)    (评估)   (生成)     │
+  │                               │
+  │  搜索策略: "往哪走?"          │
+  │  PRM:      "这步好不好?"       │
+  │  生成模型:  "下一步是什么?"     │
+  └───────────────────────────────┘
+
+  工作流程:
+  1. 生成模型提出候选推理步骤
+  2. PRM 评估每步的质量
+  3. 搜索策略根据 PRM 分数决定继续/回溯/剪枝
+  4. 重复直到得到最终答案</div>
+
+<div class="box deep"><strong>深入探讨：</strong>一个有趣的研究方向是"搜索策略本身的 Scaling Law"。研究表明，搜索的计算量和模型性能之间也存在幂律关系——但这个关系比训练 Scaling 更复杂，因为它还依赖于 PRM 的质量。如果 PRM 很准确，增加搜索量的回报率很高；如果 PRM 不准确，增加搜索量可能适得其反——因为错误的评估会把搜索导向错误的方向。这就像一个迷路的向导——你走得越远，偏离得越严重。因此，PRM 的训练质量和搜索策略的选择是同等重要的。</div>
+
+<h2>3.5 实践建议</h2>
+<div class="box info"><div class="label">💡 选择搜索策略的指南</div>
+<ul>
+<li><strong>如果你的任务答案可验证</strong>（数学、代码）：用 Self-Consistency 就够了，不需要 PRM</li>
+<li><strong>如果你有高质量 PRM</strong>：用 Beam Search 或 MCTS，能最大化 PRM 的价值</li>
+<li><strong>如果计算预算有限</strong>：Best-of-N 是最简单的选择</li>
+<li><strong>如果任务极难</strong>（竞赛数学）：MCTS + PRM 是最强组合</li>
+<li><strong>如果没有任何额外资源</strong>：Self-Consistency 只需要多次采样，不需要额外模型</li>
+</ul></div>
+
+<div class="box warn"><strong>常见误区：</strong>搜索策略不是"越多计算越好"。存在明显的边际递减——从 1 次采样增加到 8 次，性能提升明显；从 8 次增加到 64 次，提升就小得多。而且如果模型本身能力不足（基座模型太弱），再多的搜索也救不了——你不能通过反复采样一个弱模型来"变出"强模型。搜索策略的作用是"让模型更好地发挥已有的能力"，而不是"创造新能力"。</div>
+
+<div class="box tip"><div class="label">💡 实践技巧</div>理解 PRM 的最好方式是类比「老师批改作业」。ORM 就像老师只看最终答案——对了给满分，错了给零分，学生不知道哪里错了。PRM 就像老师逐行批改——每一步都标注对错，学生能精确知道哪一步需要改进。这种「过程监督」比「结果监督」的训练效率高 2-5 倍。</div>
+
+<div class="box tip"><div class="label">💡 实践技巧</div>在实际应用中，PRM 的标注成本远高于 ORM——因为需要人类标注者理解并评估每一步推理的正确性。OpenAI 的 PRM800K 数据集花费了大量人力标注 800K 个推理步骤。降低成本的方法包括：(1) 用 ORM 自动标注简单的步骤（明显正确/错误的步骤可以自动判断），只让人类标注不确定的步骤；(2) 用 Monte Carlo 估计——对每一步执行多次采样，用最终答案的正确率估计该步骤的质量。</div>
+
+<div class="box tip"><div class="label">💡 实践技巧</div>选择搜索策略时，Beam Search 适合推理空间较小的任务（如数学计算题），MCTS 适合推理空间较大的任务（如代码生成、开放性问题）。在实际部署中，建议先用 Beam Search (width=4-8) 作为默认策略，如果效果不够好再尝试 MCTS。DeepSeek-R1 的 GRPO 方法不需要显式搜索，而是通过策略梯度直接优化推理路径——这是另一种值得学习的方法。</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区</div>PRM 的一个重要陷阱是「奖励欺骗」（Reward Hacking）。模型可能学会生成「看起来正确」但实际有逻辑漏洞的推理步骤，以获取 PRM 的高分。例如，模型可能在推理步骤中添加冗余的验证步骤（「让我们检查一下...确实正确」），这些步骤在 PRM 看来是「负责任的推理」，但实际上没有增加任何信息。缓解方法包括：(1) 在 PRM 训练数据中包含这类「假阳性」样本；(2) 使用对抗训练让 PRM 学会识别表面正确但实际有漏洞的推理。</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区</div>MCTS 在 LLM 推理中的应用面临一个独特挑战：「状态空间爆炸」。与棋类游戏不同，LLM 推理的每一步都有几乎无限的可能输出（自然语言空间），这导致传统的 MCTS 难以有效探索。解决方案包括：(1) 使用 Top-p 采样限制每步的候选数量；(2) 使用 PRM 作为价值函数引导搜索方向；(3) 使用早期剪枝丢弃低价值路径。AlphaProof 的成功表明，在数学推理这种结构化较强的领域，MCTS 的效果尤为显著。</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨</div>PRM 的数学基础：贝叶斯推断框架。PRM 可以用贝叶斯推断的框架来理解。设 s_i 为第 i 步推理，y 为最终答案的正确性。PRM 估计的是 P(s_i correct | s_1, ..., s_{i-1}, problem)。从贝叶斯角度，这等价于后验概率 P(correct | evidence)，其中 evidence 是前 i-1 步的推理和问题描述。PRM 的训练可以用最大似然估计：θ* = argmax_θ Π P(y_i | s_1, ..., s_i; θ)，其中 y_i 是第 i 步的标注。PRM 的关键假设是「条件独立性」——给定前 i-1 步，第 i 步的正确性与更早的步骤无关。这个假设在实际中不完全成立（错误可能累积），但简化了训练过程。</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨</div>Beam Search 与 MCTS 的理论对比。Beam Search 是一种贪心搜索算法——在每一步保留 top-k 个最有可能的路径，丢弃其他路径。其优点是计算效率高（O(k × L)，k 是 beam width，L 是序列长度），缺点是可能错过全局最优路径（贪心陷阱）。MCTS 是一种随机搜索算法——通过反复「模拟」（rollout）来估计每个状态的价值。其优点是渐近最优（采样次数趋于无穷时收敛到最优解），缺点是计算开销大。在 LLM 推理场景中，Beam Search 适合短推理链（3-5 步），MCTS 适合长推理链（10+ 步）。DeepSeek-R1 使用的 GRPO 方法是一种折中——它不显式搜索，而是通过策略梯度让模型「学会」好的推理路径。</div>
+
+<table>
+<tr><th>搜索策略</th><th>算法复杂度</th><th>适合场景</th><th>优点</th><th>缺点</th><th>代表应用</th></tr>
+<tr><td>Greedy</td><td>O(L)</td><td>简单任务</td><td>最快</td><td>容易陷入局部最优</td><td>标准CoT</td></tr>
+<tr><td>Beam Search</td><td>O(k×L)</td><td>中等推理</td><td>平衡效率和质量</td><td>贪心陷阱</td><td>o1-mini</td></tr>
+<tr><td>MCTS</td><td>O(n×L)</td><td>复杂推理</td><td>渐近最优</td><td>计算开销大</td><td>AlphaProof</td></tr>
+<tr><td>GRPO</td><td>O(m×L)</td><td>通用推理</td><td>不需要PRM</td><td>需要RL训练</td><td>DeepSeek-R1</td></tr>
+<tr><td>Best-of-N</td><td>O(N×L)</td><td>通用</td><td>简单有效</td><td>N越大越贵</td><td>ORM选择</td></tr>
+<tr><td>ToT</td><td>O(k^d×L)</td><td>探索性任务</td><td>支持回溯</td><td>指数级开销</td><td>思维树</td></tr>
+</table>
+
+<div class="ascii">PRM 与搜索策略的结合示意:
+
+  问题: "求解 x² + 5x + 6 = 0"
+  
+  Beam Search (k=3) + PRM 评估:
+  
+  Step 1: [PRM评分]
+    路径A: "因式分解: (x+2)(x+3)=0"  → PRM=0.95 ✓
+    路径B: "使用求根公式: x=(-5±√1)/2" → PRM=0.85
+    路径C: "画图估计: x≈-2.5"       → PRM=0.30 ✗ (剪枝)
+  
+  Step 2: [PRM评分]
+    路径A: "x+2=0 或 x+3=0"         → PRM=0.98 ✓
+    路径B: "x=-2 或 x=-3"            → PRM=0.90
+    路径C(新): "配方: (x+2.5)²=0.25" → PRM=0.70
+  
+  Step 3: [PRM评分]
+    路径A: "所以 x=-2 或 x=-3"       → PRM=0.99 ✓ (最终答案)
+  
+  PRM 的价值: 在每一步选择最有前途的路径
+  → 减少不必要的探索，提高推理效率</div>
+
+<div class="box exercise"><div class="label">🎯 练习</div><ol>
+<li>PRM 实现练习：使用 HuggingFace Transformers 加载一个 PRM 模型（如 OpenAI 的 math-prm），对 GSM8K 的 10 道题目进行逐步评分，分析 PRM 评分与最终答案正确率的相关性。</li>
+<li>Beam Search 实验：实现一个简单的 Beam Search 解码器，用不同的 beam width（1, 2, 4, 8）解决数学问题，分析 beam width 对准确率和计算成本的影响。</li>
+<li>策略对比：分别用 Greedy、Beam Search 和 Best-of-N 方法让 GPT-4 解决 MATH 数据集的 100 道题，比较三种策略的准确率和成本。</li>
+</ol></div>
+
+<div class="box tip"><div class="label">🗺️ 学习路径</div>PRM 与搜索策略的学习路径：① 理解 ORM 和 PRM 的区别 → ② 学习 PRM 的训练方法（人工标注/自动标注） → ③ 掌握 Beam Search 的实现和调参 → ④ 了解 MCTS 在推理中的应用 → ⑤ 学习 GRPO 等端到端训练方法 → ⑥ 实践：用 PRM + Beam Search 提升推理准确率。</div>
+
+<div class="box info"><div class="label">🔗 继续学习</div>PRM 与搜索策略是推理模型的核心技术。继续学习：<a href='04-总结与练习.html'>04-总结与练习</a> 回顾推理模型的全貌，<a href='02-推理Scaling.html'>02-推理Scaling</a> 了解推理时计算量的 Scaling 规律。相关阅读：<a href='01-总览.html'>推理模型总览</a> 了解推理模型的发展历程。</div>
+
+<h3>PRM 评分的 Python 实现示例</h3>
+<p>以下是使用 PRM 模型对推理步骤进行评分的简化实现，展示了 PRM 的基本工作原理：</p>
+<pre><code>import torch
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+# 加载奖励模型
+model_name = "OpenAssistant/reward-model-deberta-v3-large-v2"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForSequenceClassification.from_pretrained(model_name)
+
+def score_step(problem, steps_so_far, current_step):
+    text = f"Problem: {problem}\n"
+    for i, step in enumerate(steps_so_far):
+        text += f"Step {i+1}: {step}\n"
+    text += f"Step {len(steps_so_far)+1}: {current_step}"
+    
+    inputs = tokenizer(text, return_tensors="pt", truncation=True)
+    with torch.no_grad():
+        score = model(**inputs).logits.item()
+    return score
+
+# 示例: 评估数学推理步骤
+problem = "Solve: 2x + 3 = 7"
+steps = ["Subtract 3 from both sides: 2x = 4"]
+s = score_step(problem, steps, "Divide by 2: x = 2")
+print(f"Step score: {s:.3f}")</code></pre>
+<p>PRM 评分的实际应用中需要注意以下几点：(1) PRM 的评分不是概率，而是 logit 值，需要通过 sigmoid 函数转换为 0-1 的概率；(2) PRM 对推理步骤的顺序敏感，相同的步骤在不同顺序下可能得到不同的评分；(3) PRM 的训练数据分布决定了它擅长评估的推理类型——如果训练数据主要是数学推理，它在代码推理上的表现可能较差。</p>
+<h3>Beam Search 的实现细节与优化</h3>
+<p>Beam Search 在 LLM 推理中的实现需要注意几个关键细节。首先是重复惩罚——如果不加限制，Beam Search 容易生成重复的推理步骤。常用的解决方案是 n-gram 重复惩罚：如果一个 n-gram 已经出现过，将其 logit 减去一个惩罚值（通常 0.5-1.0）。其次是多样性 Beam Search——不仅保留 top-k 个最可能的路径，还鼓励不同路径之间的多样性，避免所有路径都收敛到相似的推理过程。最后是长度归一化——原始 Beam Search 倾向于选择较短的序列（因为每个 token 的概率都 <1，序列越长总概率越低），需要除以长度的幂进行归一化。</p>
+<p>在实际部署中，Beam Search 的计算开销与 beam width 成正比。beam width=1 等价于贪心搜索，beam width=4-8 是常用的平衡点。对于推理密集型任务（如数学证明），可以使用更大的 beam width（16-32）来探索更多的推理路径。DeepSeek-R1 的 GRPO 方法则完全不需要显式搜索——它通过强化学习让模型学会在单次前向传播中选择最优的推理路径。</p>
+
+
+<h3>搜索策略的组合与级联优化</h3>
+<p>在实际部署中，不同的搜索策略可以组合使用以获得更好的效果。一种常见的组合是级联策略：先用 Greedy 快速生成一个候选答案，如果置信度足够高就直接返回；如果置信度低（如 PRM 评分低于阈值），再用 Beam Search 生成多个候选答案并用 PRM 选择最优。这种级联策略的优势在于：大部分简单问题（约 70-80%）可以用 Greedy 快速解决，只有少数复杂问题需要昂贵的 Beam Search。实验表明，级联策略相比纯 Beam Search 可以将平均推理成本降低 60% 同时保持 95% 以上的准确率。另一种组合是 Best-of-N 与 Self-Consistency：先用温度采样生成 N 个独立的推理路径，然后用多数投票选择最终答案，或者用 PRM 评分选择最优路径。N 的选择需要平衡成本和质量——N=8-16 通常是性价比最高的选择。</p>
+
+<h3>搜索策略的效率优化与工程实现</h3><p>在工程实现中，搜索策略的效率优化至关重要。Beam Search 的主要瓶颈是每步需要对所有 beam 进行前向传播，计算量是 Greedy 的 k 倍（k 为 beam width）。优化方法包括：(1) 批量化——将所有 beam 组成一个 batch 并行计算，充分利用 GPU 的并行能力；(2) 提前剪枝——在每步结束后丢弃明显不可能的 beam（如概率低于阈值的 beam），减少下一步的计算量；(3) 缓存复用——不同 beam 之间共享已计算的 KV Cache，避免重复计算。MCTS 的主要瓶颈是模拟（rollout）阶段的计算开销。优化方法包括：(1) 使用轻量级评估函数替代完整的模型推理来估计节点价值；(2) 并行化多个模拟过程；(3) 使用早期终止策略——如果某个节点的估计价值明显低于当前最优路径，提前终止该节点的探索。</p>
+<div class="next-prev"><a href="02-DeepSeek-R1详解.html">← 02-R1</a><a href="04-总结与练习.html">04-总结 →</a></div>
+</div>
+<div class="footer"><p>LLM 系统学习 · 03-PRM与搜索策略</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="tip"><strong>相关章节：</strong>
+ORM vs PRM与以下内容密切相关：<a href="01-Test-Time-Compute.html">01-Test-Time-Compute</a> | <a href="02-DeepSeek-R1详解.html">02-DeepSeek-R1详解</a> | <a href="04-总结与练习.html">04-总结与练习</a>。建议结合学习。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+PRM与搜索策略的工程实践建议：在实际应用中，建议按以下步骤选择和部署搜索策略。(1) 对于答案可验证的任务（数学、代码），先用Self-Consistency（N=8-16次采样+多数投票）作为baseline，这是成本最低的搜索策略。(2) 如果有高质量PRM模型，用Beam Search (width=4-8) + PRM评估替代Self-Consistency，通常可进一步提升2-5%的准确率。(3) 对于极难的推理任务（竞赛数学），考虑MCTS + PRM的组合，但计算开销较大（N倍推理成本）。(4) 如果没有额外资源训练PRM，可以用Monte Carlo估计自动化PRM：从每一步开始随机采样多条路径，用最终答案的正确率估计该步骤的质量。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+PRM与ORM的<strong>核心区别</strong>在于奖励信号的粒度——这直接影响搜索策略的效率。<strong>推导</strong>：设推理链长度为L，每步出错概率为p，则最终答案正确的概率为(1-p)^L。当L=10, p=0.1时，正确率仅35%。ORM只能告诉搜索"整条路径错了"，无法精确定位错误步骤。PRM则可以在第i步就检测到错误（评分骤降），允许搜索在第i步就"剪枝"并回溯到第i-1步尝试其他方向。<strong>数学本质</strong>上，PRM将搜索空间从O(k^L)（k为每步候选数，L为步数）降低到O(k^d)（d为有效搜索深度，通常d≪L），这就是为什么PRM指导的搜索效率远高于盲搜索。OpenAI的"Let's Verify Step by Step"论文证明，PRM+Beam Search在MATH数据集上的准确率比ORM+Best-of-N高约10个百分点。
+</div>
+
+
+
+
+<div class="deep"><strong>深入探讨：</strong>
+从<strong>推理增强的理论框架</strong>看，PRM与搜索策略的核心挑战在于"评估能力"与"探索能力"的协同优化。PRM的评估质量直接决定了搜索的上限——如果PRM评分不准确，搜索会被误导到错误的方向。<strong>推导</strong>：设PRM的评估准确率为a，搜索的覆盖率为c（正确路径被搜索到的概率），则最终准确率 ≈ a × c + (1-a) × (1-c) × random。当a很高时，增加搜索量（提高c）收益显著；当a很低时，增加搜索量可能适得其反——错误的评估会把搜索导向错误方向。<strong>数学本质</strong>上，这解释了为什么DeepSeek-R1选择用GRPO（Group Relative Policy Optimization）直接优化推理路径，而不是依赖显式PRM——通过RL训练让模型"内化"评估能力，避免了PRM训练的额外成本和误差传播。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习PRM与搜索策略时，很多人只理解概念而不实际测量搜索策略的效果。建议做以下实验：(1) 在GSM8K数据集上对比Greedy、Best-of-N (N=8)、Self-Consistency (N=8)和Beam Search (width=4)的准确率和计算成本，绘制准确率-成本的帕累托曲线；(2) 用开源PRM模型（如OpenAssistant的reward model）对数学推理步骤评分，分析PRM评分与最终答案正确率的相关性；(3) 实现一个简单的Beam Search解码器，对比不同beam width（1/2/4/8）的效果；(4) 模拟MCTS的四步循环（选择、扩展、模拟、回传），理解UCB公式如何平衡探索与利用。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为PRM和搜索策略只是"多采样几次选最好的"这么简单。不理解ORM和PRM的粒度差异就无法选择合适的奖励模型；不理解Beam Search的贪心特性就无法理解它为什么会错过全局最优路径；不理解MCTS的UCB公式就无法调优探索与利用的平衡。这些基础概念是正确选择搜索策略、设计PRM训练方案和理解DeepSeek-R1等推理模型训练方法的前提。特别是GRPO方法——它通过策略梯度直接优化推理路径，将搜索能力"内化"到模型参数中，代表了推理增强的最新范式。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+ORM vs PRM与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

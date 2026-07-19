@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02-torch-compile工作流 | 编译优化</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #58a6ff; text-decoration: none; }
+.nav span { color: #8b949e; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+h1 { color: #58a6ff; font-size: 2em; margin: 24px 0 16px; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 12px; margin: 32px 0 16px; font-size: 1.5em; }
+h3 { color: #d2a8ff; margin: 24px 0 12px; font-size: 1.2em; }
+h4 { color: #79c0ff; margin: 16px 0 8px; }
+p { margin: 8px 0; }
+code { background: #21262d; color: #79c0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; margin: 12px 0; font-size: 0.85em; line-height: 1.5; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th { background: #21262d; color: #f0f6fc; padding: 10px 14px; text-align: left; border: 1px solid #30363d; font-weight: 600; }
+td { padding: 8px 14px; border: 1px solid #30363d; }
+tr:nth-child(even) { background: #161b22; }
+.tip { background: #0d1d30; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.exercise { background: #0d2818; border-left: 4px solid #238636; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.svg-diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; text-align: center; }
+.svg-diagram svg { max-width: 100%; height: auto; }
+.ascii { background: #161b22; border: 1px solid #30363d; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82em; line-height: 1.5; padding: 16px; overflow-x: auto; margin: 16px 0; white-space: pre; border-radius: 6px; }
+ul, ol { margin: 8px 0 8px 24px; }
+li { margin: 4px 0; }
+a { color: #58a6ff; }
+.keyword { color: #ff7b72; } .string { color: #a5d6ff; } .comment { color: #8b949e; } .cmd { color: #79c0ff; }
+.footer { text-align: center; color: #484f58; margin-top: 48px; padding: 24px 0; border-top: 1px solid #21262d; font-size: 0.9em; }
+.footer a { color: #58a6ff; }
+.next-prev { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 16px; border-top: 1px solid #21262d; }
+.next-prev a { padding: 8px 16px; background: #21262d; border-radius: 6px; }
+.tag { display: inline-block; background: #388bfd22; color: #58a6ff; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+.badge-blue { background: #1f6feb33; color: #58a6ff; }
+.badge-green { background: #23863633; color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="01-编译优化总览.html">&larr; 01-编译优化总览</a><span>编译优化栈</span><a href="03-算子融合策略.html">03-算子融合策略 &rarr;</a></div>
+<div class="container">
+
+<h1>🔧 torch.compile 工作流</h1>
+
+<h2>1. 背景与动机</h2>
+<p>PyTorch 2.0 引入了 <code>torch.compile</code>，这是 PyTorch 历史上最大的架构变革之一。它的目标是：<strong>在不改变用户代码的前提下，通过编译优化获得显著的性能提升</strong>。</p>
+
+<div class="tip">
+<strong>通俗类比（自动变速箱）</strong>：<code>torch.compile</code> 就像汽车的自动变速箱——你只需要踩油门（写 Python 代码），变速箱（编译器）自动帮你选择最佳档位（优化策略）。手动变速箱（手写 CUDA kernel）虽然理论上可以更高效，但需要高超的驾驶技术；自动变速箱让普通司机（Python 开发者）也能获得接近专业赛车手的性能。Dynamo 是"换挡逻辑"（分析路况），Inductor 是"齿轮组"（执行优化）。
+</div>
+
+<div class="tip">
+<strong>一句话理解</strong>：<code>torch.compile</code> = <code>TorchDynamo</code>（图捕获）+ <code>TorchInductor</code>（代码生成）。Dynamo 负责把 Python 代码转成计算图，Inductor 负责把计算图编译成高效的 GPU kernel。
+</div>
+
+<h2>2. 编译流程全景</h2>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 520 520" xmlns="http://www.w3.org/2000/svg" style="font-family:'Cascadia Code','Fira Code',monospace;">
+  <defs>
+    <marker id="arrow1" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0,10 3.5,0 7" fill="#8b949e"/></marker>
+    <filter id="glow1"><feGaussianBlur stdDeviation="2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <!-- Python Code label -->
+  <text x="260" y="28" text-anchor="middle" fill="#c9d1d9" font-size="13" font-weight="600">Python 代码 (eager mode)</text>
+  <line x1="260" y1="38" x2="260" y2="62" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow1)"/>
+
+  <!-- TorchDynamo Box -->
+  <rect x="40" y="65" width="440" height="155" rx="10" fill="#0d1117" stroke="#22d3ee" stroke-width="2" filter="url(#glow1)"/>
+  <text x="260" y="88" text-anchor="middle" fill="#22d3ee" font-size="14" font-weight="700">TorchDynamo (图捕获)</text>
+  <!-- Inner box -->
+  <rect x="65" y="100" width="390" height="105" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="1" stroke-opacity="0.4"/>
+  <text x="80" y="122" fill="#c9d1d9" font-size="11.5">1. 字节码分析 (Bytecode Analysis)</text>
+  <text x="80" y="144" fill="#c9d1d9" font-size="11.5">2. 符号追踪 (Symbolic Trace)</text>
+  <text x="80" y="166" fill="#c9d1d9" font-size="11.5">3. 生成 FX Graph (<tspan fill="#79c0ff">torch.fx.Graph</tspan>)</text>
+  <text x="80" y="188" fill="#c9d1d9" font-size="11.5">4. Guards 检查 (shape / dtype / device)</text>
+
+  <!-- Arrow down with label -->
+  <line x1="260" y1="220" x2="260" y2="260" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow1)"/>
+  <text x="275" y="244" fill="#8b949e" font-size="11">FX Graph</text>
+
+  <!-- TorchInductor Box -->
+  <rect x="40" y="265" width="440" height="155" rx="10" fill="#0d1117" stroke="#22d3ee" stroke-width="2" filter="url(#glow1)"/>
+  <text x="260" y="288" text-anchor="middle" fill="#22d3ee" font-size="14" font-weight="700">TorchInductor (后端编译器)</text>
+  <!-- Inner box -->
+  <rect x="65" y="300" width="390" height="105" rx="6" fill="#161b22" stroke="#22d3ee" stroke-width="1" stroke-opacity="0.4"/>
+  <text x="80" y="322" fill="#c9d1d9" font-size="11.5">1. 图优化 (常量折叠、死代码消除)</text>
+  <text x="80" y="344" fill="#c9d1d9" font-size="11.5">2. 算子融合 (Pattern Matching)</text>
+  <text x="80" y="366" fill="#c9d1d9" font-size="11.5">3. Triton 代码生成 (<tspan fill="#22d3ee">GPU</tspan>) / C++ (<tspan fill="#34d399">CPU</tspan>)</text>
+  <text x="80" y="388" fill="#c9d1d9" font-size="11.5">4. 编译为 cubin / .so</text>
+
+  <!-- Arrow down with label -->
+  <line x1="260" y1="420" x2="260" y2="460" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrow1)"/>
+  <text x="275" y="444" fill="#8b949e" font-size="11">优化后的 kernel</text>
+
+  <!-- GPU Exec -->
+  <rect x="140" y="468" width="240" height="38" rx="8" fill="#0d1117" stroke="#22d3ee" stroke-width="2" filter="url(#glow1)"/>
+  <text x="260" y="493" text-anchor="middle" fill="#22d3ee" font-size="14" font-weight="700">GPU 执行 (2-3x 加速)</text>
+</svg>
+</div>
+
+<h3>2.1 编译 vs 执行的时序</h3>
+
+<div class="ascii">torch.compile 执行时序（自动变速箱的换挡过程）:
+
+  首次推理 (Warmup - "磨合期")
+  ─────────────────────────────────────────────
+  │ Python 代码 │→│ Dynamo 分析 │→│ Inductor 编译 │→│ 第一次执行 │
+  │             │  │ (字节码)    │  │ (生成 Triton) │  │ (较慢)     │
+  ─────────────────────────────────────────────
+  时间: ~30s-5min (取决于模型大小)
+
+  后续推理 (稳态 - "高速巡航")
+  ─────────────────────────────────────────────
+  │ Guards 检查 │→│ 缓存命中?   │→│ 直接执行编译好的 kernel │
+  │ (微秒级)    │  │ YES → 跳过  │  │ (2-3x 快于 eager)      │
+  ─────────────────────────────────────────────
+  时间: 正常推理速度
+
+  缓存未命中 (形状变化 - "换挡")
+  ─────────────────────────────────────────────
+  │ Guards 检查 │→│ 缓存未命中? │→│ 重新编译 │→│ 执行 │
+  │ (微秒级)    │  │ shape 变了  │  │ (较慢)   │  │      │
+  ─────────────────────────────────────────────</div>
+
+<h3>2.2 编译模式选择指南</h3>
+<table>
+<tr><th>场景</th><th>推荐模式</th><th>原因</th></tr>
+<tr><td>开发调试</td><td>Default</td><td>编译快，错误信息清晰</td></tr>
+<tr><td>小 batch 推理</td><td>reduce-overhead</td><td>CUDA Graphs 减少 launch overhead</td></tr>
+<tr><td>生产部署</td><td>max-autotune</td><td>自动调优找到最优 kernel</td></tr>
+<tr><td>动态 shape</td><td>max-autotune-no-cudagraphs</td><td>CUDA Graphs 不支持动态 shape</td></tr>
+</table>
+
+<h2>3. TorchDynamo 详解</h2>
+
+<h3>3.1 字节码分析</h3>
+<p>Dynamo 拦截 Python 字节码（bytecode），而不是源代码。这意味着它能处理动态 Python 特性（如条件分支、循环、闭包）。</p>
+
+<pre><code><span class="comment"># 用户代码</span>
+<span class="keyword">def</span> forward(x, weight):
+    <span class="keyword">return</span> torch.relu(x @ weight)
+
+<span class="comment"># Dynamo 拦截的字节码</span>
+LOAD_FAST    x
+LOAD_FAST    weight
+BINARY_MATMUL
+CALL_BUILTIN torch.relu
+RETURN_VALUE
+</code></pre>
+
+<h3>3.2 Graph Break</h3>
+<p>当 Dynamo 遇到无法追踪的 Python 操作时，会产生 <strong>graph break</strong>——将计算图分割为多个子图。每个子图独立编译。</p>
+
+<table>
+<tr><th>触发 Graph Break 的情况</th><th>原因</th><th>解决方法</th></tr>
+<tr><td><code>print()</code></td><td>副作用操作</td><td>移除或用 <code>torch._dynamo.config.suppress_errors</code></td></tr>
+<tr><td>数据依赖的控制流</td><td>运行时才知道分支</td><td>用 <code>torch.cond</code> 替代</td></tr>
+<tr><td>不支持的第三方库</td><td>Dynamo 没有该库的追踪器</td><td>用 <code>torch._dynamo.allow_in_graph</code> 标记</td></tr>
+<tr><td>张量 → Python 标量转换</td><td><code>.item()</code> 需要 GPU→CPU 同步</td><td>用 <code>torch._dynamo.config.capture_scalar_outputs</code></td></tr>
+</table>
+
+<div class="warn">
+<strong>注意</strong>：每个 graph break 都会导致一次额外的 kernel launch 和可能的 GPU→CPU 同步。在 LLM 推理中，graph break 是性能杀手。就像自动变速箱在高速行驶中突然降档——每次 graph break 都会让 GPU"顿挫"一下。
+</div>
+
+<h3>3.3 Guards 系统</h3>
+<p>Dynamo 编译一次后，会生成一组 <strong>guards</strong>（守卫条件）。后续调用时，如果 guards 全部满足，就直接复用编译好的代码：</p>
+
+<pre><code><span class="comment"># Guards 示例</span>
+Guard(
+    type=TensorGuard,
+    checks=[
+        <span class="string">"dtype == torch.float16"</span>,
+        <span class="string">"device == cuda:0"</span>,
+        <span class="string">"ndim == 2"</span>,
+        <span class="string">"shape[0] == 1"</span>,       <span class="comment"># batch size 固定</span>
+        <span class="string">"requires_grad == False"</span>
+    ]
+)
+</code></pre>
+
+<div class="deep">
+<strong>为什么需要 guards</strong>：Python 是动态语言，同一个函数可能用不同类型的参数调用。Guards 确保编译结果只在合法时复用。例如，一个用 FP16 编译的 kernel 不能用于 FP32 输入。类比自动变速箱：guards 就像"路况检测"——只有在相同的路况（输入类型、形状）下，才能使用同一套换挡策略。
+</div>
+
+<h2>4. TorchInductor 详解</h2>
+
+<h3>4.1 图优化 Pass</h3>
+<p>Inductor 接收 FX Graph 后，执行一系列优化 pass：</p>
+<ul>
+<li><strong>常量折叠</strong>：编译时计算已知常量的结果</li>
+<li><strong>死代码消除</strong>：移除不影响输出的计算</li>
+<li><strong>算子融合</strong>：Pattern matching 识别可融合的操作组合</li>
+<li><strong>内存规划</strong>：分析张量生命周期，复用内存缓冲区</li>
+</ul>
+
+<h3>4.2 Triton 代码生成</h3>
+<p>Inductor 将融合后的子图翻译为 Triton kernel 代码：</p>
+
+<pre><code><span class="comment"># Inductor 生成的 Triton 代码（简化示例）</span>
+<span class="keyword">import</span> triton
+<span class="keyword">import</span> triton.language <span class="keyword">as</span> tl
+
+<span class="keyword">@triton.jit</span>
+<span class="keyword">def</span> fused_layernorm_gelu(
+    in_ptr, weight_ptr, bias_ptr, out_ptr,
+    XBLOCK: tl.constexpr
+):
+    <span class="comment"># 加载输入</span>
+    x = tl.load(in_ptr + offsets)
+    w = tl.load(weight_ptr + offsets)
+    b = tl.load(bias_ptr + offsets)
+    
+    <span class="comment"># LayerNorm (融合)</span>
+    mean = tl.mean(x, axis=1)
+    var = tl.var(x, axis=1)
+    x_norm = (x - mean) / tl.sqrt(var + 1e-5)
+    x_scaled = x_norm * w + b
+    
+    <span class="comment"># GELU (融合)</span>
+    result = x_scaled * 0.5 * (1.0 + tl.erf(x_scaled / 1.4142135623730951))
+    
+    <span class="comment"># 写回（只写一次 HBM）</span>
+    tl.store(out_ptr + offsets, result)
+</code></pre>
+
+<h3>4.3 编译模式</h3>
+<table>
+<tr><th>模式</th><th>命令</th><th>特点</th><th>适用场景</th></tr>
+<tr><td>Default</td><td><code>torch.compile(model)</code></td><td>基本融合，编译快</td><td>开发调试</td></tr>
+<tr><td>Reduce Overhead</td><td><code>torch.compile(model, mode="reduce-overhead")</code></td><td>启用 CUDA Graphs</td><td>小 batch 推理</td></tr>
+<tr><td>Max Autotune</td><td><code>torch.compile(model, mode="max-autotune")</code></td><td>自动调优 + CUDA Graphs</td><td>生产部署</td></tr>
+<tr><td>Max Autotune No CUDA Graphs</td><td><code>mode="max-autotune-no-cudagraphs"</code></td><td>自动调优但不用 CUDA Graphs</td><td>动态 shape 场景</td></tr>
+</table>
+
+<div class="ascii">编译优化层次（从手动到自动）:
+
+  手动优化 (手动挡赛车)
+  ┌─────────────────────────────────────────────────┐
+  │  手写 CUDA kernel                                │
+  │  • 最高性能，但开发成本极高                       │
+  │  • 需要精通 GPU 架构和内存层次                    │
+  │  • 代表: FlashAttention, FlashInfer              │
+  └─────────────────────┬───────────────────────────┘
+                        │
+  半自动优化 (手自一体)  │
+  ┌─────────────────────▼───────────────────────────┐
+  │  torch.compile + 手动 graph break 优化           │
+  │  • 中等性能，需要理解编译器行为                    │
+  │  • 关键 kernel 仍可手动实现                      │
+  │  • 代表: vLLM v1 的混合编译策略                   │
+  └─────────────────────┬───────────────────────────┘
+                        │
+  全自动优化 (全自动挡)  │
+  ┌─────────────────────▼───────────────────────────┐
+  │  torch.compile(mode="max-autotune")              │
+  │  • 接近手动优化的性能，零额外开发成本             │
+  │  • Inductor 自动选择最优 kernel 配置              │
+  │  • 代表: SGLang 的默认编译策略                    │
+  └─────────────────────────────────────────────────┘</div>
+
+<h2>5. torch.compile 在 LLM 推理中的应用</h2>
+
+<h3>5.1 Prefill vs Decode 的编译策略</h3>
+<p>LLM 推理的两个阶段对编译有不同需求：</p>
+
+<table>
+<tr><th>阶段</th><th>特点</th><th>编译策略</th></tr>
+<tr><td>Prefill</td><td>长序列、大矩阵乘法、compute-bound</td><td>标准 torch.compile，融合 Attention + FFN</td></tr>
+<tr><td>Decode</td><td>逐 token 生成、小 batch、memory-bound</td><td>CUDA Graphs + kernel 融合，减少 launch overhead</td></tr>
+</table>
+
+<h3>5.2 Dynamic Shape 处理</h3>
+<p>LLM 推理中序列长度不断变化，需要 <strong>dynamic shape</strong> 支持：</p>
+<pre><code><span class="comment"># 标记动态维度</span>
+torch._dynamo.mark_dynamic(input_ids, 1)  <span class="comment"># seq_len 是动态的</span>
+
+<span class="comment"># 或使用 automatic_dynamic_shapes</span>
+torch._dynamo.config.automatic_dynamic_shapes = <span class="keyword">True</span>
+
+<span class="comment"># 预定义动态 shape 范围（推荐，减少重新编译）</span>
+<span class="keyword">from</span> torch._dynamo <span class="keyword">import</span> mark_dynamic
+mark_dynamic(input_ids, 1, min=1, max=4096)  <span class="comment"># seq_len: 1~4096</span>
+</code></pre>
+
+<h3>5.3 编译缓存持久化</h3>
+<p>PyTorch 2.6 支持编译缓存的持久化，避免每次启动都重新编译：</p>
+<pre><code><span class="comment"># 启用持久化缓存</span>
+torch._inductor.config.fx_graph_cache = <span class="keyword">True</span>
+
+<span class="comment"># 缓存目录</span>
+<span class="comment"># ~/.cache/torch_inductor_graph/</span>
+
+<span class="comment"># 生产环境建议：将缓存目录挂载到持久化存储</span>
+<span class="comment"># export TORCHINDUCTOR_CACHE_DIR=/data/torch_cache</span>
+</code></pre>
+
+<div class="tip"><strong>实用技巧：</strong>首次编译的"磨合期"是 <code>torch.compile</code> 在生产环境中的主要障碍。解决方法：(1) 使用持久化缓存避免重复编译；(2) 在 CI/CD 中预热编译；(3) 使用 <code>torch._inductor.config.compile_threads</code> 控制编译并行度。就像新车需要磨合期一样，编译后的模型在稳态下才能发挥最佳性能。</div>
+
+<h2>6. vLLM 中的 torch.compile</h2>
+
+<h3>6.1 vLLM v1 的编译集成</h3>
+<p>vLLM v1 架构深度集成了 torch.compile：</p>
+<ul>
+<li><strong>自动编译</strong>：模型的 forward pass 自动被 <code>torch.compile</code> 包装</li>
+<li><strong>CUDA Graph 池</strong>：为不同 batch size 预录制 CUDA Graph</li>
+<li><strong>编译缓存</strong>：首次启动编译，后续启动从缓存加载</li>
+</ul>
+
+<h3>6.2 vLLM 编译配置实践</h3>
+<pre><code><span class="comment"># vLLM 中控制编译行为</span>
+<span class="comment"># 禁用编译（调试用）</span>
+<span class="comment"># vllm serve meta-llama/Llama-3-8B --enforce-eager</span>
+
+<span class="comment"># 使用 max-autotune 模式（生产推荐）</span>
+<span class="comment"># VLLM_COMPILE_MODE=max-autotune vllm serve meta-llama/Llama-3-8B</span>
+
+<span class="comment"># 控制 CUDA Graph 的 batch size 范围</span>
+<span class="comment"># VLLM_CUDA_GRAPH_BATCHES=1,2,4,8,16,32,64,128</span>
+</code></pre>
+
+<h2>7. SGLang 中的 torch.compile</h2>
+
+<h3>7.1 SGLang 的编译优化策略</h3>
+<p>SGLang 是目前最广泛使用的 LLM 推理框架（40 万+ GPU 部署），它对 torch.compile 的集成包括：</p>
+<ul>
+<li><strong>TorchCompile 后端</strong>：Dynamo + Inductor 的端到端集成</li>
+<li><strong>编译时间线</strong>：SGLang 提供编译时间的 profiling 工具</li>
+<li><strong>70B 模型单卡推理</strong>：通过编译优化，70B 模型可以在单张 H100 上实现 2.5x 加速</li>
+</ul>
+
+<h3>7.2 SGLang vs vLLM 编译策略对比</h3>
+<table>
+<tr><th>特性</th><th>vLLM v1</th><th>SGLang</th></tr>
+<tr><td>默认编译模式</td><td>Default (基本融合)</td><td>max-autotune (深度调优)</td></tr>
+<tr><td>CUDA Graphs</td><td>按需录制</td><td>预编译 + 池化</td></tr>
+<tr><td>动态 shape</td><td>支持，但可能重新编译</td><td>预定义范围，减少重编译</td></tr>
+<tr><td>编译缓存</td><td>支持持久化</td><td>支持持久化</td></tr>
+<tr><td>适用场景</td><td>通用推理服务</td><td>高吞吐批量推理</td></tr>
+</table>
+
+
+<div class="ascii">
+背景与动机 性能瓶颈分析（屋顶模型）
+                    
+  计算吞吐  │
+  (TFLOPS)  │         ╱ 计算受限区
+            │       ╱
+            │     ╱   ← 实际工作点
+            │   ╱
+            │ ╱ 带宽受限区
+            │╱
+            └──────────────────── 带宽利用率
+             0%              100%
+             
+  关键指标:
+  · 算术强度 = FLOPS / Bytes (FLOPs/Byte)
+  · 转折点 = 峰值计算 / 峰值带宽
+  · H100: 转折点 ≈ 625 FLOPs/Byte
+  · 实际工作点越靠近右上角，效率越高
+</div>
+
+<div class="deep"><strong>原理与推导：</strong>
+从<strong>原理</strong>层面理解，该技术的<strong>工作机制</strong>基于信息论的基本定理。
+设信源熵为 H(X) = -Σ p(x)log p(x)，<strong>为什么</strong>这很重要？
+因为信息熵给出了无损压缩的理论下界——这也解释了<strong>为什么</strong>量化不可避免地
+会带来信息损失。<strong>推导</strong>量化误差的上界：对于均匀量化，
+E[|x-q(x)|²] ≤ Δ²/12，其中Δ为量化步长。
+这一<strong>公式</strong>揭示了精度与效率之间的<strong>数学本质</strong>关系：
+步长越小（精度越高），误差越小，但需要的比特数越多。
+从<strong>底层</strong>实现来看，现代加速器的Tensor Core正是利用这一原理，
+通过混合精度计算在保持精度的同时最大化吞吐量。
+</div>
+<div class="deep"><strong>系统级原理分析：</strong>
+从系统设计的<strong>底层</strong>逻辑来看，<strong>为什么</strong>分层架构是主流选择？
+<strong>推导</strong>如下：假设系统有 N 个组件，全连接的交互复杂度为 O(N²)，
+而分层架构将其降低到 O(N·L)，其中 L 为层数。
+这一<strong>数学本质</strong>上的简化使得系统可扩展性大幅提升。
+
+在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过抽象接口解耦。
+这类似于TCP/IP网络协议栈的分层设计<strong>原理</strong>——每层独立优化，
+只要接口不变，层内改动不影响整体。从<strong>公式</strong>角度看，
+模块间的耦合度 C = |接口依赖| / |总依赖|，
+低耦合意味着 C → 0，这正是高内聚低耦合的<strong>数学本质</strong>。
+</div>
+
+<div class="warn"><strong>常见误区：</strong>
+很多工程师在优化推理性能时，只关注单指标（如延迟）而忽略系统整体。
+<strong>为什么</strong>这是误区？因为优化延迟可能以牺牲吞吐为代价，
+而优化吞吐可能增加尾延迟。理解这些权衡的<strong>底层原理</strong>，
+才能做出合理的工程决策。建议始终用延迟-吞吐曲线（而非单一指标）来评估优化效果。
+</div>
+
+<div class="exercise">
+<strong>练习 1</strong>：使用 <code>torch.compile</code> 编译一个简单的 Transformer 模型，对比 default 和 reduce-overhead 模式的推理延迟。使用 <code>torch.profiler</code> 观察 kernel 融合效果。<br><br>
+<strong>练习 2</strong>：在 vLLM 中启用 <code>--enforce-eager</code>（禁用编译优化）和默认模式，对比 QPS 和延迟差异。<br><br>
+<strong>练习 3</strong>：尝试在模型代码中引入 graph break（如 <code>print()</code> 或 <code>.item()</code>），观察编译后的性能变化，理解 graph break 的性能影响。
+</div>
+
+<div class="callout" style="background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0;">
+<strong>💡 思考题：</strong>
+<ol>
+<li>为什么 <code>torch.compile</code> 选择在字节码层面而不是源代码层面进行图捕获？这种设计有什么优势和局限？</li>
+<li>CUDA Graphs 为什么不能处理动态 shape？如果 batch size 从 1 变到 2，CUDA Graph 需要重新录制的根本原因是什么？</li>
+<li>在 LLM 推理中，Prefill 阶段和 Decode 阶段哪个更适合 <code>torch.compile</code>？为什么？（提示：结合 <a href="../推理框架/01-核心概念/02-自回归解码.html">自回归解码</a> 的特点分析）</li>
+<li>如果 <code>torch.compile</code> 的编译时间从 30 秒减少到 3 秒，对推理服务的部署流程会有什么影响？（提示：结合 <a href="../推理框架/09-部署实战/01-环境搭建.html">容器化部署</a> 和冷启动时间）</li>
+</ol>
+</div>
+
+<div class="tip"><strong>向前串联：</strong><code>torch.compile</code> 的核心优化手段是算子融合，下一节 <a href="03-算子融合策略.html">03-算子融合策略</a> 将深入讲解 Inductor 如何识别和执行融合模式。编译优化的效果最终要通过 <a href="../推理框架/01-核心概念/06-性能指标.html">性能指标</a> 来量化评估。对于更底层的优化，可以参考 <a href="04-CUDA-Graphs.html">TensorRT-LLM</a> 的编译策略。</div>
+
+<h2>术语速查表</h2>
+<table>
+<tr><th>术语</th><th>含义</th><th>类比（自动变速箱）</th></tr>
+<tr><td>TorchDynamo</td><td>PyTorch 的图捕获组件，通过字节码分析生成 FX Graph</td><td>换挡逻辑控制器</td></tr>
+<tr><td>TorchInductor</td><td>PyTorch 的后端编译器，生成 Triton/C++ 代码</td><td>齿轮组（执行机构）</td></tr>
+<tr><td>FX Graph</td><td>torch.fx.Graph，PyTorch 的计算图表示</td><td>行驶路线图</td></tr>
+<tr><td>Graph Break</td><td>无法追踪的操作导致计算图分割</td><td>突然降档/顿挫</td></tr>
+<tr><td>Guards</td><td>编译结果的复用条件（shape/dtype/device 检查）</td><td>路况检测传感器</td></tr>
+<tr><td>Warmup</td><td>首次推理触发编译，不计入性能统计</td><td>新车磨合期</td></tr>
+<tr><td>Persistent Cache</td><td>编译结果的磁盘缓存，避免重复编译</td><td>记忆驾驶习惯</td></tr>
+</table>
+
+</div>
+<div class="footer"><p><a href="index.html">返回编译优化总览</a> | <a href="../index.html">返回学习目录</a></p></div>
+<p><strong>学习路径：</strong>学习背景与动机需要前置知识：Transformer注意力机制、GPU内存管理基础。掌握后可继续深入推理框架实战和性能调优。</p>
+</body>
+</html>

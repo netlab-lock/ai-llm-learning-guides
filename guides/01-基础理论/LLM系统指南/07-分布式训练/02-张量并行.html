@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02-张量并行 | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.deep{background:rgba(188,140,255,0.08);border-left:4px solid var(--purple)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}
+.highlight{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin:16px 0;font-size:0.92em}</style>
+</head>
+<body>
+<div class="nav"><a href="01-数据并行与FSDP.html">&larr; 01-数据并行与FSDP</a><span>07-分布式 / 张量并行</span><a href="03-流水线并行.html">03-流水线并行 &rarr;</a></div>
+<div class="container">
+
+<h1>🔲 2. 张量并行 (Tensor Parallelism)</h1>
+
+<h2>2.1 核心思想与数学原理</h2>
+<p>张量并行（Tensor Parallelism, TP）是将单个矩阵运算切分到多张GPU上并行执行的策略。与数据并行不同，张量并行切分的是模型本身——具体来说，是模型中的大型权重矩阵。这种并行方式的核心动机是：当模型的单层参数量太大，无法放进单张GPU的显存时，必须将该层的计算分摊到多张GPU上。</p>
+
+<div class="box tip"><div class="label">💡 通俗类比</div>张量并行就像把一块超大的蛋糕切成几份，每个厨师负责做其中一份。关键问题是：每份蛋糕的原料（输入数据）是相同的，但各自处理不同的部分。做完后需要把结果拼起来（AllReduce）。因为每步都需要拼接，厨师之间必须坐得很近（NVLink），否则传递太慢。</div>
+
+<p>张量并行的数学基础是矩阵分块乘法。设一个线性层的计算为 Y = XW，其中 X 是输入矩阵（形状 [b, d]），W 是权重矩阵（形状 [d, n]）。如果我们将 W 按列分成两块 W = [W1, W2]，则：</p>
+
+<div class="formula">
+Y = X · [W1, W2] = [X·W1, X·W2] = [Y1, Y2]
+</div>
+
+<p>这意味着每张GPU可以独立计算 Y1 和 Y2，最后将结果拼接起来。这种按列切分的方式不需要任何通信（除了最后的拼接），因为输入 X 在所有GPU上是相同的。但是，当下一层需要完整的 Y 作为输入时，就需要一次 AllReduce 操作来聚合结果。</p>
+
+<div class="ascii">FFN 层的张量并行 (Megatron-LM 风格):
+
+原始计算: Y = GeLU(X · W1) · W2
+         其中 W1: [d, 4d], W2: [4d, d]
+
+┌─────────────────────────────────────────────────────────────┐
+│ GPU 0 (前半):                                               │
+│   A1 = X · W1[:, :2d]        ← 列切分 W1 的左半             │
+│   B1 = GeLU(A1)              ← 激活函数                     │
+│   Y0 = B1 · W2[:2d, :]       ← 行切分 W2 的上半             │
+│                                                             │
+│ GPU 1 (后半):                                               │
+│   A2 = X · W1[:, 2d:]        ← 列切分 W1 的右半             │
+│   B2 = GeLU(A2)              ← 激活函数                     │
+│   Y1 = B2 · W2[2d:, :]       ← 行切分 W2 的下半             │
+│                                                             │
+│ 结果: Y = Y0 + Y1             ← AllReduce (求和)            │
+│                                                             │
+│ 通信量: 每层 2 × AllReduce (前向), 2 × AllReduce (反向)     │
+│ 显存: 每卡只存一半权重                                       │
+└─────────────────────────────────────────────────────────────┘
+
+关键: W1 按列切分, W2 按行切分, 这样只需 1 次 AllReduce
+      而非 2 次 (GeLU 前后各一次)</div>
+
+<h2>2.2 注意力层的张量并行</h2>
+<p>Multi-Head Attention（MHA）天然适合张量并行，因为每个注意力头可以独立计算。在标准的 Transformer 架构中，注意力层包含四个权重矩阵：W_Q、W_K、W_V（投影矩阵）和 W_O（输出投影矩阵）。张量并行的切分策略如下：</p>
+
+<ul>
+<li><strong>W_Q、W_K、W_V</strong>：按列切分。每张 GPU 持有部分注意力头的投影权重。例如，对于 32 头注意力，2 张 GPU 各持有 16 个头的 Q、K、V 投影。</li>
+<li><strong>W_O</strong>：按行切分。每张 GPU 持有 W_O 的部分行，与各自的注意力输出相乘后，通过 AllReduce 聚合得到最终输出。</li>
+</ul>
+
+<div class="box tip"><div class="label">💡 关键洞察</div>Multi-Head Attention 天然适合张量并行——每个头可以独立计算，这和数学上的分块矩阵乘法完全一致。Q、K、V 的投影矩阵可以按列切分（每卡处理部分列），而输出投影 W_O 需要按行切分。这种"列切+行切"的交替模式保证了每层只需要一次 AllReduce，而不是三次。Megatron-LM 的论文详细描述了这个优化。</div>
+
+<pre><code><span class="comment"># Multi-Head Attention 张量并行示例</span>
+<span class="comment"># 假设: 64个头, TP=2, 每卡32个头</span>
+
+<span class="comment"># GPU 0:</span>
+Q0 = X @ W_Q[:, :d_head*32]     <span class="comment"># 32个头的Q</span>
+K0 = X @ W_K[:, :d_head*32]     <span class="comment"># 32个头的K</span>
+V0 = X @ W_V[:, :d_head*32]     <span class="comment"># 32个头的V</span>
+Attn0 = softmax(Q0 @ K0.T / √d) @ V0  <span class="comment"># 32个头独立计算</span>
+Y0 = Attn0 @ W_O[:d_head*32, :] <span class="comment"># 行切分 W_O</span>
+
+<span class="comment"># GPU 1:</span>
+Q1 = X @ W_Q[:, d_head*32:]
+K1 = X @ W_K[:, d_head*32:]
+V1 = X @ W_V[:, d_head*32:]
+Attn1 = softmax(Q1 @ K1.T / √d) @ V1
+Y1 = Attn1 @ W_O[d_head*32:, :]
+
+<span class="comment"># 结果: Y = AllReduce(Y0 + Y1)</span>
+<span class="comment"># 每层仅 1 次 AllReduce (前向), 1 次 AllReduce (反向)</span></code></pre>
+
+<h3>Flash Attention 与张量并行的配合</h3>
+<p>Flash Attention 是一种内存高效的注意力计算算法，通过分块（tiling）技术避免存储完整的注意力矩阵。在张量并行场景下，Flash Attention 的分块策略与 TP 的头切分完美配合：每个GPU只需要计算自己负责的那些头的注意力，使用 Flash Attention 的分块算法在 SRAM 中完成 softmax 和矩阵乘法，无需额外的通信。这意味着 Flash Attention 和张量并行是正交的优化——两者可以同时使用，效果叠加。</p>
+
+<div class="box deep"><div class="label">🔬 深入探讨</div>
+<h3>列切分与行切分的数学证明</h3>
+<p>为什么 FFN 层需要"列切+行切"的交替模式？这是一个精妙的数学优化。考虑两层连续的线性变换：</p>
+<p>Y = f(X · W1) · W2</p>
+<p>如果 W1 按列切分：X · [W1a, W1b] = [X·W1a, X·W1b]，得到两个分片结果。激活函数 f（如 GeLU）是逐元素操作，可以分别应用。现在关键问题是 W2 如何切分。</p>
+<p>如果 W2 也按列切分：[f(X·W1a), f(X·W1b)] · [W2a, W2b]，结果需要 4 个子矩阵的拼接，通信复杂度增加。但如果 W2 按行切分：[f(X·W1a), f(X·W1b)] · [W2a; W2b] = f(X·W1a)·W2a + f(X·W1b)·W2b，结果是一个简单的求和，只需一次 AllReduce！</p>
+<p>这种"列切-行切"的交替模式确保了每对连续层只需要一次 AllReduce，通信量与 GPU 数量无关。Megatron-LM 论文中的定理证明了这是最优的切分策略。</p>
+</div>
+
+<h2>2.3 通信需求与硬件约束</h2>
+<p>张量并行的通信模式与数据并行截然不同。TP 需要每层 2 次 AllReduce（FFN + Attention 各一次），通信量大但每步的通信量较小（只传输激活值，不传输梯度）。这使得 TP 对通信带宽极其敏感——任何带宽不足都会直接导致GPU空闲等待。</p>
+
+<div class="box warn"><div class="label">⚠️ 常见误区</div>张量并行不是"越多卡越快"。通信量随 GPU 数线性增长，而计算量只是被分摊。当 GPU 数量超过单机 NVLink 互联的上限（通常 8 卡），跨机器的网络带宽（InfiniBand ~50 GB/s vs NVLink ~600 GB/s）会成为严重瓶颈。因此张量并行通常限制在单机 8 卡以内，跨机器用流水线并行。</div>
+
+<div class="ascii">张量并行的通信模式 (每层前向传播):
+
+┌────────────────────────────────────────────────────────┐
+│  时间轴 →                                              │
+│                                                        │
+│  GPU 0: [计算 Q0K0V0] → [AllReduce] → [计算 Attn0]    │
+│                                    → [计算 Y0]        │
+│                                         ↕              │
+│                                      AllReduce         │
+│                                         ↕              │
+│  GPU 1: [计算 Q1K1V1] → [AllReduce] → [计算 Attn1]    │
+│                                    → [计算 Y1]        │
+│                                                        │
+│  FFN 层同理: [计算 GeLU(X·W1)] → AllReduce → 输出     │
+│                                                        │
+│  每层总计: 2 × AllReduce (前向) + 2 × AllReduce (反向)│
+│  通信量: 4 × batch_size × seq_len × hidden_size × 2B  │
+│                                                        │
+│  ⚠ AllReduce 是同步操作, 最慢的 GPU 决定整体速度      │
+└────────────────────────────────────────────────────────┘</div>
+
+<div class="box warn"><div class="label">⚠️ NVLink vs PCIe</div>
+NVLink (A100): 600 GB/s vs PCIe 4.0: 32 GB/s — 快 ~20x<br>
+张量并行必须在 NVLink 互联的 GPU 上做（通常单机 8 卡）<br>
+跨机器做 TP 会导致性能下降 5-10 倍，几乎不可接受。
+</div>
+
+<h3>TP 通信量的精确计算</h3>
+<p>以 LLaMA-7B 为例（hidden_size=4096, seq_len=2048, batch_size=1, TP=2），计算每层前向传播的 AllReduce 通信量：</p>
+
+<table>
+<tr><th>操作</th><th>通信类型</th><th>数据量</th><th>NVLink 耗时</th><th>InfiniBand 耗时</th></tr>
+<tr><td>FFN AllReduce</td><td>AllReduce</td><td>1 × 2048 × 4096 × 2B = 16 MB</td><td>~27 μs</td><td>~320 μs</td></tr>
+<tr><td>Attn AllReduce</td><td>AllReduce</td><td>1 × 2048 × 4096 × 2B = 16 MB</td><td>~27 μs</td><td>~320 μs</td></tr>
+<tr><td>每层前向总计</td><td>2 × AllReduce</td><td>32 MB</td><td>~54 μs</td><td>~640 μs</td></tr>
+<tr><td>32层前向总计</td><td>64 × AllReduce</td><td>1024 MB = 1 GB</td><td>~1.7 ms</td><td>~20 ms</td></tr>
+<tr><td>+ 反向传播</td><td>×2</td><td>2 GB</td><td>~3.4 ms</td><td>~40 ms</td></tr>
+</table>
+
+<p>可以看到，在 NVLink 上 TP 的通信开销几乎可以忽略（~3.4ms vs 计算时间 ~100ms），但在 InfiniBand 上通信时间占比高达 40%。这就是为什么 TP 必须在 NVLink 互联的 GPU 上进行。</p>
+
+<h2>2.4 Megatron-LM 的 TP 实现</h2>
+<p>NVIDIA 的 Megatron-LM 是张量并行的参考实现。Megatron-LM 的 TP 实现包含以下关键优化：</p>
+
+<ul>
+<li><strong>融合内核（Fused Kernel）</strong>：将 GeLU/层归一化与矩阵乘法融合，减少 GPU kernel 启动开销和中间结果的显存读写。</li>
+<li><strong>通信-计算重叠</strong>：在 AllReduce 传输数据的同时，GPU 可以继续计算不依赖于 AllReduce 结果的部分。</li>
+<li><strong>序列并行（Sequence Parallelism）</strong>：将 LayerNorm 和 Dropout 沿序列维度切分，进一步减少显存占用。</li>
+<li><strong>Ring Attention</strong>：对于非常长的序列，将 KV 沿序列维度分布在不同 GPU 上，通过 Ring 通信模式计算注意力。</li>
+</ul>
+
+<div class="box tip"><div class="label">💡 实践建议</div>使用 Megatron-LM 进行张量并行训练时，需要注意以下几点：(1) TP 度必须能整除注意力头数和 FFN 中间层维度；(2) 确保 GPU 之间有 NVLink 互联（通过 nvidia-smi topo -m 检查）；(3) 使用 --sequence-parallel 开启序列并行以节省显存；(4) 对于超过 8 卡的训练，TP 限制在单机内，跨机器使用流水线并行。</div>
+
+<h3>张量并行的扩展：2D 和 2.5D 并行</h3>
+<p>标准的张量并行是一维切分——将权重矩阵沿一个维度分成 N 份。研究者还提出了 2D 和 2.5D 并行方案，将矩阵沿两个维度切分，以减少通信量。</p>
+
+<p><strong>2D 并行</strong>：将权重矩阵按行和列同时切分，组织成 √N × √N 的 GPU 网格。通信量从 O(N) 降低到 O(√N)，但需要更复杂的通信模式（行列交替通信）。</p>
+
+<p><strong>2.5D 并行</strong>：在 2D 的基础上增加一个"复制"维度，进一步减少通信量。理论上可以将通信量降低到 O(N^(1/3))，但实现复杂度高，实际使用较少。</p>
+
+<div class="ascii">2D 张量并行 (4 GPU, 2×2 网格):
+
+         列方向 (GPU 0,1)
+         ┌───────────────────┐
+         │  W = ┌─────┬─────┐│
+行方向   │      │ W00 │ W01 ││  每个 GPU 持有 W 的一个子块
+(GPU 0,2)│      ├─────┼─────┤│
+         │      │ W10 │ W11 ││  通信: 行 AllReduce + 列 AllReduce
+         │      └─────┴─────┘│  通信量: O(√N) vs 标准 TP 的 O(N)
+         └───────────────────┘
+
+GPU (0,0): W00, GPU (0,1): W01
+GPU (1,0): W10, GPU (1,1): W11
+
+计算步骤:
+1. 每个 GPU 计算局部结果
+2. 行方向 AllReduce (列内聚合)
+3. 列方向 AllReduce (行内聚合)
+→ 总通信量: 2√N × 消息大小 (vs 标准 TP: N × 消息大小)</div>
+
+<table>
+<tr><th>并行方式</th><th>切分维度</th><th>通信量</th><th>GPU 拓扑</th><th>实际使用</th></tr>
+<tr><td>1D TP (标准)</td><td>单维度</td><td>O(N)</td><td>线性/环形</td><td>广泛使用 (Megatron-LM)</td></tr>
+<tr><td>2D TP</td><td>行+列</td><td>O(√N)</td><td>2D 网格</td><td>研究阶段</td></tr>
+<tr><td>2.5D TP</td><td>行+列+复制</td><td>O(N^(1/3))</td><td>3D 网格</td><td>研究阶段</td></tr>
+<tr><td>3D TP</td><td>三个维度</td><td>O(N^(1/3))</td><td>3D 网格</td><td>理论研究</td></tr>
+</table>
+
+<h2>2.5 张量并行的最新进展</h2>
+<p>近年来，张量并行技术出现了几个重要的新方向：</p>
+
+<p><strong>Ring Attention</strong>：由 UC Berkeley 提出，用于处理超长序列（百万 token 级别）。Ring Attention 将 KV 沿序列维度分布在多张 GPU 上，每张 GPU 只持有部分 KV。计算注意力时，KV 块在 GPU 之间以 Ring 方式传递，每个 GPU 对当前的 KV 块计算局部注意力并累积结果。通信可以与计算重叠，因此理论上序列长度可以无限扩展。</p>
+
+<p><strong>Context Parallelism</strong>：类似 Ring Attention，但由 NVIDIA 集成到 Megatron-LM 中。它将序列维度切分到多张 GPU 上，支持多种注意力计算模式（Ring、All-to-All 等），并与 TP、PP、DP 兼容。</p>
+
+<p><strong>Expert Parallelism (EP)</strong>：针对 MoE（Mixture of Experts）模型的特殊并行方式。每个专家可以放在不同的 GPU 上，输入通过路由机制分配到对应的专家 GPU。EP 本质上是一种特殊的张量并行——将 MoE 层的权重按专家维度切分。</p>
+
+<div class="box deep"><div class="label">🔬 深入探讨</div>
+<h3>Ring Attention 的工作原理</h3>
+<p>Ring Attention 解决的核心问题是：当序列长度 L 非常大时，注意力矩阵 QK^T 的大小为 O(L²)，单卡显存无法容纳。Ring Attention 通过将 KV 分布在 N 张 GPU 上，每张 GPU 只持有 L/N 的 KV 块。</p>
+<p>计算过程：(1) 每张 GPU 持有完整的 Q（L/N 行）和初始的 KV 块；(2) 使用 Flash Attention 的在线 softmax 算法计算当前 KV 块的注意力；(3) 将 KV 块发送给下一张 GPU（Ring 通信）；(4) 接收上一张 GPU 的 KV 块，继续计算并累积结果；(5) 经过 N-1 轮后，每张 GPU 完成所有 KV 的注意力计算。</p>
+<p>关键优化：KV 的传输可以与当前块的注意力计算重叠，只要通信时间 ≤ 计算时间，就不会有额外开销。这要求每个 KV 块的计算时间 ≥ 传输时间，即 L/N × d ≥ L × d × sizeof(dtype) / bandwidth，简化后得到：GPU 数量 N ≤ bandwidth × sizeof(dtype)。对于 NVLink 600 GB/s 和 BF16（2 bytes），N ≤ 300，足够支持大多数场景。</p>
+</div>
+
+<div class="box warn"><div class="label">⚠️ 张量并行的限制</div>张量并行有几个重要的限制需要了解：(1) TP 度必须能整除注意力头数（num_attention_heads）和 FFN 中间层维度（通常为 hidden_size × 4 / TP 度也必须是整数）；(2) TP 引入的 AllReduce 是同步操作，任何负载不均衡都会导致 GPU 空闲；(3) 对于 MoE 模型，TP 只能切分注意力层，MoE 层的专家需要用 EP 切分；(4) TP 不适用于 CPU 内存不足的场景——它只减少 GPU 显存，不减少 CPU 内存需求。</div>
+
+<div class="box exercise"><div class="label">🎯 练习</div>
+<strong>练习 1</strong>：使用 Megatron-LM 在 2 张 GPU 上进行张量并行训练，观察通信量（通过 NCCL 日志）。<br>
+<strong>练习 2</strong>：手动实现一个简单的 2-GPU 张量并行线性层，验证输出与单卡计算结果的一致性。<br>
+<strong>练习 3</strong>：对比 TP=1、TP=2、TP=4、TP=8 的训练吞吐量，绘制扩展性曲线。
+<pre><code><span class="comment"># 练习参考: 手动实现 2-GPU 张量并行</span>
+<span class="keyword">import</span> torch
+<span class="keyword">import</span> torch.distributed <span class="keyword">as</span> dist
+
+<span class="keyword">def</span> <span class="string">tensor_parallel_linear</span>(x, weight_full, rank, world_size):
+    <span class="comment"># 按列切分权重</span>
+    chunk_size = weight_full.shape[1] // world_size
+    weight_chunk = weight_full[:, rank*chunk_size:(rank+1)*chunk_size]
+    
+    <span class="comment"># 各 GPU 独立计算</span>
+    y_local = x @ weight_chunk  <span class="comment"># [batch, chunk_size]</span>
+    
+    <span class="comment"># AllReduce 聚合结果</span>
+    dist.all_reduce(y_local, op=dist.ReduceOp.SUM)
+    <span class="keyword">return</span> y_local</code></pre>
+</div>
+
+<h2>学习路径建议</h2>
+<p>张量并行是理解大模型训练的关键。建议继续学习：</p>
+<ul>
+<li><strong>下一步</strong>：学习<a href="03-流水线并行.html">流水线并行</a>，了解如何跨机器扩展模型训练</li>
+<li><strong>深入阅读</strong>：Megatron-LM 论文（Shoeybi et al., 2019）详细描述了 TP 的实现细节</li>
+<li><strong>动手实践</strong>：使用 <a href="04-3D并行与框架.html">Megatron-LM 或 DeepSpeed</a> 进行实际的 TP 训练</li>
+</ul>
+
+<div class="next-prev"><a href="01-数据并行与FSDP.html">&larr; 01-DP</a><a href="03-流水线并行.html">03-流水线 →</a></div>
+
+<h2>2.6 张量并行的实际性能数据</h2>
+<p>以下是不同模型和配置下张量并行的实际训练性能数据。这些数据来自公开的基准测试和论文，可以帮助理解 TP 在不同场景下的表现。</p>
+
+<table>
+<tr><th>模型</th><th>TP 度</th><th>GPU 型号</th><th>每 GPU 计算利用率</th><th>通信开销占比</th><th>备注</th></tr>
+<tr><td>LLaMA-7B</td><td>1 (无 TP)</td><td>A100 80GB</td><td>~55%</td><td>~5%</td><td>DDP 基线</td></tr>
+<tr><td>LLaMA-7B</td><td>2</td><td>A100 80GB</td><td>~52%</td><td>~12%</td><td>NVLink</td></tr>
+<tr><td>LLaMA-7B</td><td>4</td><td>A100 80GB</td><td>~48%</td><td>~18%</td><td>NVLink</td></tr>
+<tr><td>LLaMA-7B</td><td>8</td><td>A100 80GB</td><td>~43%</td><td>~25%</td><td>NVLink</td></tr>
+<tr><td>LLaMA-7B</td><td>8</td><td>A100 80GB</td><td>~20%</td><td>~60%</td><td>PCIe (无 NVLink)</td></tr>
+<tr><td>LLaMA-70B</td><td>8</td><td>H100 80GB</td><td>~50%</td><td>~15%</td><td>NVLink 4.0</td></tr>
+<tr><td>GPT-175B</td><td>8</td><td>A100 80GB</td><td>~45%</td><td>~20%</td><td>Megatron-LM</td></tr>
+</table>
+
+<p>从数据可以看出：(1) TP=1（无张量并行）时通信开销最低，GPU 利用率最高；(2) 随着 TP 度增加，通信开销线性增长，GPU 利用率下降；(3) NVLink 是 TP 的必要条件——在 PCIe 互联下，TP=8 的通信开销高达 60%，几乎不可用；(4) H100 的 NVLink 4.0（900 GB/s）比 A100 的 NVLink 3.0（600 GB/s）有明显优势。</p>
+
+<div class="box tip"><div class="label">💡 张量并行的调试技巧</div>在实际调试张量并行训练时，最常遇到的问题是梯度不一致和通信死锁。建议使用以下方法排查：(1) 先用 TP=1 跑通基线，确认单卡逻辑正确；(2) 设置 NCCL_DEBUG=INFO 和 NCCL_DEBUG_SUBSYS=ALL 查看详细通信日志；(3) 使用 torch.distributed.barrier() 在关键位置同步，定位哪一步出了问题；(4) 对比 TP=1 和 TP=2 的每层输出，找出第一个不一致的层。常见错误包括：权重切分维度不正确、AllReduce 在错误的进程组上执行、以及未正确处理 bias 的切分方式。此外，使用 torch.profiler 可以可视化 TP 通信与计算的时间线，帮助识别通信瓶颈和空闲等待。在混合精度训练中还需要特别注意：FP16/BF16 的 AllReduce 精度损失可能在深层网络中累积，建议对关键的梯度聚合操作使用 FP32 精度。此外，torch.compile 对 TP 模型的支持仍在改进中，目前建议先验证兼容性再启用编译优化。随着 H100 和 H200 等新一代 GPU 的普及，NVLink 带宽进一步提升到 900 GB/s，TP 的通信开销将进一步降低，使得张量并行在更大规模的训练中仍然保持实用价值。</div>
+
+<p>这些数据也解释了为什么在实际训练中，TP 度通常设为 8（单机 8 卡）而非更大。如果需要更多 GPU 参与计算，应该通过 DP 和 PP 扩展，而非增加 TP 度。DeepSeek-V3 的 TP=1 配置是一个极端案例——通过 MLA 架构减少了注意力层的参数量，使得单卡就能容纳注意力层的计算，从而完全消除了 TP 通信开销。在实际部署中，建议先用小模型（如 1B 参数）验证 TP 配置的正确性和性能，再扩展到目标模型规模。使用 torch.profiler 或 NVIDIA Nsight Systems 可以精确分析 TP 通信和计算的时间占比，帮助找到最优的并行配置。此外，NCCL 的环境变量如 NCCL_DEBUG=INFO 可以输出详细的通信日志，帮助诊断网络问题和通信瓶颈。</p>
+
+</div>
+<div class="footer"><p>LLM 系统学习 · 02-张量并行</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="tip"><strong>相关章节：</strong>
+核心思想与数学原理与以下内容密切相关：<a href="01-数据并行与FSDP.html">01-数据并行与FSDP</a> | <a href="03-流水线并行.html">03-流水线并行</a> | <a href="04-3D并行与框架.html">04-3D并行与框架</a>。建议结合学习。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+建议先在2张GPU上手动实现线性层的列并行切分，验证输出与单卡版本的数值一致性。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+从张量并行的<strong>核心原理</strong>出发，将矩阵运算拆分到多个GPU上并行计算。<strong>为什么</strong>MLP层可以按列或按行切分？<strong>推导</strong>：对于Y=XW，将W按列切分为[W₁,W₂]，则Y=X[W₁,W₂]=[XW₁,XW₂]，两张GPU分别计算后拼接即可。注意力层的Q/K/V矩阵同样可按列切分。<strong>数学本质</strong>上，张量并行将单个矩阵乘法的时间复杂度从O(m·n)降至O(m·n/N)，但要求GPU间高速互联（如NVLink），因为每层前向后需要一次All-Reduce同步。
+</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释核心思想与数学原理的核心原理，并举一个实际应用场景。</li>
+<li>核心思想与数学原理在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比核心思想与数学原理与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+核心思想与数学原理的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<pre><code class="language-python"># 核心思想与数学原理 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="deep"><strong>深入探讨：</strong>
+从张量并行的<strong>核心原理</strong>出发，将矩阵运算拆分到多个GPU上并行计算。<strong>为什么</strong>MLP层可以按列或按行切分？<strong>推导</strong>：对于Y=XW，将W按列切分为[W₁,W₂]，则Y=X[W₁,W₂]=[XW₁,XW₂]，两张GPU分别计算后拼接即可。注意力层的Q/K/V矩阵同样可按列切分。<strong>数学本质</strong>上，张量并行将单个矩阵乘法的时间复杂度从O(m·n)降至O(m·n/N)，但要求GPU间高速互联（如NVLink），因为每层前向后需要一次All-Reduce同步。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习张量并行时，很多人只看矩阵切分图不实际测量通信量。建议分析张量并行中每层前向和反向的All-Reduce通信量，理解通信量与隐藏维度和GPU数量的关系。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为张量并行就是简单的矩阵切分可以直接上手多卡训练。切分维度选择、通信原语选择（All-Reduce vs Reduce-Scatter+All-Gather）等细节影响性能。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+核心思想与数学原理与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

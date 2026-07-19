@@ -1,0 +1,524 @@
+arXiv:2506.13585v1  [cs.CL]  16 Jun 2025
+MiniMax-M1: Scaling Test-Time Compute
+Efficiently with Lightning Attention
+MiniMax1
+We introduce MiniMax-M1, the world’s first open-weight, large-scale hybrid-attention reasoning model.
+MiniMax-M1 is powered by a hybrid Mixture-of-Experts (MoE) architecture combined with a lightning
+attention mechanism. The model is developed based on our previous MiniMax-Text-01 model (MiniMax
+et al., 2025), which contains a total of 456 billion parameters with 45.9 billion parameters activated
+per token. The M1 model natively supports a context length of 1 million tokens, 8x the context size
+of DeepSeek R1. Furthermore, the lightning attention mechanism in MiniMax-M1 enables efficient
+scaling of test-time compute – For example, compared to DeepSeek R1, M1 consumes 25% of the
+FLOPs at a generation length of 100K tokens. These properties make M1 particularly suitable for
+complex tasks that require processing long inputs and thinking extensively. MiniMax-M1 is trained using
+large-scale reinforcement learning (RL) on diverse problems ranging from traditional mathematical
+reasoning to sandbox-based, real-world software engineering environments. In addition to the inherent
+efficiency advantage of lightning attention for RL training, we propose CISPO, a novel RL algorithm to
+further enhance RL efficiency. CISPO clips importance sampling weights rather than token updates,
+outperforming other competitive RL variants. Combining hybrid-attention and CISPO enables MiniMax-
+M1’s full RL training on 512 H800 GPUs to complete in only three weeks, with a rental cost of just
+$534,700. We release two versions of MiniMax-M1 models with 40K and 80K thinking budgets respectively,
+where the 40K model represents an intermediate phase of the 80K training. Experiments on standard
+benchmarks show that our models are comparable or superior to strong open-weight models such as
+the original DeepSeek-R1 and Qwen3-235B, with particular strengths in complex software engineering,
+tool utilization, and long-context tasks. Through efficient scaling of test-time compute, MiniMax-M1
+serves as a strong foundation for next-generation language model agents to reason and tackle real-world
+challenges. We publicly release MiniMax-M1 at https://github.com/MiniMax-AI/MiniMax-M1.
+AIME 2024
+LiveCodeBench
+SWE-bench Verified
+TAU-bench
+MRCR (4-needle)
+0
+20
+40
+60
+80
+100
+Accuracy (%)
+86.0
+65.0
+56.0
+62.8
+73.4
+Closed-weight Models
+OpenAI o3
+Gemini-2.5 Pro
+Claude 4 Opus
+Seed-Thinking-v1.5
+Open-weight Models
+DeepSeek-R1
+DeepSeek-R1-0528
+Qwen3-235B-A22B
+MiniMax-M1
+0
+32K
+64K
+96K
+128K
+Generation Length
+0
+1
+2
+3
+4
+5
+6
+7
+FLOPs (×10¹ )
+DeepSeek R1
+Qwen3-235B-A22B
+MiniMax-M1
+Figure 1 | Left: Benchmark performance comparison of leading commercial and open-weight models
+across competition-level mathematics, coding, software engineering, agentic tool use, and long-
+context understanding tasks. We use the MiniMax-M1-80k model here for MiniMax-M1. Right:
+Theoretical inference FLOPs scaling with generation length (# tokens).
+1Please send correspondence to model@minimax.io.
+© 2025 MiniMax. All rights reserved
+MiniMax-M1: Scaling Test-Time Compute Efficiently with Lightning Attention
+1. Introduction
+Large reasoning models (LRMs), such as OpenAI o1 (OpenAI, 2024a) and DeepSeek-R1 (DeepSeek-AI
+et al., 2025), have demonstrated remarkable success by extending the length of reasoning through
+large-scale reinforcement learning (RL). In recent months, both the open-source community and
+commercial organizations have followed this trend, achieving significant advances on complex tasks
+such as Olympiad mathematics competitions and competitive programming (Anthropic, 2025; Google
+DeepMind, 2025; Hu et al., 2025; Kimi Team, 2025; Seed et al., 2025; Yu et al., 2025; Zeng et al.,
+2025). The success of LRMs has been primarily attributed to a new scaling dimension of test-time
+compute—As more FLOPs are dedicated to extended reasoning processes during generation, model
+performance shows consistent improvement, particularly for complex real-world applications (Jimenez
+et al., 2024; OpenAI, 2025).
+However, continuously extending the reasoning process is challenging within the traditional trans-
+former architecture (Vaswani et al., 2017), due to the inherent quadratic computational complexity
+of the softmax attention mechanism. While previous works have proposed various techniques to
+mitigate this issue—such as sparse attention (Beltagy et al., 2020; Lu et al., 2025; Yuan et al., 2025;
+Zaheer et al., 2020), linear attention (Arora et al., 2024; Choromanski et al., 2021; Du et al., 2025;
+He et al., 2024; Katharopoulos et al., 2020; Peng et al., 2024b, 2021; Qin et al., 2021, 2022a,b,
+2024a,c; Shen et al., 2024; Sun et al., 2025, 2023; Zhang et al., 2024), linear attention with delta
+decay (Peng et al., 2025; Yang et al., 2024a,b), state space models (Dao and Gu, 2024; Glorioso
+et al., 2024; Gu and Dao, 2024; Gu et al., 2020, 2022, 2023; Gupta et al., 2022; Jamba Team, 2024;
+Ren et al., 2024), and linear RNNs (Behrouz et al., 2024; Chou et al., 2024; Chung and Ç, 2014;
+Hochreiter and Schmidhuber, 1997; Martin and Cundy, 2018; Peng et al., 2023, 2024a; Qin et al.,
+2023, 2024d; Siems et al., 2025; Sun et al., 2024; von Oswald et al., 2025)—these approaches have
+not been fully validated in large-scale reasoning models, and nearly all competitive LRMs to date still
+rely on traditional attention designs. An exception is the Hunyuan-T1 model (Tencent AI Lab, 2025)
+that employs the Mamba architecture (Dao and Gu, 2024; Gu and Dao, 2024). However, this model is
+not open-sourced and few details are disclosed. In this work, we aim to build and open-source a large
+reasoning model that can efficiently scale up test-time compute and compete with the state-of-the-art
+reasoning models.
+We introduce MiniMax-M1, a reasoning model with a hybrid Mixture-of-Experts (MoE) architec-
+ture and Lightning Attention (Qin et al., 2024b), an I/O-aware implementation of a linear attention
+variant (Qin et al., 2022a). MiniMax-M1 is developed based on our previous MiniMax-Text-01 (Mini-
+Max et al., 2025) model, and comprises 456 billion parameters in total, with 45.9 billion activations
+and 32 experts. In our attention design, a transformer block with softmax attention follows every
+seven transnormer blocks (Qin et al., 2022a) with lightning attention. This design theoretically
+enables efficient scaling of reasoning lengths to hundreds of thousands of tokens, as illustrated in
+Figure 1 (Right). For example, compared to DeepSeek R1, M1 consumes less than 50% of the FLOPs
+at a generation length of 64K tokens, and approximately 25% of the FLOPs at a length of 100K tokens.
+This substantial reduction in computational cost makes M1 significantly more efficient during both
+inference and large-scale RL training. Furthermore, owing to its lightning attention mechanism and in
+line with MiniMax-Text-01, our M1 model natively supports a context length of up to 1 million tokens
+– eight times the context size of DeepSeek R1 and an order of magnitude greater than all open-weight
+LRMs available to date. These features make M1 particularly well-suited for addressing complex,
+real-world tasks that require processing long inputs and generating extended thinking. A comparison
+of the maximum input and output lengths of M1 and other leading models is demonstrated in Table 1.
+To develop our M1 model, we first continue pretraining MiniMax-Text-01 on 7.5T tokens from a
+carefully curated, reasoning-intensive corpus. Subsequently, we perform supervised fine-tuning (SFT)
+2
+MiniMax-M1: Scaling Test-Time Compute Efficiently with Lightning Attention
+Table 1 | The maximum supported input length and output length (# tokens) of different reason-
+ing models. For Claude-4 we refer to the Claude-4-Opus model. “DS-R1” represents the latest
+DeepSeek-R1-0528 model.
+o3
+Gemini 2.5 Pro
+Claude 4
+DS-R1
+Qwen3-235B
+MiniMax-M1-80k
+Max Input
+200K
+1M
+200K
+128K
+128K
+1M
+Max Output
+100K
+64K
+32K
+64K
+32K
+80K
+to inject certain chain-of-thought (CoT) (Wei et al., 2022) patterns, establishing a strong foundation
+for reinforcement learning, the core stage of M1 development. Notably, our RL scaling with M1 is
+made efficient through innovations from two key perspectives: (1) We propose a novel RL algorithm,
+CISPO, which abandons the trust region constraint and instead clips the importance sampling weights
+to stabilize training. This approach always leverages all tokens for gradient computations, achieving
+enhanced efficiency compared to GRPO (Shao et al., 2024) and DAPO (Yu et al., 2025) empirically
+– For example, on a controlled study based on Qwen2.5-32B models (Qwen et al., 2025), CISPO
+achieves a 2x speedup compared to DAPO; (2) Although the hybrid-attention design in M1 naturally
+allows for efficient RL scaling, unique challenges arise when scaling RL with this architecture. For
+instance, we find a precision mismatch between the training and inference kernels of our architecture,
+which prevents reward growth during RL training. We develop targeted solutions to address these
+challenges and successfully scale up RL with this hybrid architecture. In the end, our efficient RL
+framework enables us to complete a full RL run of MiniMax-M1 within 3 weeks using 512 H800
+GPUs—equivalent to a rental cost of approximately $0.53M USD.
+In addition to methodological innovations, we curate a diverse set of problems and environments
+for RL training. Our data encompasses both verifiable and non-verifiable problems. For verifiable
+problems that are typically considered critical for reasoning learning, we not only include mathematical
+reasoning and competitive programming problems as commonly used in related works, but also
+leverage our previous data synthesis framework SynLogic (Liu et al., 2025a) to generate diverse
+logical reasoning problems spanning 41 distinct tasks. Furthermore, we construct sandboxes for
+complex software engineering (SE) environments derived from SWE-bench (Jimenez et al., 2024), and
+conduct RL on real-world SE problems with execution-based rewards to improve M1’s performance in
+challenging SE scenarios. Our unverifiable problems span a broad range of domains such as question
+answering and creative writing, where we use generative reward models to provide the feedback.
+We train two versions of MiniMax-M1 models with 40K and 80K tokens of maximum generation
+length respectively, which leads to two models MiniMax-M1-40k and MiniMax-M1-80k. MiniMax-M1-
+80k outperforms MiniMax-M1-40k on complex mathematical and coding tasks, further demonstrating
+the benefits of scaling test-time compute. As shown in Figure 1 (Left), MiniMax-M1 surpasses previous
+leading open-weight models such as the original DeepSeek-R1 and Qwen-235B overall, with particular
+advantages in complex software engineering, tool-using, and long-context tasks. Compared to the
+latest DeepSeek-R1-0528 model, MiniMax-M1 lags in mathematical and coding competitions but
+achieves comparable or superior performance in more realistic tool-using and long-context scenarios.
+Notably, MiniMax-M1 outperforms Gemini 2.5 Pro on the agentic tool use benchmark TAU-Bench (Yao
+et al., 2025), and surpasses OpenAI o3 and Claude 4 Opus on long-context understanding benchmarks.
+With efficient test-time scaling, we contend that MiniMax-M1 establishes a strong foundation for
+next-generation language model agents to address real-world challenges.
+To facilitate collaboration and advancement in the field, we have made our models publicly
+available at GitHub and Hugging Face. They are now supported by both the vLLM and Transformers
+frameworks, with detailed deployment guides available at vLLM and Transformers respectively. This
+3
+MiniMax-M1: Scaling Test-Time Compute Efficiently with Lightning Attention
+enables easy integration of MiniMax-M1 into modern inference pipelines. We also provide commercial
+standard API at minimax.io.
+2. Preparation for Scalable RL: Continual Pretraining and SFT
+In this work, we focus on scaling up reinforcement learning to enhance reasoning capabilities of
+Minimax-Text-01. To facilitate scalable RL training, we first carry out continual pretraining of our base
+model to strengthen its intrinsic reasoning abilities. Subsequently, we perform a cold-start supervised
+fine-tuning (SFT) stage to inject specific reasoning patterns to the model, thereby providing a stronger
+foundation for the subsequent RL phase.
+2.1. Continual Pre-Training: Foundation for RL Scaling
+To enhance the reasoning and long context capabilities of the foundation model while ensuring
+diversity, we continue training the MiniMax-Text-01 model with additional 7.5T tokens with optimized
+data quality and mixture.
+Training Data. We refine our pretraining Web and PDF parsing mechanisms and enhance our heuristic
+cleaning rules to ensure a high recall rate for mathematical and code-related data. We prioritize the
+extraction of natural Question-Answer (QA) pairs from a diverse range of sources, including webpages,
+forums, and textbooks, while strictly avoiding the use of synthetic data. Additionally, we conduct
+semantic deduplication on the QA data to maintain its diversity and uniqueness. Furthermore, we
+increase the proportion of STEM (Science, Technology, Engineering, and Mathematics), code, book,
+and reasoning-related data to 70%. This significantly enhances the foundation model’s ability to
+handle complex tasks without compromising its other general capabilities.
+Training Recipe. We decrease the coefficient of the MoE auxiliary loss and adjust the parallel training
+strategy to support a larger training micro batch size, which mitigates the detrimental effects of the
+auxiliary loss on overall model performance. Based on MiniMax-Text-01, we continue training with a
+constant learning rate of 8e-5 for 2.5T tokens, followed by a decay schedule over 5T tokens down to
+8e-6.
+Long Context Extension. For a hybrid-lightning architecture model with higher convergence com-
+plexity, we have observed that excessively aggressive extensions of the training length can lead to a
+sudden gradient explosion that may occur during the training process. This makes the optimization
+process extremely challenging. We attribute this to the parameter optimization of the earlier layers
+not keeping up with the changes in the later layers – For lightning attention, the earlier and later
+layers have different decay rates, which makes the earlier layers focus more on local information. We
+alleviate this issue by adapting a smoother extension of context length across four stages, starting
+from a 32K context window length and ultimately extending the training context to 1M tokens.
+2.2. Supervised Fine-Tuning: Focused Alignment for Efficient RL
+After continual pretraining, we conduct Supervised Fine-Tuning (SFT) to instill desired behaviors like
+reflection-based Chain-of-Thought (CoT) reasoning using high-quality examples, creating a strong
+starting point for more efficient and stable RL in the next stage. Specifically, we curate data samples
+with long CoT responses. These data samples cover diverse domains such as math, coding, STEM,
+writing, QA, and multi-turn chat. Math and coding samples account for around 60% of all the data.
+4
+MiniMax-M1: Scaling Test-Time Compute Efficiently with Lightning Attention
+3. Efficient RL Scaling: Algorithms and Lightning Attention
+As shown in Figure 1 (Right), the M1 architecture demonstrates a clear efficiency advantage during
+inference. This naturally facilitates efficient RL scaling where increasingly longer responses are
+generated. However, as pioneers in scaling up RL with this hybrid architecture, we encounter unique
+challenges during the process, and the RL procedure can become unstable or even fail due to various
+issues. To address these difficulties, we develop targeted solutions that enable us to successfully scale
+up RL training for M1. In addition, we propose a new RL algorithm that achieves greater RL efficiency
+compared to existing methods. These dual contributions yield an efficient and scalable RL framework
+for training M1, where the complete training cycle requires 3 weeks on 512 H800 GPUs—equivalent
+to a rental cost of approximately $0.53M USD. In this section, we first provide general context on
+RL and present our novel RL algorithm, and then describe the specific challenges we face with the
+hybrid architecture, along with the solutions we devise to overcome them.
+3.1. Efficient RL Scaling with CISPO
+Background. For questions 𝑞from a dataset D, we denote 𝜋as the policy model parameterized by
+𝜃, and 𝑜as the response generated by the policy. PPO (Schulman et al., 2017) adopts the following
+objective to optimize the policy to maximize the expected return, and a clipping operation is applied
+to stabilize training:
+JPPO(𝜃) = 𝔼𝑞∼D,𝑜𝑖∼𝜋𝜃old (·|𝑞)
+"
+1
+|𝑜𝑖|
+|𝑜𝑖|
+∑︁
+𝑡=1
+min
+
+𝑟𝑖,𝑡(𝜃) ˆ𝐴𝑖,𝑡, clip 𝑟𝑖,𝑡(𝜃), 1 −𝜖, 1 + 𝜖 ˆ𝐴𝑖,𝑡
+
+−𝛽𝐷𝐾𝐿(𝜋𝜃||𝜋ref)
+#
+,
+(1)
+where 𝑟𝑖,𝑡(𝜃) =
+𝜋𝜃(𝑜𝑖,𝑡|𝑞,𝑜𝑖,<𝑡)
+𝜋𝜃old (𝑜𝑖,𝑡|𝑞,𝑜𝑖,<𝑡) is the importance sampling (IS) weight, which is used to correct the
+distribution during off-policy updates, because we use 𝜋𝜃old to collect trajectories to update the policy
+via multiple steps in a minibatch manner. While PPO requires a separate value model to compute the
+advantage ˆ𝐴𝑖,𝑡, GRPO (Shao et al., 2024) eliminates the value model and defines the advantage as
+the output reward relative to other responses in the group:
+ˆ𝐴𝑖,𝑡=
+𝑅𝑖−mean({𝑅𝑗}𝐺
+𝑗=1)
+std({𝑅𝑗}𝐺
+𝑗=1)
+,
+(2)
+where 𝑅𝑖is the reward of the response, and 𝐺responses {𝑜𝑖}𝐺
+𝑖=1 are sampled for each question. The
+reward is either from rule-based verifiers such as in mathematical problem solving, or from a reward
+model.
+Issues of Token Clipping. In our initial experiments with the hybrid architecture under the zero-RL
+setting, we observed that the GRPO algorithm adversely affected training performance and failed to
+effectively promote the emergence of long CoT reasoning behaviors. Through a series of controlled
+ablation studies, we ultimately identified the undesirable clipping operation in the original PPO/GRPO
+loss as the primary factor contributing to degraded learning performance. Specifically, we found that
+tokens associated with reflective behaviors (e.g., However, Recheck, Wait, Aha), which often serve
+as “forks” in reasoning paths, were typically rare and assigned low probabilities by our base model.
+During policy updates, these tokens were likely to exhibit high 𝑟𝑖,𝑡values. As a result, these tokens
+were clipped out after the first on-policy update, preventing them from contributing to subsequent
+off-policy gradient updates. This issue was particularly pronounced in our hybrid-architecture model
+and further hindered the scalability of reinforcement learning. These low-probability tokens, however,
+5
+MiniMax-M1: Scaling Test-Time Compute Efficiently with Lightning Attention
+2x speedup
+Figure 2 | Comparison of GRPO, DAPO, and our proposed CISPO on AIME 2024, based on Qwen2.5-
+32B-base. CISPO outperforms both GRPO and DAPO in terms of performance at the same number of
+training steps, and achieves comparable performance to DAPO using 50% of the training steps.
+are often crucial for stabilizing entropy (Cui et al., 2025) and facilitating scalable RL (Wang et al.,
+2025). Although DAPO attempts to mitigate this issue by increasing the upper clipping bound (Yu
+et al., 2025), we found this approach to be less effective in our setup, which involved 16 rounds of
+off-policy updates per generation batch.
+The CISPO Algorithm. In response, we propose a new algorithm that explicitly avoids dropping
+tokens, even those associated with large updates, while inherently maintaining entropy within a
+reasonable range to ensure stable exploration. First, recall that the vanilla REINFORCE objective with
+corrected distribution for offline updates is:
+JREINFORCE(𝜃) = 𝔼(𝑞,𝑎)∼D,𝑜𝑖∼𝜋𝜃old (·|𝑞)
+"
+1
+|𝑜𝑖|
+|𝑜𝑖|
+∑︁
+𝑡=1
+sg(𝑟𝑖,𝑡(𝜃)) ˆ𝐴𝑖,𝑡log 𝜋𝜃(𝑜𝑖,𝑡| 𝑞, 𝑜𝑖,<𝑡)
+#
+,
+(3)
+where sg(·) denotes the stop-gradient operation. Rather than clipping the token updates as in
+PPO/GRPO, we instead clip the importance sampling weight in Eq. 3 to stabilize training. We term
+our approach CISPO (Clipped IS-weight Policy Optimization). Adopting the group relative advantage
+from GRPO and the token-level loss (Liu et al., 2025b; Yu et al., 2025), CISPO optimizes the following
+objective:
+JCISPO(𝜃) = 𝔼(𝑞,𝑎)∼D,{𝑜𝑖}𝐺
+𝑖=1∼𝜋𝜃old (·|𝑞)
+"
+1
+Í𝐺
+𝑖=1 |𝑜𝑖|
+𝐺
+∑︁
+𝑖=1
+|𝑜𝑖|
+∑︁
+𝑡=1
+sg(ˆ𝑟𝑖,𝑡(𝜃)) ˆ𝐴𝑖,𝑡log 𝜋𝜃(𝑜𝑖,𝑡| 𝑞, 𝑜𝑖,<𝑡)
+#
+,
+(4)
+where ˆ𝑟𝑖,𝑡(𝜃) is the clipped IS weight:
+ˆ𝑟𝑖,𝑡(𝜃) = clip
+
+𝑟𝑖,𝑡(𝜃), 1 −𝜖𝐼𝑆
+𝑙𝑜𝑤, 1 + 𝜖𝐼𝑆
+ℎ𝑖𝑔ℎ
+
+.
+(5)
+We note that without weight clipping, JCISPO reduces to the standard policy gradient objective. In
+our experiments, we did not impose a lower bound on the IS weight by setting 𝜖𝐼𝑆
+𝑙𝑜𝑤to a large value;
+6
+MiniMax-M1: Scaling Test-Time Compute Efficiently with Lightning Attention
+instead, we only tuned 𝜖𝐼𝑆
+ℎ𝑖𝑔ℎ. Although the gradient of Eq. 4 is slightly biased due to weight clipping,
+this approach preserves gradient contributions from all tokens, especially in long responses. CISPO
+proves effective in our experiments, helping reduce variance and stabilizing RL training. In addition,
+we utilize the dynamic sampling and length penalty techniques from Yu et al. (2025). There is no KL
+penalty term in CISPO similar to other recent works (Hu et al., 2025; Yu et al., 2025).
+A General Formulation. While we adopt CISPO in our experiments, here we further present a
+unified formulation by introducing a token-wise mask into the CISPO objective. This allows for
+hyperparameter tuning to control whether, and under what conditions, gradients from specific tokens
+should be dropped:
+Junify(𝜃) = 𝔼(𝑞,𝑎)∼D,{𝑜𝑖}𝐺
+𝑖=1∼𝜋𝜃old (·|𝑞)
+"
+1
+Í𝐺
+𝑖=1 |𝑜𝑖|
+𝐺
+∑︁
+𝑖=1
+|𝑜𝑖|
+∑︁
+𝑡=1
+sg(ˆ𝑟𝑖,𝑡(𝜃)) ˆ𝐴𝑖,𝑡log 𝜋𝜃(𝑜𝑖,𝑡| 𝑞, 𝑜𝑖,<𝑡)𝑀𝑖,𝑡
+#
+.
+(6)
+The mask 𝑀𝑖,𝑡is equivalent to the mask implicitly defined in the PPO trust region:
+𝑀𝑖,𝑡=
+
+
+0
+if ˆ𝐴𝑖,𝑡> 0 and 𝑟𝑖,𝑡(𝜃) > 1 + 𝜖high,
+0
+if ˆ𝐴𝑖,𝑡< 0 and 𝑟𝑖,𝑡(𝜃) < 1 −𝜖low,
+1
+otherwise.
+(7)
+This unified loss formulation can flexibly represent different clipping strategies under a common
+framework.
+Empirical Validation of CISPO. To validate the effectiveness of CISPO, we empirically compare it with
+DAPO and GRPO in a zero-RL training setting. Specifically, we apply different RL algorithms to train
+the Qwen2.5-32B-base model on the mathematical reasoning dataset from Yu et al. (2025), and report
+performance on the AIME 2024 benchmark. As shown in Figure 2, CISPO significantly outperforms
+both DAPO and GRPO with the same number of training steps. Notably, CISPO demonstrates superior
+training efficiency compared to other approaches; for example, it matches DAPO’s performance with
+only 50% of the training steps.
+3.2. Efficient RL Scaling with Lightning Attention – Challenges and Recipes
+As shown in Figure 1 (Right), we emphasize that our hybrid attention inherently enables more efficient
+RL scaling compared to traditional attention designs, since rollout computation and latency are often
+the primary bottlenecks in RL training. However, as pioneers in conducting large-scale RL experiments
+with this novel architecture, we encountered unique challenges and developed targeted solutions, as
+we describe below.
+Computational Precision Mismatch in Generation and Training. RL training is highly sensitive
+to computational precision. During our RL training, we observed a significant discrepancy in the
+probabilities of rolled-out tokens between training-mode and inference-mode, as shown in Figure 3
+(Left). This discrepancy arose from a precision mismatch between the training and inference kernels.
+The issue was detrimental and prevented reward growth in our experiments. Interestingly, this issue
+did not appear in smaller, dense models with softmax attention. Through layer-by-layer analysis, we
+identified high-magnitude activations in the LM head at the output layer as the primary source of
+error. To address this, we increased the precision of the LM output head to FP32, thereby realigning
+the two theoretically identical probabilities, as demonstrated in Figure 3 (Right). This adjustment
+improved the correlation between training and inference probabilities from approximately 0.9x to
+7
+MiniMax-M1: Scaling Test-Time Compute Efficiently with Lightning Attention
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Inference Probability
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Training Probability
+Correlation: 0.987319
+MiniMax-M1 Before Fix
+Perfect Precision (y=x)
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+Absolute Probability Difference
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Inference Probability
+0.0
+0.2
+0.4
+0.6
+0.8
+1.0
+Training Probability
+Correlation: 0.997135
+MiniMax-M1 After Fix
+Perfect Precision (y=x)
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+Absolute Probability Difference
+Figure 3 | Probability of tokens in training-mode code vs. probability of tokens in inference-mode
+code. Each point in the figures represents an individual token. The Pearson correlation coefficient is
+indicated in the figures. Theoretically, the two probabilities should be identical, and all the tokens
+should be exactly on the diagonal line. Left: Correlation of the M1 model before our fix; Right:
+Correlation of the M1 model after applying our fix of using FP32 precision for the LM output head.
+0.99x. Notably, this correlation metric remained stable throughout training, enabling successful
+reward increase.
+Optimizer Hyperparameter Sensitivity. We employ the AdamW (Loshchilov and Hutter, 2019)
+optimizer, and inappropriate configurations of 𝛽1, 𝛽2, and 𝜖can lead to non-convergence during
+training. (Molybog et al., 2023). For instance, using the default configuration from VeRL (Sheng
+et al., 2024), where betas = (0.9, 0.999) and eps = 1e-8, can result in such issues. We have observed
+that the gradient magnitudes in MiniMax-M1 training span a wide range, from 1e-18 to 1e-5, with
+the majority of the gradients being smaller than 1e-14. Furthermore, the correlation between the
+gradients of adjacent iterations is weak. Based on this, we set 𝛽1 = 0.9, 𝛽2 = 0.95, and eps=1e-15.
+Early Truncation via Repetition Detection. During RL training, we found that complex prompts
+could induce pathologically long and repetitive responses, whose large gradients threatened model
+stability. Our goal was to preemptively terminate these generation loops rather than penalize the
+already repetitive text. As simple string-matching is ineffective against varied repetition patterns, we
+developed a heuristic based on token probabilities. We observed that once a model enters a repetitive
+cycle, the probability for each token soars. Consequently, we implemented an early truncation rule:
+generation is halted if 3,000 consecutive tokens each have a probability above 0.99. This method
+successfully prevents model instability and improves generation throughput by eliminating these
+pathological, long-tail cases.
+4. Scaling Reinforcement Learning with Diverse Data
+In this section, we describe the data and reward we adopted for our RL stage. We incorporate a diverse
+set of environments in our RL training pipeline, including tasks that can be verified by rules and
+general tasks that need to be verified through reward models. All these environments are integrated
+into the RL stage using a carefully designed curriculum.
+8
+MiniMax-M1: Scaling Test-Time Compute Efficiently with Lightning Attention
+4.1. Reasoning-Intensive Tasks with Rule-based Verification
+Below, we introduce our data that can be verified by deterministic rules. For all the following tasks,
+we employ rule-based final correctness as the correctness reward, complemented by a format reward.
+Mathematical Reasoning. Our initial mathematical dataset comprises hundreds of thousands of
+high-quality, competition-level problems, meticulously curated and organized from public sources
+and official mathematics competitions. These problems span a wide range of difficulty levels, each
+paired with a standard reference solution. Our data cleaning pipeline begins with the removal of
+incomplete samples and those exhibiting formatting or typographical errors. We subsequently apply
+embedding-based deduplication across the RL data sources and enforce a strict separation from the
+SFT dataset to avoid any overlap, as leakage from the SFT phase into the RL stage hinders exploration
+and undermines training effectiveness. Additionally, we employ both n-gram and embedding-based
+methods to eliminate potential contamination from commonly used mathematical benchmark test sets,
+thereby ensuring the integrity and fairness of our evaluations. We filter out samples containing multiple
+sub-problems, proof-based questions, and binary questions (e.g., true/false) that are susceptible to
+random guessing. Multiple-choice questions are reformulated into open-ended formats to better
+align with our reinforcement learning framework. Next, we employ our internal model to extract
+the final answers from the reference solution, retaining only those samples whose extracted answers
+can be correctly parsed by our rule-based answer checker. Finally, we use a strong reasoning model
+to compute the pass@10 for each question and retain only those samples with a pass rate strictly
+between 0 and 0.9, resulting in a curated dataset of nearly 50K high-quality mathematical samples
+for our RL training.
+Logical Reasoning. For logical reasoning data, we carefully select 41 logical reasoning tasks requiring
+non-trivial reasoning ability such as cipher and Sudoku, then we implement a data synthesis framework
+to synthesize all the data. Concretely, we utilize our SynLogic framework (Liu et al., 2025a) to
+implement the data synthesis pipeline featuring task-specific data generators and rule-based task-
+specific verifiers, enabling automatic logical data generation. We meticulously configure the difficulty
+parameters during generation, ensuring the appropriate learning challenge of the generated data.
+Specifically, to prevent inclusion of overly difficult instances, we establish an upper difficulty bound
+based on the solvability li

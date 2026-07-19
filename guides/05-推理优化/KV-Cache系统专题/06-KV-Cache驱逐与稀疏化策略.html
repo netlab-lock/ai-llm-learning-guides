@@ -1,0 +1,1820 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Module 06: KV Cache驱逐与稀疏化策略</title>
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #111827;
+            --bg-card: #1a2332;
+            --bg-code: #0d1420;
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --accent-blue: #3b82f6;
+            --accent-cyan: #06b6d4;
+            --accent-purple: #8b5cf6;
+            --accent-green: #10b981;
+            --accent-orange: #f59e0b;
+            --accent-red: #ef4444;
+            --accent-pink: #ec4899;
+            --border-color: #1e293b;
+            --border-highlight: #334155;
+            --gradient-1: linear-gradient(135deg, #3b82f6, #8b5cf6);
+            --gradient-2: linear-gradient(135deg, #06b6d4, #10b981);
+            --gradient-3: linear-gradient(135deg, #f59e0b, #ef4444);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.8;
+            min-height: 100vh;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
+            border-bottom: 1px solid var(--border-color);
+            padding: 40px 0;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .header::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle at 30% 50%, rgba(59, 130, 246, 0.08) 0%, transparent 50%),
+                        radial-gradient(circle at 70% 50%, rgba(139, 92, 246, 0.08) 0%, transparent 50%);
+            animation: pulse 8s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 0.5; }
+            50% { opacity: 1; }
+        }
+
+        .header-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 30px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .module-tag {
+            display: inline-block;
+            background: var(--gradient-1);
+            color: white;
+            padding: 4px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            letter-spacing: 1px;
+        }
+
+        h1 {
+            font-size: 2.5em;
+            font-weight: 800;
+            background: linear-gradient(135deg, #60a5fa, #a78bfa, #06b6d4);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 12px;
+        }
+
+        .subtitle {
+            font-size: 1.15em;
+            color: var(--text-secondary);
+            max-width: 700px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 40px 30px;
+        }
+
+        .toc {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 40px;
+        }
+
+        .toc h2 {
+            font-size: 1.3em;
+            margin-bottom: 20px;
+            color: var(--accent-cyan);
+        }
+
+        .toc-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 10px;
+        }
+
+        .toc-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 10px 14px;
+            border-radius: 8px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            transition: all 0.2s;
+            font-size: 0.95em;
+        }
+
+        .toc-item:hover {
+            background: rgba(59, 130, 246, 0.1);
+            color: var(--text-primary);
+        }
+
+        .toc-num {
+            background: var(--gradient-1);
+            color: white;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+
+        section {
+            margin-bottom: 60px;
+        }
+
+        .section-header {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            margin-bottom: 28px;
+            padding-bottom: 16px;
+            border-bottom: 2px solid var(--border-color);
+        }
+
+        .section-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            flex-shrink: 0;
+        }
+
+        h2 {
+            font-size: 1.7em;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        h3 {
+            font-size: 1.25em;
+            font-weight: 600;
+            color: var(--accent-cyan);
+            margin: 24px 0 12px;
+        }
+
+        h4 {
+            font-size: 1.05em;
+            font-weight: 600;
+            color: var(--accent-blue);
+            margin: 16px 0 8px;
+        }
+
+        p {
+            color: var(--text-secondary);
+            margin-bottom: 14px;
+            font-size: 0.97em;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            margin: 20px 0;
+        }
+
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 20px;
+            margin: 20px 0;
+        }
+
+        .insight-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            border-left: 4px solid var(--accent-blue);
+            transition: transform 0.2s;
+        }
+
+        .insight-card:hover {
+            transform: translateY(-2px);
+        }
+
+        .insight-card.cyan { border-left-color: var(--accent-cyan); }
+        .insight-card.purple { border-left-color: var(--accent-purple); }
+        .insight-card.green { border-left-color: var(--accent-green); }
+        .insight-card.orange { border-left-color: var(--accent-orange); }
+        .insight-card.red { border-left-color: var(--accent-red); }
+
+        .insight-card h4 {
+            color: var(--text-primary);
+            margin: 0 0 8px;
+            font-size: 1.05em;
+        }
+
+        .insight-card p {
+            font-size: 0.9em;
+            margin: 0;
+        }
+
+        .layer-box {
+            background: var(--bg-code);
+            border: 1px solid var(--border-highlight);
+            border-radius: 10px;
+            padding: 18px 22px;
+            margin: 14px 0;
+            font-size: 0.9em;
+        }
+
+        .layer-box .layer-label {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+
+        .layer-intuition .layer-label { background: rgba(16, 185, 129, 0.2); color: var(--accent-green); }
+        .layer-mechanism .layer-label { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); }
+        .layer-formula .layer-label { background: rgba(139, 92, 246, 0.2); color: var(--accent-purple); }
+
+        pre {
+            background: var(--bg-code);
+            border: 1px solid var(--border-highlight);
+            border-radius: 10px;
+            padding: 18px 22px;
+            overflow-x: auto;
+            margin: 14px 0;
+            font-size: 0.88em;
+            line-height: 1.7;
+        }
+
+        code {
+            font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+            color: var(--accent-cyan);
+        }
+
+        pre code {
+            color: var(--text-secondary);
+        }
+
+        .keyword { color: var(--accent-purple); }
+        .string { color: var(--accent-green); }
+        .comment { color: var(--text-muted); font-style: italic; }
+        .number { color: var(--accent-orange); }
+        .function { color: var(--accent-blue); }
+        .type { color: var(--accent-cyan); }
+
+        .svg-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            margin: 20px 0;
+            text-align: center;
+            overflow-x: auto;
+        }
+
+        .svg-container svg {
+            max-width: 100%;
+            height: auto;
+        }
+
+        .svg-title {
+            font-size: 0.95em;
+            color: var(--text-muted);
+            margin-top: 12px;
+            font-style: italic;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            font-size: 0.9em;
+        }
+
+        th {
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.15), rgba(139, 92, 246, 0.15));
+            color: var(--text-primary);
+            padding: 14px 16px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid var(--accent-blue);
+            white-space: nowrap;
+        }
+
+        td {
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-secondary);
+        }
+
+        tr:hover td {
+            background: rgba(59, 130, 246, 0.05);
+        }
+
+        .tag {
+            display: inline-block;
+            padding: 2px 10px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .tag-blue { background: rgba(59, 130, 246, 0.2); color: #60a5fa; }
+        .tag-green { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+        .tag-orange { background: rgba(245, 158, 11, 0.2); color: #fbbf24; }
+        .tag-red { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+        .tag-purple { background: rgba(139, 92, 246, 0.2); color: #a78bfa; }
+
+        .highlight-box {
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.08), rgba(139, 92, 246, 0.08));
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 12px;
+            padding: 20px 24px;
+            margin: 20px 0;
+        }
+
+        .highlight-box.warning {
+            background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(239, 68, 68, 0.08));
+            border-color: rgba(245, 158, 11, 0.3);
+        }
+
+        .highlight-box.success {
+            background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(6, 182, 212, 0.08));
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        .algo-steps {
+            counter-reset: step;
+            list-style: none;
+            padding: 0;
+        }
+
+        .algo-steps li {
+            counter-increment: step;
+            padding: 12px 16px 12px 56px;
+            position: relative;
+            margin-bottom: 8px;
+            background: var(--bg-code);
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            font-size: 0.92em;
+            color: var(--text-secondary);
+        }
+
+        .algo-steps li::before {
+            content: counter(step);
+            position: absolute;
+            left: 16px;
+            top: 12px;
+            background: var(--gradient-1);
+            color: white;
+            width: 26px;
+            height: 26px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 700;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 40px 30px;
+            border-top: 1px solid var(--border-color);
+            color: var(--text-muted);
+            font-size: 0.85em;
+        }
+
+        @media (max-width: 768px) {
+            h1 { font-size: 1.8em; }
+            .card-grid { grid-template-columns: 1fr; }
+            .toc-grid { grid-template-columns: 1fr; }
+            .container { padding: 20px 16px; }
+        }
+    
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<nav class="nav-bar">
+  <a href="00-index.html">← 目录</a>
+  <span style="opacity:0.4">|</span>
+  <a href="05-KV-Cache量化技术.html">← KV Cache量化</a>
+  <span class="title">模块06: 驱逐与稀疏化</span>
+  <a href="07-分布式推理中的KV-Cache.html">分布式推理 →</a>
+  <a href="00-index.html">目录 →</a>
+</nav>
+
+<!-- ==================== HEADER ==================== -->
+<div class="header">
+    <div class="header-content">
+        <div class="module-tag">MODULE 06 · ADVANCED</div>
+        <h1>KV Cache 驱逐与稀疏化策略</h1>
+        <p class="subtitle">Eviction &amp; Sparsification — 在有限内存预算下，智能选择保留哪些 KV 对，用最小的质量损失换取最大的内存节省</p>
+    </div>
+</div>
+
+<div class="container">
+
+    <!-- ==================== TOC ==================== -->
+    <div class="toc">
+        <h2>📑 目录导航</h2>
+<h3>📑 目录导航</h3>v class="tip"><strong>通俗类比：</strong>目录就像图书馆的楼层导览图——进门先看地图，知道文学在3楼、科技在5楼，才能直奔目标。好的目录让你跳过不感兴趣的内容，高效定位所需章节。</div>
+<div class="warn"><strong>常见误区：</strong>新手常忽略目录直接跳读，导致知识点碎片化。建议先通读目录建立整体框架，理解各章节的逻辑递进关系，再按需深入学习。</div>
+<div class="deep"><strong>深入探讨：</strong>本指南涵盖KV Cache驱逐与稀疏化7大核心策略：H2O（注意力分数驱逐）、StreamingLLM（注意力汇聚）、稀疏注意力、KV Cache合并等。掌握这些技术可将KV Cache显存降低60%-90%。</div>
+<div class="ascii"><pre>📑 知识地图
+├── 🟢 基础：为什么驱逐 + 稀疏性观察
+├── 🔴 核心：H2O + 重要性评估
+├── 🔵 进阶：StreamingLLM + 稀疏注意力
+└── 🟣 高级：KV Cache合并技术</pre></div>
+<table><tr><th>技术类别</th><th>代表方法</th><th>显存节省</th></tr><tr><td>驱逐策略</td><td>H2O、ScissorHands</td><td>50%-80%</td></tr><tr><td>流式推理</td><td>StreamingLLM</td><td>90%+</td></tr><tr><td>稀疏+合并</td><td>Longformer、CLA</td><td>60%-90%</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="toc-grid">
+            <a class="toc-item" href="#sec1"><span class="toc-num">1</span>为什么需要驱逐</a>
+            <a class="toc-item" href="#sec2"><span class="toc-num">2</span>注意力稀疏性观察</a>
+            <a class="toc-item" href="#sec3"><span class="toc-num">3</span>基于注意力分数的驱逐 (H2O)</a>
+            <a class="toc-item" href="#sec4"><span class="toc-num">4</span>基于重要性评估的驱逐</a>
+            <a class="toc-item" href="#sec5"><span class="toc-num">5</span>StreamingLLM与注意力汇聚</a>
+            <a class="toc-item" href="#sec6"><span class="toc-num">6</span>稀疏注意力与KV Cache</a>
+            <a class="toc-item" href="#sec7"><span class="toc-num">7</span>KV Cache合并技术</a>
+            <a class="toc-item" href="#sec8"><span class="toc-num">8</span>各策略对比与选型</a>
+        </div>
+    </div>
+
+    <!-- ==================== SECTION 1 ==================== -->
+    <section id="sec1">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(239, 68, 68, 0.15);">🔥</div>
+            <h2>1. 为什么需要驱逐</h2>
+<h3>为什么需要驱逐</h3>
+<div class="tip"><strong>通俗类比：</strong>仓库空间有限，不能无限囤货。就像超市货架需要定期清理滞销品给新品腾位置，KV Cache驱逐就是在有限显存中淘汰不重要的历史信息，保留关键内容。</div>
+<div class="warn"><strong>常见误区：</strong>误以为驱逐等于粗暴丢弃信息会严重降质。实际上优秀驱逐策略是智能筛选，只淘汰对当前生成几乎无影响的token，保留关键上下文信息。</div>
+<div class="deep"><strong>深入探讨：</strong>以Llama-70B为例，单token的KV Cache约占2.5MB（128层×8头×128维×2×2字节）。生成4K token需10GB，生成128K token需320GB，远超单卡80GB容量，驱逐是必选项而非可选项。</div>
+<div class="ascii"><pre>驱逐前：[K1][K2][K3]...[K1000]  显存100%
+驱逐后：[K1][K50][K200]...[K999]  显存30%
+         ↑ 保留关键token ↑
+         释放70%显存空间</pre></div>
+<table><tr><th>序列长度</th><th>KV Cache(70B)</th><th>是否需驱逐</th></tr><tr><td>4K tokens</td><td>~10GB</td><td>可选</td></tr><tr><td>32K tokens</td><td>~80GB</td><td>必须</td></tr><tr><td>128K tokens</td><td>~320GB</td><td>强制</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+</div>
+
+        <p>Transformer推理中，KV Cache的内存占用与序列长度呈严格的线性关系。当处理长上下文（如128K、1M tokens）时，KV Cache会迅速耗尽GPU显存。然而，并非所有token的KV对对生成质量同等重要——这为"智能驱逐"提供了理论基础。</p>
+
+        <div class="svg-container">
+            <svg viewBox="0 0 800 320" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <linearGradient id="gRed" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#ef4444"/><stop offset="100%" stop-color="#f59e0b"/></linearGradient>
+                    <linearGradient id="gBlue" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#3b82f6"/><stop offset="100%" stop-color="#8b5cf6"/></linearGradient>
+                    <linearGradient id="gGreen" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#06b6d4"/></linearGradient>
+                </defs>
+                <!-- Axes -->
+                <line x1="80" y1="260" x2="760" y2="260" stroke="#334155" stroke-width="2"/>
+                <line x1="80" y1="260" x2="80" y2="30" stroke="#334155" stroke-width="2"/>
+                <text x="420" y="300" text-anchor="middle" fill="#94a3b8" font-size="13">序列长度 (tokens)</text>
+                <text x="30" y="150" text-anchor="middle" fill="#94a3b8" font-size="13" transform="rotate(-90 30 150)">内存占用 (GB)</text>
+                <!-- Memory budget line -->
+                <line x1="80" y1="100" x2="760" y2="100" stroke="#ef4444" stroke-width="2" stroke-dasharray="8,4"/>
+                <text x="760" y="95" text-anchor="end" fill="#ef4444" font-size="12" font-weight="600">显存预算上限</text>
+                <!-- KV Cache growth curve -->
+                <path d="M80,255 Q200,240 320,200 T500,100 T700,35" stroke="url(#gRed)" stroke-width="3" fill="none"/>
+                <text x="620" y="50" fill="#f59e0b" font-size="12" font-weight="600">KV Cache 线性增长</text>
+                <!-- After eviction -->
+                <path d="M80,255 Q200,250 320,240 T500,220 T700,200" stroke="url(#gGreen)" stroke-width="3" fill="none"/>
+                <text x="620" y="195" fill="#10b981" font-size="12" font-weight="600">驱逐后内存</text>
+                <!-- Intersection point -->
+                <circle cx="460" cy="100" r="6" fill="#ef4444"/>
+                <text x="460" y="88" text-anchor="middle" fill="#ef4444" font-size="11">内存溢出点</text>
+                <!-- Scale labels -->
+                <text x="140" y="278" fill="#64748b" font-size="11">4K</text>
+                <text x="260" y="278" fill="#64748b" font-size="11">32K</text>
+                <text x="380" y="278" fill="#64748b" font-size="11">64K</text>
+                <text x="500" y="278" fill="#64748b" font-size="11">128K</text>
+                <text x="620" y="278" fill="#64748b" font-size="11">256K</text>
+                <text x="740" y="278" fill="#64748b" font-size="11">1M</text>
+            </svg>
+            <div class="svg-title">图1: KV Cache内存增长与驱逐效果——长序列下内存必然溢出，驱逐是唯一出路</div>
+        </div>
+
+        <div class="card-grid">
+            <div class="insight-card">
+                <h4>📐 线性增长困境</h4>
+                <p>对于 LLaMA-70B (80层 × 64头 × d=128, FP16)，每个token的KV Cache占用 <strong>2 × 80 × 64 × 128 × 2B = 2.5MB</strong>。128K序列需要 <strong>320GB</strong>，远超单卡容量。</p>
+            </div>
+            <div class="insight-card cyan">
+                <h4>💰 内存预算约束</h4>
+                <p>实际部署中，GPU显存还需容纳模型权重、激活值、系统开销。分配给KV Cache的预算通常只有总显存的 <strong>30-50%</strong>，必须精打细算。</p>
+            </div>
+            <div class="insight-card purple">
+                <h4>⚡ 非均匀重要性</h4>
+                <p>实验表明，删除大部分token的KV对后，模型输出质量下降很小。少量"重要"token承载了绝大部分注意力信息。</p>
+            </div>
+            <div class="insight-card green">
+                <h4>🔍 稀疏性观察</h4>
+                <p>注意力矩阵天然稀疏——典型情况下，80%以上的注意力权重集中在不到20%的token上，这为激进压缩提供了可能。</p>
+            </div>
+        </div>
+
+        <div class="layer-box layer-intuition">
+            <span class="layer-label">直觉层</span>
+            <p style="margin:0">想象你在阅读一本1000页的书并做笔记。你的笔记本（显存）只够记200页的要点。你需要一个策略来决定：哪些页的笔记保留，哪些可以丢弃。关键洞察是：不是每页都同等重要——目录页（初始token）、核心论点页、和最近读的页（最近token）往往最重要。</p>
+        </div>
+
+        <div class="layer-box layer-mechanism">
+            <span class="layer-label">机制层</span>
+            <p style="margin:0">KV Cache驱逐的核心公式：<code>budget = N_max × 2 × L × H × d × dtype_bytes</code>。当序列长度 <code>n</code> 超过预算允许的最大 <code>N_max</code> 时，必须丢弃 <code>n - N_max</code> 个token的KV对。驱逐策略决定了丢弃哪些，其目标是 <strong>最小化注意力分布的KL散度变化</strong>。</p>
+        </div>
+
+        <div class="layer-box layer-formula">
+            <span class="layer-label">公式层</span>
+            <p style="margin:0">KV Cache内存: <code>M = 2 × n_layers × n_heads × d_head × seq_len × bytes_per_element</code><br>
+            驱逐目标: <code>min KL(Attn(Q, K_full, V_full) || Attn(Q, K_kept, V_kept))</code><br>
+            等价于: <code>min Σ |α_i - α'_i|</code> 其中 α 是原始注意力权重分布</p>
+        </div>
+    </section>
+
+    <!-- ==================== SECTION 2 ==================== -->
+    <section id="sec2">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(6, 182, 212, 0.15);">🔬</div>
+            <h2>2. 注意力稀疏性观察<助于在实际工程中做出更合理的技术选择和优化决策。</p>
+
+<h3>注意力稀疏性观察</h3>
+<div class="tip"><strong>通俗类比：</strong>读一本500页的书，你不会每页都仔细看——目录、摘要、结论最重要，中间细节可能跳过。注意力稀疏性就是模型也只关注少数关键token，大部分注意力得分接近零。</div>
+<div class="warn"><strong>常见误区：</strong>不要误以为所有token同等重要。实验表明80%以上的注意力集中在不到20%的token上，忽略这个规律就无法理解为何驱逐策略可行且有效。</div>
+<div class="deep"><strong>深入探讨：</strong>研究发现注意力矩阵中，top-20%的token累计贡献超过95%的注意力分数。H2O论文实测：保留最近token+高注意力token的组合，perplexity仅上升0.5%-2%，而显存节省70%以上。</div>
+<div class="ascii"><pre>注意力分布热力图(简化)
+Token1: ██████████░░░░  40%
+Token2: ██████░░░░░░░░  25%
+Token3: ████░░░░░░░░░░  15%
+其余997: ██░░░░░░░░░░░░  20%</pre></div>
+<table><tr><th>观察指标</th><th>典型数值</th><th>驱逐意义</th></tr><tr><td>注意力集中度</td><td>top-20%占95%</td><td>稀疏性明显</td></tr><tr><td>零值比例</td><td>60%-80%</td><td>可安全裁剪</td></tr><tr><td>最近token占比</td><td>10%-30%</td><td>局部性存在</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+</div>
+
+        <p>驱逐策略的理论基础在于Transformer注意力的天然稀疏性。通过仔细观察真实模型的注意力分布，研究者发现了多个关键规律。</p>
+
+        <div class="svg-container">
+            <svg viewBox="0 0 800 400" xmlns="http://www.w3.org/2000/svg">
+                <!-- Attention heatmap visualization -->
+                <text x="400" y="25" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="600">注意力权重热力图 (典型因果注意力层)</text>
+                <!-- Grid: 10x10 attention matrix -->
+                <g transform="translate(150, 50)">
+                    <text x="-30" y="150" text-anchor="middle" fill="#94a3b8" font-size="12" transform="rotate(-90 -30 150)">Query 位置</text>
+                    <text x="150" y="320" text-anchor="middle" fill="#94a3b8" font-size="12">Key 位置</text>
+                    <!-- Column labels -->
+                    <text x="15" y="-8" text-anchor="middle" fill="#64748b" font-size="10">1</text>
+                    <text x="45" y="-8" text-anchor="middle" fill="#64748b" font-size="10">2</text>
+                    <text x="75" y="-8" text-anchor="middle" fill="#64748b" font-size="10">3</text>
+                    <text x="105" y="-8" text-anchor="middle" fill="#64748b" font-size="10">...</text>
+                    <text x="135" y="-8" text-anchor="middle" fill="#64748b" font-size="10">N-2</text>
+                    <text x="165" y="-8" text-anchor="middle" fill="#64748b" font-size="10">N-1</text>
+                    <text x="195" y="-8" text-anchor="middle" fill="#64748b" font-size="10">N</text>
+                    <!-- Row labels -->
+                    <text x="-8" y="18" text-anchor="end" fill="#64748b" font-size="10">1</text>
+                    <text x="-8" y="48" text-anchor="end" fill="#64748b" font-size="10">2</text>
+                    <text x="-8" y="78" text-anchor="end" fill="#64748b" font-size="10">3</text>
+                    <text x="-8" y="108" text-anchor="end" fill="#64748b" font-size="10">...</text>
+                    <text x="-8" y="138" text-anchor="end" fill="#64748b" font-size="10">N-2</text>
+                    <text x="-8" y="168" text-anchor="end" fill="#64748b" font-size="10">N-1</text>
+                    <text x="-8" y="198" text-anchor="end" fill="#64748b" font-size="10">N</text>
+                    <!-- Attention sink column (column 1) - bright -->
+                    <rect x="0" y="0" width="28" height="28" rx="3" fill="#ef4444" opacity="0.9"/>
+                    <rect x="0" y="30" width="28" height="28" rx="3" fill="#ef4444" opacity="0.85"/>
+                    <rect x="0" y="60" width="28" height="28" rx="3" fill="#ef4444" opacity="0.8"/>
+                    <rect x="0" y="90" width="28" height="28" rx="3" fill="#ef4444" opacity="0.75"/>
+                    <rect x="0" y="120" width="28" height="28" rx="3" fill="#ef4444" opacity="0.7"/>
+                    <rect x="0" y="150" width="28" height="28" rx="3" fill="#ef4444" opacity="0.65"/>
+                    <rect x="0" y="180" width="28" height="28" rx="3" fill="#ef4444" opacity="0.6"/>
+                    <!-- Middle columns - sparse -->
+                    <rect x="30" y="30" width="28" height="28" rx="3" fill="#3b82f6" opacity="0.3"/>
+                    <rect x="60" y="60" width="28" height="28" rx="3" fill="#3b82f6" opacity="0.25"/>
+                    <rect x="90" y="90" width="28" height="28" rx="3" fill="#1e293b" opacity="0.8"/>
+                    <rect x="120" y="120" width="28" height="28" rx="3" fill="#1e293b" opacity="0.8"/>
+                    <rect x="150" y="150" width="28" height="28" rx="3" fill="#1e293b" opacity="0.8"/>
+                    <!-- Diagonal band (local attention) -->
+                    <rect x="180" y="150" width="28" height="28" rx="3" fill="#f59e0b" opacity="0.7"/>
+                    <rect x="180" y="180" width="28" height="28" rx="3" fill="#f59e0b" opacity="0.8"/>
+                    <rect x="150" y="180" width="28" height="28" rx="3" fill="#f59e0b" opacity="0.6"/>
+                    <rect x="180" y="120" width="28" height="28" rx="3" fill="#f59e0b" opacity="0.5"/>
+                    <!-- Last row: current token sees everything important -->
+                    <rect x="0" y="180" width="28" height="28" rx="3" fill="#ef4444" opacity="0.7"/>
+                    <rect x="30" y="180" width="28" height="28" rx="3" fill="#3b82f6" opacity="0.2"/>
+                    <rect x="60" y="180" width="28" height="28" rx="3" fill="#1e293b" opacity="0.8"/>
+                    <rect x="90" y="180" width="28" height="28" rx="3" fill="#1e293b" opacity="0.8"/>
+                    <rect x="120" y="180" width="28" height="28" rx="3" fill="#1e293b" opacity="0.8"/>
+                    <rect x="150" y="180" width="28" height="28" rx="3" fill="#f59e0b" opacity="0.6"/>
+                    <rect x="180" y="180" width="28" height="28" rx="3" fill="#f59e0b" opacity="0.9"/>
+                    <!-- Annotations -->
+                    <text x="15" y="230" text-anchor="middle" fill="#ef4444" font-size="11" font-weight="600">Attention Sink</text>
+                    <text x="15" y="245" text-anchor="middle" fill="#ef4444" font-size="10">(初始token)</text>
+                    <text x="195" y="230" text-anchor="middle" fill="#f59e0b" font-size="11" font-weight="600">Local Window</text>
+                    <text x="195" y="245" text-anchor="middle" fill="#f59e0b" font-size="10">(最近token)</text>
+                    <text x="105" y="230" text-anchor="middle" fill="#64748b" font-size="11">稀疏区域</text>
+                    <text x="105" y="245" text-anchor="middle" fill="#64748b" font-size="10">(大部分中间token)</text>
+                </g>
+                <!-- Legend -->
+                <g transform="translate(500, 70)">
+                    <rect x="0" y="0" width="16" height="16" rx="3" fill="#ef4444" opacity="0.8"/>
+                    <text x="24" y="13" fill="#94a3b8" font-size="12">高注意力 (Sink tokens)</text>
+                    <rect x="0" y="28" width="16" height="16" rx="3" fill="#f59e0b" opacity="0.7"/>
+                    <text x="24" y="41" fill="#94a3b8" font-size="12">高注意力 (Local tokens)</text>
+                    <rect x="0" y="56" width="16" height="16" rx="3" fill="#3b82f6" opacity="0.3"/>
+                    <text x="24" y="69" fill="#94a3b8" font-size="12">中等注意力</text>
+                    <rect x="0" y="84" width="16" height="16" rx="3" fill="#1e293b"/>
+                    <text x="24" y="97" fill="#94a3b8" font-size="12">低注意力 (可安全驱逐)</text>
+                </g>
+            </svg>
+            <div class="svg-title">图2: 注意力权重热力图——初始token（注意力汇聚）和局部窗口占据绝大部分注意力</div>
+        </div>
+
+        <h3>关键发现</h3>
+        <div class="card-grid">
+            <div class="insight-card red">
+                <h4>🪣 Attention Sink 现象</h4>
+                <p>StreamingLLM发现：无论输入内容如何，序列<strong>最前面的1-4个token</strong>始终承受不成比例的高注意力权重。即使这些token在语义上不重要（如BOS token），模型也会将"无用"注意力倾倒到它们身上。</p>
+            </div>
+            <div class="insight-card orange">
+                <h4>📊 注意力集中度</h4>
+                <p>在典型层中，<strong>超过80%的注意力权重</strong>集中在不到<strong>5%的token</strong>上。这意味着理论上可以丢弃95%的KV Cache而只损失少量信息。</p>
+            </div>
+            <div class="insight-card purple">
+                <h4>📍 位置依赖模式</h4>
+                <p>靠近序列末尾的token自然获得更多关注（局部性）。不同层呈现不同模式：浅层更局部化，深层更全局化。</p>
+            </div>
+            <div class="insight-card cyan">
+                <h4>🎭 头间差异显著</h4>
+                <p>同一层的不同注意力头呈现截然不同的稀疏模式。有的头专注局部上下文，有的头追踪远距离依赖——需要差异化驱逐策略。</p>
+            </div>
+        </div>
+
+        <div class="layer-box layer-intuition">
+            <span class="layer-label">直觉层</span>
+            <p style="margin:0">注意力矩阵就像一张"重要性地图"。大部分区域是"荒漠"（低注意力），但有两块"绿洲"：左侧边缘（初始token/注意力汇聚点）和右下角对角线附近（最近的token）。驱逐策略就是学会只保留绿洲，丢弃荒漠。</p>
+        </div>
+    </section>
+
+    <!-- ==================== SECTION 3 ==================== -->
+    <section id="sec3">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(59, 130, 246, 0.15);">💎</div>
+            <h2>3. 基于注意力分数的驱逐 (H2O)</h2>
+        
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>H2O就像图书馆的借阅排行榜——长期无人借阅的书移到仓库，热门书和新书留在前台。根据历史注意力分数淘汰冷门token，保留热门token和最近token。</div>
+<div class="warn"><strong>常见误区：</strong>关键陷阱：只看单次注意力分数会误判重要性。需要累积历史注意力分数（如指数衰减求和），才能准确评估token的真实重要性，避免昙花一现的误导。</div>
+<div class="deep"><strong>深入探讨：</strong>H2O保留策略：budget = recent_tokens + heavy_hitters。设预算B，保留最近r个token + 累积注意力分数最高的(B-r)个token。论文推荐r=512，B=2048时Llama-2-7B的perplexity仅增加1.2%。</div>
+<div class="ascii"><pre>H2O驱逐决策流程
+[最近r个token] ← 必须保留(局部连贯)
+[高分token]    ← 必须保留(全局关键)
+累积分数 = Σ α^t × score(t) 排序
+低分token → 驱逐释放显存</pre></div>
+<table><tr><th>组件</th><th>作用</th><th>典型占比</th></tr><tr><td>最近token(r)</td><td>保持局部连贯</td><td>25%</td></tr><tr><td>重击者(B-r)</td><td>保留全局关键</td><td>75%</td></tr><tr><td>被驱逐token</td><td>释放显存</td><td>~70%</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+</div>
+
+        <p>H2O (Heavy-Hitter Oracle) 是最经典的KV Cache驱逐算法之一。核心思想简洁而优雅：保留历史上获得累计注意力分数最高的token，驱逐分数最低的token。</p>
+
+        <h3>H2O 核心算法</h3>
+
+        <div class="svg-container">
+            <svg viewBox="0 0 800 300" xmlns="http://www.w3.org/2000/svg">
+                <text x="400" y="25" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="600">H2O 驱逐过程演示 (budget=5)</text>
+                <!-- Step 1 -->
+                <g transform="translate(30, 50)">
+                    <text x="60" y="0" text-anchor="middle" fill="#94a3b8" font-size="12" font-weight="600">Step 1: 初始阶段</text>
+                    <g transform="translate(0, 20)">
+                        <rect x="0" y="0" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.8"/><text x="24" y="30" text-anchor="middle" fill="white" font-size="11">t1</text>
+                        <rect x="56" y="0" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.6"/><text x="80" y="30" text-anchor="middle" fill="white" font-size="11">t2</text>
+                        <rect x="112" y="0" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.5"/><text x="136" y="30" text-anchor="middle" fill="white" font-size="11">t3</text>
+                    </g>
+                    <text x="60" y="85" text-anchor="middle" fill="#64748b" font-size="11">未满 3/5</text>
+                </g>
+                <!-- Arrow -->
+                <text x="195" y="85" fill="#475569" font-size="24">→</text>
+                <!-- Step 2 -->
+                <g transform="translate(220, 50)">
+                    <text x="60" y="0" text-anchor="middle" fill="#94a3b8" font-size="12" font-weight="600">Step 2: 逐渐填满</text>
+                    <g transform="translate(0, 20)">
+                        <rect x="0" y="0" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.8"/><text x="24" y="30" text-anchor="middle" fill="white" font-size="11">t1</text>
+                        <rect x="56" y="0" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.6"/><text x="80" y="30" text-anchor="middle" fill="white" font-size="11">t2</text>
+                        <rect x="112" y="0" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.5"/><text x="136" y="30" text-anchor="middle" fill="white" font-size="11">t3</text>
+                        <rect x="0" y="56" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.7"/><text x="24" y="86" text-anchor="middle" fill="white" font-size="11">t4</text>
+                        <rect x="56" y="56" width="48" height="48" rx="6" fill="#f59e0b" opacity="0.9"/><text x="80" y="86" text-anchor="middle" fill="white" font-size="11">t5</text>
+                    </g>
+                    <text x="60" y="140" text-anchor="middle" fill="#64748b" font-size="11">已满 5/5</text>
+                </g>
+                <!-- Arrow -->
+                <text x="385" y="85" fill="#475569" font-size="24">→</text>
+                <!-- Step 3: Eviction -->
+                <g transform="translate(410, 50)">
+                    <text x="65" y="0" text-anchor="middle" fill="#ef4444" font-size="12" font-weight="600">Step 3: 触发驱逐</text>
+                    <g transform="translate(0, 20)">
+                        <rect x="0" y="0" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.8"/><text x="24" y="30" text-anchor="middle" fill="white" font-size="11">t1</text>
+                        <rect x="56" y="0" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.6"/><text x="80" y="30" text-anchor="middle" fill="white" font-size="11">t2</text>
+                        <rect x="112" y="0" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.5"/><text x="136" y="30" text-anchor="middle" fill="white" font-size="11">t3</text>
+                        <rect x="0" y="56" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.7"/><text x="24" y="86" text-anchor="middle" fill="white" font-size="11">t4</text>
+                        <rect x="56" y="56" width="48" height="48" rx="6" fill="#f59e0b" opacity="0.9"/><text x="80" y="86" text-anchor="middle" fill="white" font-size="11">t5</text>
+                        <rect x="112" y="56" width="48" height="48" rx="6" fill="#10b981" opacity="0.9"/><text x="136" y="86" text-anchor="middle" fill="white" font-size="11">t6</text>
+                    </g>
+                    <text x="65" y="140" text-anchor="middle" fill="#ef4444" font-size="11">溢出! 淘汰最低分</text>
+                </g>
+                <!-- Arrow -->
+                <text x="580" y="85" fill="#475569" font-size="24">→</text>
+                <!-- Step 4: After eviction -->
+                <g transform="translate(610, 50)">
+                    <text x="65" y="0" text-anchor="middle" fill="#10b981" font-size="12" font-weight="600">Step 4: 驱逐后</text>
+                    <g transform="translate(0, 20)">
+                        <rect x="0" y="0" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.8"/><text x="24" y="30" text-anchor="middle" fill="white" font-size="11">t1</text>
+                        <rect x="0" y="56" width="48" height="48" rx="6" fill="#3b82f6" opacity="0.7"/><text x="24" y="86" text-anchor="middle" fill="white" font-size="11">t4</text>
+                        <rect x="56" y="0" width="48" height="48" rx="6" fill="#f59e0b" opacity="0.9"/><text x="80" y="30" text-anchor="middle" fill="white" font-size="11">t5</text>
+                        <rect x="56" y="56" width="48" height="48" rx="6" fill="#10b981" opacity="0.9"/><text x="80" y="86" text-anchor="middle" fill="white" font-size="11">t6</text>
+                        <rect x="112" y="0" width="48" height="48" rx="6" fill="#94a3b8" opacity="0.3" stroke="#ef4444" stroke-width="2" stroke-dasharray="4,2"/>
+                        <text x="136" y="30" text-anchor="middle" fill="#ef4444" font-size="18">✕</text>
+                    </g>
+                    <text x="65" y="140" text-anchor="middle" fill="#10b981" font-size="11">t3被淘汰 (分最低)</text>
+                </g>
+                <!-- Score table -->
+                <g transform="translate(100, 200)">
+                    <text x="300" y="0" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">各token累计注意力分数</text>
+                    <g transform="translate(0, 15)">
+                        <rect x="0" y="0" width="100" height="24" rx="4" fill="#1e293b"/>
+                        <text x="50" y="17" text-anchor="middle" fill="#94a3b8" font-size="11">t1: 0.18</text>
+                        <rect x="110" y="0" width="100" height="24" rx="4" fill="#1e293b"/>
+                        <text x="160" y="17" text-anchor="middle" fill="#94a3b8" font-size="11">t2: 0.12</text>
+                        <rect x="220" y="0" width="100" height="24" rx="4" fill="rgba(239,68,68,0.2)" stroke="#ef4444" stroke-width="1"/>
+                        <text x="270" y="17" text-anchor="middle" fill="#ef4444" font-size="11">t3: 0.05 ✕</text>
+                        <rect x="330" y="0" width="100" height="24" rx="4" fill="#1e293b"/>
+                        <text x="380" y="17" text-anchor="middle" fill="#94a3b8" font-size="11">t4: 0.22</text>
+                        <rect x="440" y="0" width="100" height="24" rx="4" fill="#1e293b"/>
+                        <text x="490" y="17" text-anchor="middle" fill="#94a3b8" font-size="11">t5: 0.28</text>
+                        <rect x="550" y="0" width="100" height="24" rx="4" fill="#1e293b"/>
+                        <text x="600" y="17" text-anchor="middle" fill="#94a3b8" font-size="11">t6: 0.15</text>
+                    </g>
+                </g>
+            </svg>
+            <div class="svg-title">图3: H2O驱逐过程——维护一个top-k集合，新token加入时淘汰累计注意力分数最低的token</div>
+        </div>
+
+        <h3>三层次理解</h3>
+
+        <div class="layer-box layer-intuition">
+            <span class="layer-label">直觉层</span>
+            <p style="margin:0">H2O就像一个"热门排行榜"。每个token都在竞争注意力——被关注越多，排名越高，越不容易被淘汰。当排行榜满了（达到内存预算），新来的token必须把排名最低的挤出去。</p>
+        </div>
+
+        <div class="layer-box layer-mechanism">
+            <span class="layer-label">机制层</span>
+            <p style="margin:0">
+                <strong>累积分数更新：</strong>每生成一个新token，用其attention score更新所有保留token的累积分数。<br>
+                <strong>Top-K维护：</strong>使用最小堆维护当前保留的token集合，堆顶即为待驱逐的候选。<br>
+                <strong>驱逐时机：</strong>当新token的KV加入后总长度超过budget时，移除堆顶元素。<br>
+                <strong>多头独立：</strong>每个注意力头维护独立的驱逐决策，因为不同头关注的token集合差异很大。
+            </p>
+        </div>
+
+        <div class="layer-box layer-formula">
+            <span class="layer-label">公式层</span>
+            <p style="margin:0">
+                <code>score_i(t) = Σ_{s=t_prev}^{t} α_s,i</code> &nbsp; (token i 在时刻 t 的累积注意力分数)<br>
+                <code>α_s,i = softmax(Q_s · K_i^T / √d)</code> &nbsp; (标准注意力权重)<br>
+                <code>evict = argmin_{i ∈ kept} score_i(t)</code> &nbsp; (选择分数最低的驱逐)<br><br>
+                <strong>复杂度：</strong>每个step的驱逐操作 O(log k)（堆操作），总计 O(n log k)
+            </p>
+        </div>
+
+        <pre><code><span class="comment"># H2O 算法伪代码</span>
+<span class="keyword">class</span> <span class="type">H2OCache</span>:
+    <span class="keyword">def</span> <span class="function">__init__</span>(self, budget):
+        self.budget = budget
+        self.kept_indices = []      <span class="comment"># 当前保留的token索引</span>
+        self.cum_scores = {}        <span class="comment"># {idx: cumulative_attention_score}</span>
+        self.min_heap = []          <span class="comment"># 最小堆：(score, idx)</span>
+
+    <span class="keyword">def</span> <span class="function">update</span>(self, new_attn_scores):
+        <span class="comment"># new_attn_scores: [n_kept] — 新token对所有保留token的注意力</span>
+        <span class="keyword">for</span> i, idx <span class="keyword">in</span> enumerate(self.kept_indices):
+            self.cum_scores[idx] += new_attn_scores[i]
+            heap_update(self.min_heap, self.cum_scores[idx], idx)
+
+        <span class="comment"># 加入新token自身</span>
+        new_idx = len(all_tokens)
+        self.kept_indices.append(new_idx)
+        self.cum_scores[new_idx] = <span class="number">0.0</span>
+
+        <span class="comment"># 超出预算则驱逐</span>
+        <span class="keyword">while</span> len(self.kept_indices) > self.budget:
+            score, evict_idx = heappop(self.min_heap)
+            self.kept_indices.remove(evict_idx)
+            del self.cum_scores[evict_idx]
+            free_kv(evict_idx)  <span class="comment"># 释放GPU内存</span></code></pre>
+
+        <div class="highlight-box success">
+            <strong>💡 质量-内存权衡：</strong>实验表明，在LLaMA上使用仅 <strong>20%</strong> 的KV Cache预算，H2O在多数benchmark上仅损失 <strong>1-3%</strong> 的精度。在预算为50%时几乎无损。
+        </div>
+    </section>
+
+    <!-- ==================== SECTION 4 ==================== -->
+    <section id="sec4">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(139, 92, 246, 0.15);">🧠</div>
+            <h2>4. 基于重要性评估的驱逐</h2>
+        
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>就像高考录取不仅看单科成绩，还要综合评估各科加权总分。重要性驱逐通过多维度指标（注意力、位置、语义）给每个token打综合分，淘汰低分token。</div>
+<div class="warn"><strong>常见误区：</strong>过度依赖单一指标（如只看注意力分数）会遗漏重要信息。位置信息、语义角色（主语/宾语）、特殊token（[SEP]）都需纳入评估，否则连贯性严重下降。</div>
+<div class="deep"><strong>深入探讨：</strong>ScissorHands方法：importance = attention_score × position_decay × semantic_weight。位置衰减用1/√(distance)，语义权重通过小模型预计算。实测LLaMA-7B上保留25%token即可维持97%的原始精度。</div>
+<div class="ascii"><pre>多维度重要性评估
+注意力分数 × 位置衰减 × 语义权重
+    ↓           ↓          ↓
+  综合得分 → 全局排序 → 驱逐低分token
+  阈值动态调整，适应不同层特征</pre></div>
+<table><tr><th>评估维度</th><th>计算方式</th><th>权重建议</th></tr><tr><td>注意力分数</td><td>历史累积求和</td><td>0.5</td></tr><tr><td>位置信息</td><td>1/√(距离)</td><td>0.3</td></tr><tr><td>语义角色</td><td>小模型预计算</td><td>0.2</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+</div>
+
+        <p>除了简单的累积注意力分数，更先进的方法通过<strong>profiling、观察、分层策略</strong>来评估token重要性，实现更精细的驱逐决策。</p>
+
+        <h3>4.1 FastGen: 基于Profiling的驱逐策略</h3>
+        <div class="card">
+            <p>FastGen的核心洞察：不同的注意力头扮演不同的角色（如局部头、全局头、稀疏头），需要不同的KV Cache管理策略。</p>
+            <ol class="algo-steps">
+                <li><strong>离线Profiling阶段：</strong>用少量代表性输入分析每个头的注意力模式，归类为：Special Token头、Local头、Sliding Window头、Pivot Token头等</li>
+                <li><strong>策略分配：</strong>Special Token头 → 保留特殊token(BOS/SEP)；Local头 → 只保留最近的w个token；Pivot Token头 → 保留注意力权重最大的k个token</li>
+                <li><strong>在线执行：</strong>各头按分配的策略独立管理KV Cache，组合成复合缓存结构</li>
+            </ol>
+        </div>
+
+        <h3>4.2 SnapKV: 基于观察的压缩</h3>
+        <div class="card">
+            <p>SnapKV的发现：在Prefill阶段完成后，通过观察注意力权重模式，可以一次性选择最重要的token子集，无需逐步驱逐。</p>
+            <div class="svg-container" style="margin: 16px 0; padding: 16px;">
+                <svg viewBox="0 0 700 160" xmlns="http://www.w3.org/2000/svg">
+                    <text x="350" y="20" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">SnapKV: Prefill → 观察 → 压缩 → Decode</text>
+                    <!-- Boxes -->
+                    <rect x="20" y="40" width="140" height="70" rx="10" fill="rgba(59,130,246,0.15)" stroke="#3b82f6" stroke-width="2"/>
+                    <text x="90" y="70" text-anchor="middle" fill="#60a5fa" font-size="12" font-weight="600">Prefill</text>
+                    <text x="90" y="88" text-anchor="middle" fill="#94a3b8" font-size="10">处理完整prompt</text>
+                    <!-- Arrow -->
+                    <line x1="165" y1="75" x2="195" y2="75" stroke="#475569" stroke-width="2"/>
+                    <polygon points="195,71 203,75 195,79" fill="#475569"/>
+                    <rect x="205" y="40" width="140" height="70" rx="10" fill="rgba(245,158,11,0.15)" stroke="#f59e0b" stroke-width="2"/>
+                    <text x="275" y="70" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="600">观察 &amp; 选择</text>
+                    <text x="275" y="88" text-anchor="middle" fill="#94a3b8" font-size="10">窗口池化选择Top-K</text>
+                    <line x1="350" y1="75" x2="380" y2="75" stroke="#475569" stroke-width="2"/>
+                    <polygon points="380,71 388,75 380,79" fill="#475569"/>
+                    <rect x="390" y="40" width="140" height="70" rx="10" fill="rgba(239,68,68,0.15)" stroke="#ef4444" stroke-width="2"/>
+                    <text x="460" y="70" text-anchor="middle" fill="#f87171" font-size="12" font-weight="600">压缩 KV</text>
+                    <text x="460" y="88" text-anchor="middle" fill="#94a3b8" font-size="10">只保留选中token</text>
+                    <line x1="535" y1="75" x2="565" y2="75" stroke="#475569" stroke-width="2"/>
+                    <polygon points="565,71 573,75 565,79" fill="#475569"/>
+                    <rect x="575" y="40" width="100" height="70" rx="10" fill="rgba(16,185,129,0.15)" stroke="#10b981" stroke-width="2"/>
+                    <text x="625" y="70" text-anchor="middle" fill="#34d399" font-size="12" font-weight="600">Decode</text>
+                    <text x="625" y="88" text-anchor="middle" fill="#94a3b8" font-size="10">用压缩KV</text>
+                    <text x="350" y="140" text-anchor="middle" fill="#64748b" font-size="11">一次性压缩，无需逐步驱逐，实现零额外延迟开销</text>
+                </svg>
+            </div>
+        </div>
+
+        <h3>4.3 PyramidInfer: 金字塔KV Cache</h3>
+        <div class="card">
+            <p>PyramidInfer提出按层差异化分配KV Cache预算：浅层（信息冗余度高）分配更少的KV存储，深层（信息更关键）分配更多。</p>
+            <div class="svg-container" style="margin: 16px 0; padding: 16px;">
+                <svg viewBox="0 0 600 220" xmlns="http://www.w3.org/2000/svg">
+                    <text x="300" y="20" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">PyramidInfer: 金字塔式KV预算分配</text>
+                    <!-- Pyramid layers -->
+                    <rect x="100" y="40" width="400" height="30" rx="4" fill="rgba(239,68,68,0.2)" stroke="#ef4444" stroke-width="1"/>
+                    <text x="300" y="60" text-anchor="middle" fill="#f87171" font-size="12">深层 (Layer 28-32) — 预算: 100%</text>
+                    <rect x="130" y="76" width="340" height="30" rx="4" fill="rgba(245,158,11,0.2)" stroke="#f59e0b" stroke-width="1"/>
+                    <text x="300" y="96" text-anchor="middle" fill="#fbbf24" font-size="12">中层 (Layer 14-27) — 预算: 60%</text>
+                    <rect x="160" y="112" width="280" height="30" rx="4" fill="rgba(59,130,246,0.2)" stroke="#3b82f6" stroke-width="1"/>
+                    <text x="300" y="132" text-anchor="middle" fill="#60a5fa" font-size="12">浅层 (Layer 7-13) — 预算: 35%</text>
+                    <rect x="190" y="148" width="220" height="30" rx="4" fill="rgba(16,185,129,0.2)" stroke="#10b981" stroke-width="1"/>
+                    <text x="300" y="168" text-anchor="middle" fill="#34d399" font-size="12">最浅层 (Layer 0-6) — 预算: 20%</text>
+                    <!-- Arrow -->
+                    <line x1="520" y1="170" x2="520" y2="50" stroke="#475569" stroke-width="2"/>
+                    <polygon points="516,50 520,42 524,50" fill="#475569"/>
+                    <text x="545" y="110" text-anchor="middle" fill="#94a3b8" font-size="11" transform="rotate(-90 545 110)">信息密度递增</text>
+                </svg>
+            </div>
+        </div>
+
+        <h3>4.4 差异化头/层策略汇总</h3>
+        <table>
+            <thead>
+                <tr>
+                    <th>方法</th>
+                    <th>驱逐粒度</th>
+                    <th>核心依据</th>
+                    <th>额外开销</th>
+                    <th>典型压缩率</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>FastGen</strong></td>
+                    <td>逐头</td>
+                    <td>注意力模式profiling</td>
+                    <td><span class="tag tag-orange">中等</span> 需离线分析</td>
+                    <td>50-70%</td>
+                </tr>
+                <tr>
+                    <td><strong>SnapKV</strong></td>
+                    <td>逐层逐头</td>
+                    <td>Prefill后观察注意力</td>
+                    <td><span class="tag tag-green">低</span> 一次性压缩</td>
+                    <td>60-80%</td>
+                </tr>
+                <tr>
+                    <td><strong>PyramidInfer</strong></td>
+                    <td>逐层</td>
+                    <td>层间信息密度差异</td>
+                    <td><span class="tag tag-green">低</span> 静态配置</td>
+                    <td>50-75%</td>
+                </tr>
+                <tr>
+                    <td><strong>H2O</strong></td>
+                    <td>逐头</td>
+                    <td>累积注意力分数</td>
+                    <td><span class="tag tag-green">低</span> 堆维护</td>
+                    <td>70-90%</td>
+                </tr>
+            </tbody>
+        </table>
+    </section>
+
+    <!-- ==================== SECTION 5 ==================== -->
+    <section id="sec5">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(16, 185, 129, 0.15);">🌊</div>
+            <h2>5. StreamingLLM与注意力汇聚</h2>
+        
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>注意力汇聚就像音乐会的开场和返场——开场定基调，返场最重要，中间部分可以精简。模型的前几个token（如[BOS]）承载了异常高的注意力，必须保留。</div>
+<div class="warn"><strong>常见误区：</strong>StreamingLLM最大误区：以为只保留最近token就够了。实验表明丢弃初始sink token会导致perplexity暴增10倍以上，模型输出完全崩溃，前4个token必须始终保留。</div>
+<div class="deep"><strong>深入探讨：</strong>StreamingLLM公式：保留token = sink_tokens(前4个) + recent_tokens(滑动窗口)。Llama-2-7B上4个sink+4096个recent可实现无限长度推理，perplexity与全量KV Cache差异<0.1%，延迟恒定。</div>
+<div class="ascii"><pre>StreamingLLM滑动窗口
+[SOS][T1][T2][T3] | ... | [Tn-3]...[Tn]
+ ← sink(4) →   已驱逐    ← recent →
+  始终保留      释放显存    滑动更新
+     ↓
+  实现无限长度流式推理</pre></div>
+<table><tr><th>组件</th><th>数量</th><th>是否可驱逐</th></tr><tr><td>Sink Tokens</td><td>4个</td><td>❌ 必须保留</td></tr><tr><td>最近窗口</td><td>2K-4K</td><td>滑动更新</td></tr><tr><td>中间历史</td><td>其余全部</td><td>✅ 可驱逐</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+</div>
+
+        <p>StreamingLLM揭示了一个深刻的现象：LLM推理中存在"注意力汇聚"(Attention Sink)机制，并据此提出了一种极简但有效的KV Cache管理策略。</p>
+
+        <h3>注意力汇聚的核心发现</h3>
+
+        <div class="svg-container">
+            <svg viewBox="0 0 800 280" xmlns="http://www.w3.org/2000/svg">
+                <text x="400" y="22" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="600">StreamingLLM: 滑动窗口 + Attention Sink Tokens</text>
+                <!-- Token sequence -->
+                <g transform="translate(30, 50)">
+                    <text x="0" y="0" fill="#94a3b8" font-size="12">完整token序列:</text>
+                    <g transform="translate(0, 15)">
+                        <!-- Sink tokens -->
+                        <rect x="0" y="0" width="60" height="36" rx="6" fill="#ef4444" opacity="0.8"/>
+                        <text x="30" y="24" text-anchor="middle" fill="white" font-size="11" font-weight="600">BOS</text>
+                        <rect x="64" y="0" width="60" height="36" rx="6" fill="#ef4444" opacity="0.6"/>
+                        <text x="94" y="24" text-anchor="middle" fill="white" font-size="11">t1</text>
+                        <rect x="128" y="0" width="60" height="36" rx="6" fill="#ef4444" opacity="0.5"/>
+                        <text x="158" y="24" text-anchor="middle" fill="white" font-size="11">t2</text>
+                        <rect x="192" y="0" width="60" height="36" rx="6" fill="#ef4444" opacity="0.4"/>
+                        <text x="222" y="24" text-anchor="middle" fill="white" font-size="11">t3</text>
+                        <!-- Middle: evicted -->
+                        <rect x="256" y="0" width="36" height="36" rx="6" fill="none" stroke="#334155" stroke-width="1.5" stroke-dasharray="4,3"/>
+                        <text x="274" y="24" text-anchor="middle" fill="#475569" font-size="14">...</text>
+                        <!-- Recent window -->
+                        <rect x="320" y="0" width="60" height="36" rx="6" fill="#3b82f6" opacity="0.5"/>
+                        <text x="350" y="24" text-anchor="middle" fill="white" font-size="11">tN-4</text>
+                        <rect x="384" y="0" width="60" height="36" rx="6" fill="#3b82f6" opacity="0.6"/>
+                        <text x="414" y="24" text-anchor="middle" fill="white" font-size="11">tN-3</text>
+                        <rect x="448" y="0" width="60" height="36" rx="6" fill="#3b82f6" opacity="0.7"/>
+                        <text x="478" y="24" text-anchor="middle" fill="white" font-size="11">tN-2</text>
+                        <rect x="512" y="0" width="60" height="36" rx="6" fill="#3b82f6" opacity="0.8"/>
+                        <text x="542" y="24" text-anchor="middle" fill="white" font-size="11">tN-1</text>
+                        <rect x="576" y="0" width="60" height="36" rx="6" fill="#f59e0b" opacity="0.9"/>
+                        <text x="606" y="24" text-anchor="middle" fill="white" font-size="11" font-weight="600">tN</text>
+                    </g>
+                </g>
+                <!-- Labels -->
+                <g transform="translate(30, 120)">
+                    <rect x="0" y="0" width="240" height="22" rx="4" fill="rgba(239,68,68,0.15)"/>
+                    <text x="120" y="16" text-anchor="middle" fill="#f87171" font-size="11" font-weight="600">Sink Tokens (始终保留)</text>
+                    <rect x="310" y="0" width="340" height="22" rx="4" fill="rgba(59,130,246,0.15)"/>
+                    <text x="480" y="16" text-anchor="middle" fill="#60a5fa" font-size="11" font-weight="600">Recent Window (滑动窗口)</text>
+                    <rect x="250" y="0" width="60" height="22" rx="4" fill="rgba(71,85,105,0.15)"/>
+                    <text x="280" y="16" text-anchor="middle" fill="#475569" font-size="11">驱逐</text>
+                </g>
+                <!-- Attention pattern below -->
+                <g transform="translate(30, 165)">
+                    <text x="0" y="0" fill="#94a3b8" font-size="12">解码时的注意力分布:</text>
+                    <!-- Bar chart -->
+                    <g transform="translate(0, 15)">
+                        <rect x="0" y="40" width="70" height="60" rx="4" fill="#ef4444" opacity="0.7"/>
+                        <text x="35" y="75" text-anchor="middle" fill="white" font-size="11">Sink</text>
+                        <text x="35" y="32" text-anchor="middle" fill="#f87171" font-size="13" font-weight="600">25%</text>
+                        <rect x="90" y="70" width="420" height="30" rx="4" fill="#334155" opacity="0.5"/>
+                        <text x="300" y="90" text-anchor="middle" fill="#64748b" font-size="11">已驱逐的中间token (注意力 ≈ 0)</text>
+                        <rect x="530" y="20" width="100" height="80" rx="4" fill="#3b82f6" opacity="0.7"/>
+                        <text x="580" y="65" text-anchor="middle" fill="white" font-size="11">Recent</text>
+                        <text x="580" y="14" text-anchor="middle" fill="#60a5fa" font-size="13" font-weight="600">70%</text>
+                        <rect x="650" y="70" width="50" height="30" rx="4" fill="#64748b" opacity="0.3"/>
+                        <text x="675" y="90" text-anchor="middle" fill="#94a3b8" font-size="10">其他</text>
+                        <text x="675" y="62" text-anchor="middle" fill="#94a3b8" font-size="11">5%</text>
+                    </g>
+                </g>
+            </svg>
+            <div class="svg-title">图5: StreamingLLM策略——保留少量Sink tokens + 滑动窗口，实现无限长度流式推理</div>
+        </div>
+
+        <h3>三层次理解</h3>
+
+        <div class="layer-box layer-intuition">
+            <span class="layer-label">直觉层</span>
+            <p style="margin:0">想象一条传送带上的物品（tokens）。你有两个关注点：①传送带最开头放的"指示牌"（sink tokens），你时不时需要看它来保持方向感；②传送带末端刚到的新物品（recent tokens），你正在处理它们。中间那些已经走远的旧物品，你几乎不需要再回头看。</p>
+        </div>
+
+        <div class="layer-box layer-mechanism">
+            <span class="layer-label">机制层</span>
+            <p style="margin:0">
+                <strong>KV Cache结构：</strong>[Sink KVs (固定4个)] + [Recent Window KVs (滑动窗口大小w)]<br>
+                <strong>窗口滑动：</strong>当新token进入，最老的recent token被淘汰，但sink tokens永远不淘汰<br>
+                <strong>总预算：</strong>sink_size + window_size，通常 4 + (4092) = 4096 tokens<br>
+                <strong>位置编码：</strong>使用相对位置编码(RoPE)时，需保持位置索引连续（不因驱逐而跳变）
+            </p>
+        </div>
+
+        <div class="layer-box layer-formula">
+            <span class="layer-label">公式层</span>
+            <p style="margin:0">
+                <code>KV_kept = [KV_0, KV_1, ..., KV_s | KV_{n-w}, ..., KV_{n-1}, KV_n]</code><br>
+                其中 s = sink数量(通常4)，w = 窗口大小<br><br>
+                <strong>注意力汇聚原因：</strong>softmax要求 Σα_i = 1。当模型"不想关注"任何token时，它会将多余注意力dump到固定的sink token上，避免干扰。<br>
+                <code>α_sink = 1 - Σ_{i∈relevant} α_i &nbsp; (吸收"无用"注意力)</code>
+            </p>
+        </div>
+
+        <div class="highlight-box warning">
+            <strong>⚠️ 关键限制：</strong>StreamingLLM的滑动窗口策略<strong>无法外推到训练时未见过的序列长度</strong>。它只能让推理"持续运行"而不崩溃，但<strong>无法真正利用超出窗口的长距离上下文信息</strong>。这意味着它不适合需要"回忆"很久以前内容的任务（如长文档问答）。
+        </div>
+    </section>
+
+    <!-- ==================== SECTION 6 ==================== -->
+    <section id="sec6">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(245, 158, 11, 0.15);">🕸️</div>
+            <h2>6. 稀疏注意力与KV Cache</h2>
+        
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>稀疏注意力就像用聚光灯而非泛光灯照亮舞台——只聚焦关键区域，其余保持昏暗。不是每个token都要和所有历史token交互，只计算相关的子集即可大幅节省计算。</div>
+<div class="warn"><strong>常见误区：</strong>稀疏模式选错会导致严重信息丢失。全局attention捕获长程依赖，局部窗口捕获上下文，两者缺一不可。纯局部窗口会让模型丧失跨段落理解能力。</div>
+<div class="deep"><strong>深入探讨：</strong>典型稀疏模式：Longformer采用local+global，窗口大小w=512，每256token设一个global attention。BigBird用random+window+global组合。实测稀疏度75%（只计算25%attention）时性能损失<1%。</div>
+<div class="ascii"><pre>稀疏注意力模式对比
+Local:    [■■■□□□□□□□] 窗口512
+Global:   [■□□□■□□□■□] 每256token
+Random:   [□■□□□□■□□□] 随机采样
+Combined: 三者并集 → 全面覆盖</pre></div>
+<table><tr><th>稀疏模式</th><th>计算复杂度</th><th>适用场景</th></tr><tr><td>Local Window</td><td>O(n×w)</td><td>短文本生成</td></tr><tr><td>Global+Local</td><td>O(n×(w+g))</td><td>长文档理解</td></tr><tr><td>Random+Window</td><td>O(n×(w+r))</td><td>通用长序列</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+</div>
+
+        <p>稀疏注意力从另一个角度解决KV Cache问题：不是先存满再驱逐，而是一开始就只计算和存储必要的注意力连接。这将KV Cache优化从"事后清理"转向"事前规划"。</p>
+
+        <h3>经典稀疏注意力模式</h3>
+
+        <div class="svg-container">
+            <svg viewBox="0 0 800 350" xmlns="http://www.w3.org/2000/svg">
+                <text x="400" y="22" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="600">稀疏注意力模式对比</text>
+                <!-- Local pattern -->
+                <g transform="translate(20, 50)">
+                    <text x="75" y="0" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">Local (局部窗口)</text>
+                    <g transform="translate(0, 15)">
+                        <rect x="0" y="0" width="150" height="150" rx="8" fill="#111827" stroke="#1e293b" stroke-width="1"/>
+                        <!-- Diagonal band -->
+                        <rect x="0" y="120" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="30" y="90" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="30" y="120" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="60" y="60" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="60" y="90" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="60" y="120" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="90" y="30" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="90" y="60" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="90" y="90" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="120" y="0" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="120" y="30" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="120" y="60" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                    </g>
+                </g>
+                <!-- Global pattern -->
+                <g transform="translate(200, 50)">
+                    <text x="75" y="0" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">Global + Local</text>
+                    <g transform="translate(0, 15)">
+                        <rect x="0" y="0" width="150" height="150" rx="8" fill="#111827" stroke="#1e293b" stroke-width="1"/>
+                        <!-- Global rows (first 2 tokens attend to all) -->
+                        <rect x="0" y="0" width="150" height="20" rx="2" fill="#ef4444" opacity="0.6"/>
+                        <rect x="0" y="20" width="150" height="20" rx="2" fill="#ef4444" opacity="0.5"/>
+                        <!-- Global columns (all attend to first 2 tokens) -->
+                        <rect x="0" y="0" width="20" height="150" rx="2" fill="#ef4444" opacity="0.5"/>
+                        <rect x="20" y="0" width="20" height="150" rx="2" fill="#ef4444" opacity="0.4"/>
+                        <!-- Local band -->
+                        <rect x="60" y="60" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="90" y="60" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="90" y="90" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="120" y="90" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="120" y="120" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                    </g>
+                </g>
+                <!-- BigBird pattern -->
+                <g transform="translate(380, 50)">
+                    <text x="75" y="0" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">BigBird</text>
+                    <g transform="translate(0, 15)">
+                        <rect x="0" y="0" width="150" height="150" rx="8" fill="#111827" stroke="#1e293b" stroke-width="1"/>
+                        <!-- Global -->
+                        <rect x="0" y="0" width="150" height="20" rx="2" fill="#ef4444" opacity="0.5"/>
+                        <rect x="0" y="0" width="20" height="150" rx="2" fill="#ef4444" opacity="0.4"/>
+                        <!-- Local band -->
+                        <rect x="120" y="120" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="90" y="120" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <rect x="90" y="90" width="30" height="30" rx="2" fill="#3b82f6" opacity="0.7"/>
+                        <!-- Random connections -->
+                        <rect x="40" y="100" width="15" height="15" rx="2" fill="#f59e0b" opacity="0.7"/>
+                        <rect x="100" y="40" width="15" height="15" rx="2" fill="#f59e0b" opacity="0.7"/>
+                        <rect x="60" y="50" width="15" height="15" rx="2" fill="#f59e0b" opacity="0.7"/>
+                        <rect x="130" y="70" width="15" height="15" rx="2" fill="#f59e0b" opacity="0.7"/>
+                        <rect x="30" y="60" width="15" height="15" rx="2" fill="#f59e0b" opacity="0.7"/>
+                    </g>
+                    <text x="75" y="180" text-anchor="middle" fill="#64748b" font-size="10">Global + Local + Random</text>
+                </g>
+                <!-- Quest pattern -->
+                <g transform="translate(560, 50)">
+                    <text x="75" y="0" text-anchor="middle" fill="#e2e8f0" font-size="13" font-weight="600">Quest (Query-aware)</text>
+                    <g transform="translate(0, 15)">
+                        <rect x="0" y="0" width="150" height="150" rx="8" fill="#111827" stroke="#1e293b" stroke-width="1"/>
+                        <!-- Dynamically selected blocks -->
+                        <rect x="0" y="0" width="30" height="30" rx="2" fill="#10b981" opacity="0.7"/>
+                        <rect x="0" y="30" width="30" height="30" rx="2" fill="#10b981" opacity="0.6"/>
+                        <rect x="60" y="60" width="30" height="30" rx="2" fill="#10b981" opacity="0.7"/>
+                        <rect x="60" y="90" width="30" height="30" rx="2" fill="#10b981" opacity="0.6"/>
+                        <rect x="120" y="120" width="30" height="30" rx="2" fill="#10b981" opacity="0.8"/>
+                        <rect x="90" y="120" width="30" height="30" rx="2" fill="#10b981" opacity="0.7"/>
+                        <rect x="120" y="90" width="30" height="30" rx="2" fill="#10b981" opacity="0.6"/>
+                        <!-- Current query -->
+                        <rect x="0" y="0" width="150" height="150" rx="8" fill="none" stroke="#10b981" stroke-width="2" stroke-dasharray="6,3"/>
+                    </g>
+                    <text x="75" y="180" text-anchor="middle" fill="#64748b" font-size="10">查询驱动的动态稀疏</text>
+                </g>
+                <!-- Legend -->
+                <g transform="translate(20, 260)">
+                    <rect x="0" y="0" width="14" height="14" rx="3" fill="#3b82f6" opacity="0.7"/>
+                    <text x="20" y="12" fill="#94a3b8" font-size="11">局部注意力</text>
+                    <rect x="120" y="0" width="14" height="14" rx="3" fill="#ef4444" opacity="0.6"/>
+                    <text x="140" y="12" fill="#94a3b8" font-size="11">全局注意力</text>
+                    <rect x="240" y="0" width="14" height="14" rx="3" fill="#f59e0b" opacity="0.7"/>
+                    <text x="260" y="12" fill="#94a3b8" font-size="11">随机连接</text>
+                    <rect x="360" y="0" width="14" height="14" rx="3" fill="#10b981" opacity="0.7"/>
+                    <text x="380" y="12" fill="#94a3b8" font-size="11">动态选择</text>
+                </g>
+            </svg>
+            <div class="svg-title">图6: 四种稀疏注意力模式——从固定模式到查询驱动的动态稀疏</div>
+        </div>
+
+        <h3>稀疏注意力对KV Cache的影响</h3>
+        <div class="card-grid">
+            <div class="insight-card blue">
+                <h4>📐 Longformer: 局部+全局</h4>
+                <p>每个token只关注窗口内的w个邻居 + 少量全局token。KV Cache仅需存储活跃的局部窗口和全局token，复杂度从O(n²)降至O(n×w)。</p>
+            </div>
+            <div class="insight-card purple">
+                <h4>🎲 BigBird: 三重稀疏</h4>
+                <p>组合局部窗口 + 全局token + 随机连接。随机连接保证了理论上的图连通性，局部性保证了效率，全局token提供了信息桥梁。</p>
+            </div>
+            <div class="insight-card green">
+                <h4>🔍 Quest: 查询感知</h4>
+                <p>不预设固定的稀疏模式，而是根据当前query动态决定哪些key block值得计算。通过轻量级的block选择器，预估每个KV block的重要性，只计算top-k个block。</p>
+            </div>
+            <div class="insight-card cyan">
+                <h4>⚡ 动态稀疏的意义</h4>
+                <p>固定模式假设所有输入有相同的注意力结构——这显然不对。动态稀疏让模型根据输入内容自适应调整，在质量和效率间找到更好的平衡。</p>
+            </div>
+        </div>
+
+        <pre><code><span class="comment"># Quest: 查询感知的KV Block选择</span>
+<span class="keyword">def</span> <span class="function">quest_attention</span>(Q, K_blocks, V_blocks, top_k):
+    <span class="string">"""
+    Q: [n_heads, 1, d]  当前query
+    K_blocks: [n_blocks, block_size, d]  分块的Key
+    V_blocks: [n_blocks, block_size, d]  分块的Value
+    """</span>
+    <span class="comment"># Step 1: 轻量级预估——用每个block的极值key近似</span>
+    K_max = K_blocks.max(dim=<span class="number">1</span>)  <span class="comment"># [n_blocks, d]</span>
+    K_min = K_blocks.min(dim=<span class="number">1</span>)  <span class="comment"># [n_blocks, d]</span>
+
+    <span class="comment"># Step 2: 估算每个block的最大可能注意力分数</span>
+    scores_upper = (Q @ K_max.T + Q @ K_min.T) / <span class="number">2</span>
+    scores_range = abs(Q @ (K_max - K_min).T) / <span class="number">2</span>
+    block_scores = scores_upper + scores_range  <span class="comment"># 上界估计</span>
+
+    <span class="comment"># Step 3: 只计算top-k blocks的精确注意力</span>
+    selected = topk(block_scores, k=top_k)
+    K_selected = K_blocks[selected]  <span class="comment"># 只取选中的blocks</span>
+    V_selected = V_blocks[selected]
+
+    <span class="comment"># Step 4: 标准注意力计算（只在选中的blocks上）</span>
+    attn = softmax(Q @ K_selected.T / sqrt(d))
+    <span class="keyword">return</span> attn @ V_selected</code></pre>
+    </section>
+
+    <!-- ==================== SECTION 7 ==================== -->
+    <section id="sec7">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(236, 72, 153, 0.15);">🔗</div>
+            <h2>7. KV Cache合并技术</h2>
+        
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>KV Cache合并就像打包行李箱——把多件衣服卷成紧实的一卷，占用空间更小但功能不变。合并技术将多个KV向量压缩为更少的表示，减少显存同时保留关键信息。</div>
+<div class="warn"><strong>常见误区：</strong>合并过度会损失细节信息。压缩比过高（如4:1以上）会导致生成质量明显下降。建议从2:1开始测试，逐步提升压缩比，找到精度与显存的最佳平衡点。</div>
+<div class="deep"><strong>深入探讨：</strong>CLA(Cache-Linking Attention)将相邻层KV Cache合并，如第l层和第l+1层共享同一份KV。实测Llama-2-7B合并相邻2层后显存减少50%，perplexity增加仅0.8%。D2O方法通过PCA降维进一步压缩。</div>
+<div class="ascii"><pre>KV Cache合并示意
+Layer l:   [K1][K2][K3][K4]  4份
+Layer l+1: [K1][K2][K3][K4]  4份
+          ↓ 合并共享 ↓
+Merged:    [K1'][K2'][K3'][K4']  4份共用
+显存: 8份 → 4份 = 节省50%</pre></div>
+<table><tr><th>合并技术</th><th>压缩比</th><th>精度影响</th></tr><tr><td>CLA(层间合并)</td><td>2:1</td><td>+0.8% ppl</td></tr><tr><td>D2O(PCA降维)</td><td>4:1</td><td>+1.5% ppl</td></tr><tr><td>Token合并</td><td>2:1~4:1</td><td>+1~3% ppl</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+</div>
+
+        <p>合并(Merging)是驱逐的替代方案：与其直接丢弃不重要的KV对，不如将相似的KV对合并为一个"代表"。这能在压缩内存的同时保留更多信息。</p>
+
+        <h3>7.1 CaM (Cache Merging)</h3>
+
+        <div class="svg-container">
+            <svg viewBox="0 0 800 240" xmlns="http://www.w3.org/2000/svg">
+                <text x="400" y="22" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="600">KV Cache 合并 vs 驱逐 对比</text>
+                <!-- Eviction path -->
+                <g transform="translate(30, 50)">
+                    <text x="150" y="0" text-anchor="middle" fill="#ef4444" font-size="13" font-weight="600">驱逐 (Eviction)</text>
+                    <g transform="translate(0, 15)">
+                        <!-- Original tokens -->
+                        <rect x="0" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.7"/>
+                        <text x="28" y="26" text-anchor="middle" fill="white" font-size="10">KV₁</text>
+                        <rect x="62" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.5"/>
+                        <text x="90" y="26" text-anchor="middle" fill="white" font-size="10">KV₂</text>
+                        <rect x="124" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.6"/>
+                        <text x="152" y="26" text-anchor="middle" fill="white" font-size="10">KV₃</text>
+                        <rect x="186" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.4"/>
+                        <text x="214" y="26" text-anchor="middle" fill="white" font-size="10">KV₄</text>
+                        <rect x="248" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.8"/>
+                        <text x="276" y="26" text-anchor="middle" fill="white" font-size="10">KV₅</text>
+                    </g>
+                    <!-- Arrow -->
+                    <g transform="translate(0, 70)">
+                        <text x="150" y="0" text-anchor="middle" fill="#ef4444" font-size="24">↓</text>
+                        <text x="150" y="18" text-anchor="middle" fill="#64748b" font-size="11">丢弃 KV₂, KV₄</text>
+                    </g>
+                    <!-- After eviction -->
+                    <g transform="translate(0, 100)">
+                        <rect x="0" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.7"/>
+                        <text x="28" y="26" text-anchor="middle" fill="white" font-size="10">KV₁</text>
+                        <rect x="80" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.6"/>
+                        <text x="108" y="26" text-anchor="middle" fill="white" font-size="10">KV₃</text>
+                        <rect x="160" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.8"/>
+                        <text x="188" y="26" text-anchor="middle" fill="white" font-size="10">KV₅</text>
+                        <text x="260" y="25" fill="#ef4444" font-size="11">信息丢失!</text>
+                    </g>
+                </g>
+                <!-- Merging path -->
+                <g transform="translate(420, 50)">
+                    <text x="150" y="0" text-anchor="middle" fill="#10b981" font-size="13" font-weight="600">合并 (Merging)</text>
+                    <g transform="translate(0, 15)">
+                        <rect x="0" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.7"/>
+                        <text x="28" y="26" text-anchor="middle" fill="white" font-size="10">KV₁</text>
+                        <rect x="62" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.5"/>
+                        <text x="90" y="26" text-anchor="middle" fill="white" font-size="10">KV₂</text>
+                        <rect x="124" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.6"/>
+                        <text x="152" y="26" text-anchor="middle" fill="white" font-size="10">KV₃</text>
+                        <rect x="186" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.4"/>
+                        <text x="214" y="26" text-anchor="middle" fill="white" font-size="10">KV₄</text>
+                        <rect x="248" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.8"/>
+                        <text x="276" y="26" text-anchor="middle" fill="white" font-size="10">KV₅</text>
+                    </g>
+                    <!-- Arrow -->
+                    <g transform="translate(0, 70)">
+                        <text x="150" y="0" text-anchor="middle" fill="#10b981" font-size="24">↓</text>
+                        <text x="150" y="18" text-anchor="middle" fill="#64748b" font-size="11">合并相似: KV₂+KV₄ → KV₂₄</text>
+                    </g>
+                    <!-- After merging -->
+                    <g transform="translate(0, 100)">
+                        <rect x="0" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.7"/>
+                        <text x="28" y="26" text-anchor="middle" fill="white" font-size="10">KV₁</text>
+                        <rect x="80" y="0" width="70" height="40" rx="5" fill="#10b981" opacity="0.7"/>
+                        <text x="115" y="26" text-anchor="middle" fill="white" font-size="10">KV₂₄</text>
+                        <rect x="175" y="0" width="55" height="40" rx="5" fill="#3b82f6" opacity="0.8"/>
+                        <text x="203" y="26" text-anchor="middle" fill="white" font-size="10">KV₅</text>
+                        <text x="260" y="25" fill="#10b981" font-size="11">信息保留!</text>
+                    </g>
+                </g>
+            </svg>
+            <div class="svg-title">图7: 驱逐直接丢弃信息，合并将相似token的信息融合后保留</div>
+        </div>
+
+        <h3>合并方法分类</h3>
+
+        <div class="card-grid">
+            <div class="insight-card green">
+                <h4>🎯 K-Means 合并</h4>
+                <p>将KV向量聚类，每个簇用中心点代表。合并后的KV = 簇中心的加权平均。适合token高度相似的场景（如重复模式）。</p>
+            </div>
+            <div class="insight-card purple">
+                <h4>📏 相似度合并</h4>
+                <p>计算KV对之间的余弦相似度，合并最相似的对。需要O(n²)预计算但可以增量更新。保留了更多语义信息。</p>
+            </div>
+            <div class="insight-card blue">
+                <h4>⚖️ 加权平均合并</h4>
+                <p><code>KV_merged = Σ w_i · KV_i</code>，权重w由注意力分数决定。高注意力token在合并后的"代表"中占更大比重。</p>
+            </div>
+            <div class="insight-card orange">
+                <h4>🏗️ Token Merging (ToMe)</h4>
+                <p>源自视觉领域的Token Merging方法。将token序列分为两半，计算跨半相似度，用贪心匹配合并最相似的token对。</p>
+            </div>
+        </div>
+
+        <pre><code><span class="comment"># KV Cache K-Means 合并伪代码</span>
+<span class="keyword">def</span> <span class="function">merge_kv_cache_kmeans</span>(K, V, target_size):
+    <span class="string">"""
+    K: [seq_len, d]  当前Key缓存
+    V: [seq_len, d]  当前Value缓存
+    target_size: 目标压缩大小
+    """</span>
+    <span class="comment"># 对K向量做K-Means聚类</span>
+    kmeans = KMeans(n_clusters=target_size)
+    labels = kmeans.fit_predict(K)  <span class="comment"># [seq_len] → 簇标签</span>
+
+    <span class="comment"># 每个簇内加权平均</span>
+    K_merged = []
+    V_merged = []
+    <span class="keyword">for</span> c <span class="keyword">in</span> range(target_size):
+        mask = (labels == c)
+        <span class="comment"># 可选: 按注意力权重加权</span>
+        weights = attn_weights[mask] / attn_weights[mask].sum()
+        K_merged.append((K[mask] * weights[:, None]).sum(dim=<span class="number">0</span>))
+        V_merged.append((V[mask] * weights[:, None]).sum(dim=<span class="number">0</span>))
+
+    <span class="keyword">return</span> stack(K_merged), stack(V_merged)  <span class="comment"># [target_size, d]</span></code></pre>
+
+        <div class="layer-box layer-intuition">
+            <span class="layer-label">直觉层</span>
+            <p style="margin:0">驱逐像是"删除旧照片"来腾空间，合并像是"把多张相似照片拼成一张全景图"。全景图不如每张单独照片精确，但保留了更多整体信息。特别当多张照片拍的是同一场景时，合并几乎不损失信息。</p>
+        </div>
+    </section>
+
+    <!-- ==================== SECTION 8 ==================== -->
+    <section id="sec8">
+        <div class="section-header">
+            <div class="section-icon" style="background: rgba(59, 130, 246, 0.15);">📊</div>
+            <h2>8. 各策略对比与选型</h2>
+        
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>选择KV-Cache策略就像在餐厅管理厨房备料：全缓存是备齐所有食材，驱逐策略是按客人点单准备，稀疏化是只备主料。需根据需求平衡成本和效率。</div>
+<div class="warn"><strong>常见误区：</strong>常见错误是忽略策略的动态适应，如驱逐策略未考虑访问模式，或稀疏化中关键token选择不当，导致缓存失效或性能下降。</div>
+<div class="deep"><strong>深入探讨：</strong>工程中，Full KV-Cache内存消耗为O(L*N*D)，L为序列长，N为层数，D为隐藏维度。例如，L=2048, N=32, D=4096时，内存约1GB。稀疏化如StreamingLLM可降至O(k*N*D)，k为窗口大小，缓存命中率公式：命中次数/总访问次数。</div>
+<div class="ascii"><pre>KV-Cache策略对比：
+Full Cache: [*****] 内存:高 速度:快
+LRU驱逐:  [***__] 内存:中 速度:中
+稀疏化:    [**___] 内存:低 速度:变</pre></div>
+<table><tr><th>策略类型</th><th>内存占用</th><th>推理速度</th><th>适用场景</th></tr><tr><td>Full KV-Cache</td><td>高 (O(L*N*D))</td><td>最快</td><td>短序列，内存充足</td></tr><tr><td>LRU驱逐</td><td>中等 (动态)</td><td>较快</td><td>长序列，访问有局部性</td></tr><tr><td>稀疏化策略</td><td>低 (O(k*N*D))</td><td>可能较慢</td><td>超长序列，内存受限</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+</div>
+
+        <p>面对众多KV Cache压缩策略，如何为特定场景选择最佳方案？以下是全面的对比分析。</p>
+
+        <h3>核心维度对比表</h3>
+
+        <div class="card" style="overflow-x: auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>维度</th>
+                        <th>H2O</th>
+                        <th>StreamingLLM</th>
+                        <th>SnapKV</th>
+                        <th>FastGen</th>
+                        <th>CaM (合并)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>核心思想</strong></td>
+                        <td>累积注意力分数Top-K</td>
+                        <td>滑动窗口 + Sink</td>
+                        <td>Prefill后一次性选择</td>
+                        <td>逐头profiling策略</td>
+                        <td>相似KV加权合并</td>
+                    </tr>
+                    <tr>
+                        <td><strong>质量损失</strong></td>
+                        <td><span class="tag tag-green">低</span></td>
+                        <td><span class="tag tag-orange">中等</span></td>
+                        <td><span class="tag tag-green">低</span></td>
+                        <td><span class="tag tag-green">低</span></td>
+                        <td><span class="tag tag-green">很低</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>压缩率</strong></td>
+                        <td><span class="tag tag-green">70-90%</span></td>
+                        <td><span class="tag tag-blue">固定窗口</span></td>
+                        <td><span class="tag tag-green">60-80%</span></td>
+                        <td><span class="tag tag-green">50-70%</span></td>
+                        <td><span class="tag tag-orange">40-60%</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>额外延迟</strong></td>
+                        <td><span class="tag tag-green">极低</span> O(log k)</td>
+                        <td><span class="tag tag-green">零</span></td>
+                        <td><span class="tag tag-green">低</span> Prefill后</td>
+                        <td><span class="tag tag-orange">中</span> 需profiling</td>
+                        <td><span class="tag tag-red">较高</span> 聚类开销</td>
+                    </tr>
+                    <tr>
+                        <td><strong>实现复杂度</strong></td>
+                        <td><span class="tag tag-green">简单</span></td>
+                        <td><span class="tag tag-green">最简单</span></td>
+                        <td><span class="tag tag-green">中等</span></td>
+                        <td><span class="tag tag-orange">较高</span></td>
+                        <td><span class="tag tag-red">高</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>流式支持</strong></td>
+                        <td><span class="tag tag-green">✓</span></td>
+                        <td><span class="tag tag-green">✓ 原生</span></td>
+                        <td><span class="tag tag-red">✗</span> 需Prefill</td>
+                        <td><span class="tag tag-green">✓</span></td>
+                        <td><span class="tag tag-orange">✓ 周期性</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>长距离依赖</strong></td>
+                        <td><span class="tag tag-green">✓ 保留重要</span></td>
+                        <td><span class="tag tag-red">✗ 仅窗口</span></td>
+                        <td><span class="tag tag-green">✓ 全局选择</span></td>
+                        <td><span class="tag tag-green">✓ 差异化</span></td>
+                        <td><span class="tag tag-green">✓ 合并保留</span></td>
+                    </tr>
+                    <tr>
+                        <td><strong>适配性</strong></td>
+                        <td>通用</td>
+                        <td>流式/对话</td>
+                        <td>长文档QA</td>
+                        <td>多任务</td>
+                        <td>信息密集型</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <h3>综合策略详情对比表</h3>
+
+        <div class="card" style="overflow-x: auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>策略名称</th>
+                        <th>核心思想</th>
+                        <th>内存节省</th>
+                        <th>质量损失</th>
+                        <th>实现复杂度</th>
+                        <th>适用场景</th>
+                        <th>代表论文</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>H2O</strong></td>
+                        <td>累积注意力分数Top-K选择保留token，动态更新重要性</td>
+                        <td><span class="tag tag-green">70-90%</span></td>
+                        <td><span class="tag tag-green">低</span>（perplexity增加&lt;0.5）</td>
+                        <td><span class="tag tag-green">简单</span></td>
+                        <td>通用场景、流式推理、多轮对话</td>
+                        <td> <em>H2O: Heavy-Hitter Oracle</em> (Zhang et al., NeurIPS 2023)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>StreamingLLM</strong></td>
+                        <td>保留初始Sink token + 滑动窗口，利用注意力汇聚现象</td>
+                        <td><span class="tag tag-blue">固定窗口</span>（窗口大小决定）</td>
+                        <td><span class="tag tag-orange">中等</span>（丢失窗口外长距离信息）</td>
+                        <td><span class="tag tag-green">最简单</span></td>
+                        <td>流式对话、实时翻译、无限长度推理</td>
+                        <td><em>Efficient Streaming Language Models with Attention Sinks</em> (Xiao et al., ICLR 2024)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>SnapKV</strong></td>
+                        <td>Prefill阶段观察注意力模式，一次性选择Top-K重要KV</td>
+                        <td><span class="tag tag-green">60-80%</span></td>
+                        <td><span class="tag tag-green">低</span>（保留关键信息token）</td>
+                        <td><span class="tag tag-green">中等</span></td>
+                        <td>长文档问答、摘要生成、单轮长上下文</td>
+                        <td><em>SnapKV: LLM Knows What You are Looking for Before Generation</em> (Li et al., 2024)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>FastGen</strong></td>
+                        <td>对每个注意力头profile不同模式，差异化分配KV预算</td>
+                        <td><span class="tag tag-green">50-70%</span></td>
+                        <td><span class="tag tag-green">低</span>（头级精细化策略）</td>
+                        <td><span class="tag tag-orange">较高</span>（需profiling阶段）</td>
+                        <td>多任务服务、异构负载、不同注意力模式混合</td>
+                        <td><em>Model Tells You What to Discard: Adaptive KV Cache Compression for LLMs</em> (Ge et al., 2024)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>CaM (Cache Merging)</strong></td>
+                        <td>将相似KV向量通过K-Means聚类加权合并，而非直接丢弃</td>
+                        <td><span class="tag tag-orange">40-60%</span></td>
+                        <td><span class="tag tag-green">很低</span>（合并保留更多信息）</td>
+                        <td><span class="tag tag-red">高</span>（聚类计算开销大）</td>
+                        <td>信息密集型任务、翻译、摘要等需全局信息场景</td>
+                        <td><em>Cache Merging for Long-Context LLM Inference</em> (Yi et al., 2024)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>PyramidInfer</strong></td>
+                        <td>不同Transformer层分配不同KV预算，浅层多深层少</td>
+                        <td><span class="tag tag-green">55-75%</span></td>
+                        <td><span class="tag tag-green">低</span>（适配层间信息分布）</td>
+                        <td><span class="tag tag-orange">中等偏高</span></td>
+                        <td>长上下文推理、高吞吐服务、层级优化</td>
+                        <td><em>PyramidInfer: Pyramid KV Cache Compression for High-throughput LLM Inference</em> (Yang et al., 2024)</td>
+                    </tr>
+                    <tr>
+                        <td><strong>ScissorHands</strong></td>
+                        <td>基于历史注意力模式识别不重要的token，周期性剪枝</td>
+                        <td><span class="tag tag-green">60-85%</span></td>
+                        <td><span class="tag tag-green">低</span>（保留关键历史token）</td>
+                        <td><span class="tag tag-green">中等</span></td>
+                        <td>长文本生成、历史token管理、内存受限场景</td>
+                        <td><em>ScissorHands: Efficiently Disabling Transformers with Token Pruning</em> (Liu et al., 2024)</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <h3>质量-内存权衡曲线</h3>
+
+        <div class="svg-container">
+            <svg viewBox="0 0 800 350" xmlns="http://www.w3.org/2000/svg">
+                <text x="400" y="22" text-anchor="middle" fill="#e2e8f0" font-size="15" font-weight="600">不同策略的质量-内存权衡曲线</text>
+                <!-- Axes -->
+                <line x1="80" y1="290" x2="750" y2="290" stroke="#334155" stroke-width="2"/>
+                <line x1="80" y1="290" x2="80" y2="40" stroke="#334155" stroke-width="2"/>
+                <text x="415" y="330" text-anchor="middle" fill="#94a3b8" font-size="13">KV Cache 保留比例</text>
+                <text x="30" y="165" text-anchor="middle" fill="#94a3b8" font-size="13" transform="rotate(-90 30 165)">模型质量 (%)</text>
+                <!-- Scale -->
+                <text x="80" y="305" text-anchor="middle" fill="#64748b" font-size="10">0%</text>
+                <text x="248" y="305" text-anchor="middle" fill="#64748b" font-size="10">25%</text>
+                <text x="415" y="305" text-anchor="middle" fill="#64748b" font-size="10">50%</text>
+                <text x="582" y="305" text-anchor="middle" fill="#64748b" font-size="10">75%</text>
+                <text x="750" y="305" text-anchor="middle" fill="#64748b" font-size="10">100%</text>
+                <text x="72" y="290" text-anchor="end" fill="#64748b" font-size="10">0%</text>
+                <text x="72" y="175" text-anchor="end" fill="#64748b" font-size="10">50%</text>
+                <text x="72" y="58" text-anchor="end" fill="#64748b" font-size="10">100%</text>
+                <!-- H2O curve (blue) -->
+                <path d="M80,275 C200,270 300,230 415,130 C500,80 650,55 750,50" stroke="#3b82f6" stroke-width="3" fill="none"/>
+                <!-- StreamingLLM curve (orange) - plateaus -->
+                <path d="M80,280 C200,278 300,260 415,200 C500,175 650,165 750,160" stroke="#f59e0b" stroke-width="3" fill="none"/>
+                <!-- SnapKV curve (green) -->
+                <path d="M80,278 C200,272 300,225 415,120 C500,72 650,52 750,48" stroke="#10b981" stroke-width="3" fill="none"/>
+                <!-- CaM curve (purple) -->
+                <path d="M80,276 C200,268 300,220 415,110 C500,65 650,50 750,46" stroke="#8b5cf6" stroke-width="3" fill="none"/>
+                <!-- Random eviction (red dashed) -->
+                <path d="M80,280 C200,275 300,260 415,220 C500,195 650,185 750,180" stroke="#ef4444" stroke-width="2" stroke-dasharray="6,4" fill="none"/>
+                <!-- Legend -->
+                <g transform="translate(500, 60)">
+                    <line x1="0" y1="0" x2="20" y2="0" stroke="#8b5cf6" stroke-width="3"/>
+                    <text x="26" y="4" fill="#8b5cf6" font-size="11">CaM</text>
+                    <line x1="0" y1="22" x2="20" y2="22" stroke="#10b981" stroke-width="3"/>
+                    <text x="26" y="26" fill="#10b981" font-size="11">SnapKV</text>
+                    <line x1="0" y1="44" x2="20" y2="44" stroke="#3b82f6" stroke-width="3"/>
+                    <text x="26" y="48" fill="#3b82f6" font-size="11">H2O</text>
+                    <line x1="0" y1="66" x2="20" y2="66" stroke="#f59e0b" stroke-width="3"/>
+                    <text x="26" y="70" fill="#f59e0b" font-size="11">StreamingLLM</text>
+                    <line x1="0" y1="88" x2="20" y2="88" stroke="#ef4444" stroke-width="2" stroke-dasharray="6,4"/>
+                    <text x="26" y="92" fill="#ef4444" font-size="11">随机驱逐 (baseline)</text>
+                </g>
+            </svg>
+            <div class="svg-title">图8: 质量-内存权衡曲线——合并类方法在高压缩率下质量损失最小，StreamingLLM在长序列上质量受限</div>
+        </div>
+
+        <h3>场景选型推荐</h3>
+
+        <div class="card-grid">
+            <div class="insight-card" style="border-left-color: #3b82f6;">
+                <h4>💬 流式对话机器人</h4>
+                <p><strong>推荐：StreamingLLM + H2O</strong><br>
+                理由：对话天然需要流式处理，StreamingLLM提供零开销基础保障，H2O在窗口内精细筛选重要token。</p>
+            </div>
+            <div class="insight-card" style="border-left-color: #10b981;">
+                <h4>📄 长文档问答</h4>
+                <p><strong>推荐：SnapKV + PyramidInfer</strong><br>
+                理由：长文档有明确的Prefill阶段，SnapKV可以一次性压缩。PyramidInfer的分层策略适配文档中不同层级的信息。</p>
+            </div>
+            <div class="insight-card" style="border-left-color: #f59e0b;">
+                <h4>🔧 多任务服务</h4>
+                <p><strong>推荐：FastGen</strong><br>
+                理由：不同任务的注意力模式差异大，FastGen的头级profiling和差异化策略最适合异构工作负载。</p>
+            </div>
+            <div class="insight-card" style="border-left-color: #8b5cf6;">
+                <h4>📐 信息密集型任务</h4>
+                <p><strong>推荐：CaM (合并)</strong><br>
+                理由：如摘要、翻译等需要保留全局信息的任务，合并比驱逐更能保留细节。适合对质量要求极高、可接受一定延迟的场景。</p>
+            </div>
+        </div>
+
+        <h3>组合策略</h3>
+        <div class="highlight-box success">
+            <strong>🚀 最佳实践：分层组合</strong>
+            <p style="margin-top: 8px; margin-bottom: 0;">
+                在实际生产中，最优方案通常是<strong>多种策略的组合</strong>：
+            </p>
+            <ul style="margin-top: 10px; padding-left: 20px; color: var(--text-secondary); font-size: 0.92em;">
+                <li><strong>Prefill阶段：</strong>SnapKV一次性压缩prompt的KV Cache</li>
+                <li><strong>Decode阶段：</strong>StreamingLLM的sink + window作为基线保障</li>
+                <li><strong>窗口内优化：</strong>H2O在窗口内做精细化选择，替换简单的FIFO</li>
+                <li><strong>层间差异化：</strong>PyramidInfer为不同层分配不同预算</li>
+                <li><strong>周期性合并：</strong>每隔N步做一次K-Means合并，进一步压缩</li>
+            </ul>
+        </div>
+
+        <div class="layer-box layer-mechanism">
+            <span class="layer-label">机制层 · 工程化检查清单</span>
+            <p style="margin:0">
+                ✅ 评估你的workload特征：流式 vs 批量？长prompt vs 长生成？<br>
+                ✅ 确定内存预算：每层每头的KV Cache目标大小<br>
+                ✅ 基准测试：先用随机驱逐建立baseline<br>
+                ✅ 逐步引入：StreamingLLM(最简) → H2O(通用) → SnapKV(如有Prefill) → FastGen(如需定制)<br>
+                ✅ 监控指标：perplexity变化、首token延迟、内存峰值、吞吐量<br>
+                ✅ 注意边界情况：空prompt、超长生成、多轮对话的累积效应
+            </p>
+        </div>
+    </section>
+
+</div>
+
+<!-- ==================== FOOTER ==================== -->
+<div class="footer">
+    <p>Module 06: KV Cache驱逐与稀疏化策略 · KV-Cache系统专题 · AI-LLM技术系列</p>
+    <p style="margin-top: 8px;">核心论文: StreamingLLM (2023) · H2O (2023) · SnapKV (2024) · FastGen (2024) · PyramidInfer (2024) · CaM (2024)</p>
+</div>
+
+
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+  <li>请用自己的话解释<strong>📑 目录导航</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>为什么需要驱逐</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>注意力稀疏性观察</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>基于注意力分数的驱逐 (H2O)</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>基于重要性评估的驱逐</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+📑 目录导航的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习📑 目录导航建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

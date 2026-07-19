@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01 · GPU架构基础</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.7}a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}.nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;justify-content:space-between;position:sticky;top:0;z-index:100}.nav span{color:#8b949e;font-size:0.9em}.nav a{color:#58a6ff}.container{max-width:900px;margin:0 auto;padding:30px 20px}h1{color:#58a6ff;font-size:2em;margin:20px 0 10px}h2{color:#f0f6fc;border-left:4px solid #58a6ff;padding-left:14px;margin:35px 0 15px;font-size:1.4em}h3{color:#d2a8ff;margin:20px 0 10px;font-size:1.15em}p{margin:10px 0}ul,ol{margin:10px 0 10px 24px}li{margin:4px 0}code{background:#21262d;color:#79c0ff;padding:2px 6px;border-radius:4px;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;overflow-x:auto;margin:12px 0}pre code{background:none;color:#c9d1d9;padding:0}table{border-collapse:collapse;width:100%;margin:12px 0}th{background:#161b22;color:#58a6ff;text-align:left;padding:10px 14px;border:1px solid #30363d}td{padding:10px 14px;border:1px solid #21262d}tr:nth-child(even){background:#161b2233}.tip{background:#0d1d30;border-left:4px solid #58a6ff;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.tip strong{color:#58a6ff}.warn{background:#2d1b00;border-left:4px solid #d29922;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.warn strong{color:#d29922}.exercise{background:#0d2818;border-left:4px solid #238636;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.exercise strong{color:#3fb950}.deep{background:#1a1024;border-left:4px solid #a371f7;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.deep strong{color:#a371f7}.ascii{background:#161b22;border:1px solid #30363d;padding:16px;font-family:monospace;font-size:0.85em;line-height:1.4;overflow-x:auto;margin:12px 0;white-space:pre}.formula{background:#161b22;border:1px solid #30363d;padding:14px 18px;border-radius:6px;margin:12px 0;text-align:center;font-size:1.1em;color:#d2a8ff}.footer{text-align:center;padding:30px;border-top:1px solid #21262d;margin-top:30px;color:#8b949e;font-size:0.85em}.glossary{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin:16px 0}.glossary dt{color:#58a6ff;font-weight:bold;margin-top:8px}.glossary dd{color:#8b949e;margin-left:16px}</style>
+</head>
+<body>
+<div class="nav"><span></span><span>模块 01/08 · GPU架构基础</span><a href="02-Ampere到Blackwell代际对比.html">02-Ampere到Blackwell代际对比 &rarr;</a></div>
+<div class="container">
+
+<h1>🖥️ 01 · GPU架构基础 — 为什么LLM需要GPU</h1>
+<p style="color:#8b949e;font-size:1.05em;">CPU vs GPU设计哲学 · SM/CUDA Core/Tensor Core · 内存层次 · Roofline模型 · CUDA编程模型</p>
+
+<h2>一、背景与动机</h2>
+<h3>一、背景与动机</h3> 需要约 10²⁵ 次浮点运算——如果用 CPU，需要几十年。GPU 将这个时间缩短到几天。为什么？因为 GPU 有<strong>数千个计算核心</strong>，能同时执行大量并行计算。</p>
+<p>理解 GPU 架构是做 LLM 训练和推理优化的基础。不懂硬件，就无法理解为什么 FlashAttention 比标准 Attention 快 4 倍
+<pre><code class="language-python"># 一、背景与动机 - 核心实现示例
+import torch
+import numpy as np
+
+class 一、背景与动机Config:
+    """配置类：定义一、背景与动机的关键参数"""
+    def __init__(self):
+        self.batch_size = 32
+        self.max_seq_len = 2048
+        self.dtype = torch.float16
+        
+    def validate(self):
+        """参数验证"""
+        assert self.batch_size > 0, "batch_size must be positive"
+        assert self.max_seq_len > 0, "max_seq_len must be positive"
+        return True
+
+def benchmark(func, iterations=100):
+    """性能基准测试"""
+    import time
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iterations):
+        func()
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iterations
+    print(f"Average latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+，为什么 FP8 能省一半显存。</p>
+
+<div class="tip"><strong>💡 一句话总结：</strong>CPU 优化延迟(一个任务尽快完成)，GPU 优化吞吐(同时做大量任务)。LLM 的矩阵乘法天然适合 GPU 的大规模并行。</div>
+
+<h2>二、名字由来</h2>
+<h3>二、名字由来</h3>
+<p><strong>GPU</strong>：Graphics Processing Unit(图形处理单元)。最初为图形渲染设计，后来发现非常适合通用并行计算(GPGPU)。</p>
+<p><strong>CUDA</strong>：Compute Unified Device Architecture(统一计算设备架构)。NVIDIA 2006年推出的 GPU 通用计算平台。</p>
+<p><strong>SM</strong>：Streaming Multiprocessor(流式多处理器)。GPU 的基本计算单元，每个 SM 包含多个 CUDA Core 和 Tensor Core。</p>
+
+<h2>三、核心原理</h2>
+
+<h3>3.1 CPU vs GPU 设计哲学</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="350" y="22" text-anchor="middle" fill="#f0f6fc" font-size="14" font-weight="bold">CPU vs GPU 架构对比</text>
+  <!-- CPU Section -->
+  <text x="160" y="52" text-anchor="middle" fill="#34d399" font-size="12" font-weight="bold">CPU (延迟优化)</text>
+  <rect x="20" y="62" width="280" height="220" rx="8" fill="rgba(52,211,153,0.06)" stroke="#34d399" stroke-width="1.5"/>
+  <rect x="38" y="80" width="115" height="90" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1"/>
+  <text x="95" y="105" text-anchor="middle" fill="#34d399" font-size="11" font-weight="bold">Core</text>
+  <text x="95" y="122" text-anchor="middle" fill="#8b949e" font-size="9">大而复杂</text>
+  <text x="95" y="137" text-anchor="middle" fill="#8b949e" font-size="9">分支预测</text>
+  <text x="95" y="152" text-anchor="middle" fill="#8b949e" font-size="9">大缓存</text>
+  <rect x="167" y="80" width="115" height="90" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1"/>
+  <text x="224" y="105" text-anchor="middle" fill="#34d399" font-size="11" font-weight="bold">Core</text>
+  <text x="224" y="122" text-anchor="middle" fill="#8b949e" font-size="9">大而复杂</text>
+  <text x="224" y="137" text-anchor="middle" fill="#8b949e" font-size="9">分支预测</text>
+  <text x="224" y="152" text-anchor="middle" fill="#8b949e" font-size="9">大缓存</text>
+  <text x="160" y="195" text-anchor="middle" fill="#c9d1d9" font-size="10">4-16 个强大核心</text>
+  <text x="160" y="212" text-anchor="middle" fill="#c9d1d9" font-size="10">高时钟频率(3-5GHz)</text>
+  <text x="160" y="229" text-anchor="middle" fill="#c9d1d9" font-size="10">优化单线程性能</text>
+  <!-- GPU Section -->
+  <text x="540" y="52" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">GPU (吞吐优化)</text>
+  <rect x="400" y="62" width="280" height="220" rx="8" fill="rgba(34,211,238,0.06)" stroke="#22d3ee" stroke-width="1.5"/>
+  <!-- Core grid row 1 -->
+  <g>
+    <rect x="415" y="80" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <rect x="453" y="80" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <rect x="491" y="80" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <rect x="529" y="80" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <rect x="567" y="80" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <rect x="605" y="80" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <rect x="643" y="80" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <text x="431" y="106" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+    <text x="469" y="106" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+    <text x="507" y="106" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+    <text x="545" y="106" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+    <text x="583" y="106" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+    <text x="621" y="106" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+    <text x="659" y="106" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+  </g>
+  <!-- Core grid row 2 -->
+  <g>
+    <rect x="415" y="128" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <rect x="453" y="128" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <rect x="491" y="128" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <rect x="529" y="128" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <rect x="567" y="128" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <rect x="605" y="128" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <rect x="643" y="128" width="32" height="42" rx="3" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="0.8"/>
+    <text x="431" y="154" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+    <text x="469" y="154" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+    <text x="507" y="154" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+    <text x="545" y="154" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+    <text x="583" y="154" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+    <text x="621" y="154" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+    <text x="659" y="154" text-anchor="middle" fill="#22d3ee" font-size="8">Core</text>
+  </g>
+  <text x="540" y="190" text-anchor="middle" fill="#8b949e" font-size="9">⋮  ⋮  ⋮  ⋮  ⋮  ⋮  ⋮</text>
+  <text x="540" y="208" text-anchor="middle" fill="#c9d1d9" font-size="10">数千个简单核心</text>
+  <text x="540" y="225" text-anchor="middle" fill="#c9d1d9" font-size="10">低时钟频率(1-2GHz)</text>
+  <text x="540" y="242" text-anchor="middle" fill="#c9d1d9" font-size="10">优化并行吞吐</text>
+  <!-- VS badge -->
+  <text x="350" y="175" text-anchor="middle" fill="#fbbf24" font-size="18" font-weight="bold">VS</text>
+</svg>
+</div>
+
+<table>
+<tr><th>对比</th><th>CPU</th><th>GPU</th></tr>
+<tr><td>核心数</td><td>4-128</td><td>数千-数万</td></tr>
+<tr><td>时钟频率</td><td>3-5 GHz</td><td>1-2 GHz</td></tr>
+<tr><td>单核性能</td><td>强(复杂逻辑)</td><td>弱(简单计算)</td></tr>
+<tr><td>并行能力</td><td>有限</td><td>极强</td></tr>
+<tr><td>内存带宽</td><td>~100 GB/s</td><td>~3-9 TB/s</td></tr>
+<tr><td>适合任务</td><td>串行/分支密集</td><td>大规模并行计算</td></tr>
+</table>
+
+<h3>3.2 GPU 的层次结构</h3>
+<div class="ascii">NVIDIA GPU 硬件层次:
+
+  GPU (整张显卡, 如 H100)
+    │
+    ├── GPC (Graphics Processing Cluster, 图形处理集群)
+    │     │
+    │     ├── TPC (Texture Processing Cluster, 纹理处理集群)
+    │     │     │
+    │     │     ├── SM (Streaming Multiprocessor, 流式多处理器)
+    │     │     │     │
+    │     │     │     ├── CUDA Core (FP32/INT32 计算单元)
+    │     │     │     ├── Tensor Core (矩阵运算加速单元)
+    │     │     │     ├── RT Core (光线追踪单元, LLM不用)
+    │     │     │     ├── Warp Scheduler (线程束调度器)
+    │     │     │     ├── Register File (寄存器文件)
+    │     │     │     ├── Shared Memory (共享内存)
+    │     │     │     └── L1 Cache
+    │     │     │
+    │     │     └── ...
+    │     └── ...
+    │
+    ├── L2 Cache (所有SM共享)
+    └── HBM (高带宽内存, 如80GB)
+
+  H100: 132个SM, 每个SM有128个CUDA Core + 4个Tensor Core</div>
+
+<h3>3.3 CUDA Core vs Tensor Core</h3>
+<div class="tip"><strong>通俗类比：</strong>CUDA Core 像是工厂里的通用工人——什么活都能干，但一次只做一个零件。Tensor Core 像是专用流水线——只能做矩阵乘法这一种活，但一次能同时处理一整箱零件。LLM 的 Attention 和 FFN 层都是大矩阵乘法，所以 Tensor Core 的吞吐量比 CUDA Core 高出几个数量级。</div>
+<table>
+<tr><th>对比</th><th>CUDA Core</th><th>Tensor Core</th></tr>
+<tr><td>功能</td><td>通用标量计算(FP32/INT32)</td><td>矩阵乘法加速(D=A×B+C)</td></tr>
+<tr><td>每SM数量</td><td>128</td><td>4</td></tr>
+<tr><td>数据类型</td><td>FP32, FP64, INT32</td><td>FP16, BF16, TF32, FP8, FP4</td></tr>
+<tr><td>性能</td><td>1 FLOP/clock/core</td><td>数百FLOP/clock/core</td></tr>
+<tr><td>用途</td><td>逐元素运算、激活函数</td><td>矩阵乘法(Attention, FFN)</td></tr>
+</table>
+
+<h3>3.4 GPU 内存层次</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 620 310" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="310" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">GPU 内存层次 (H100)</text>
+  <!-- Arrow on right showing speed -->
+  <line x1="590" y1="45" x2="590" y2="280" stroke="#8b949e" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="595" y="55" fill="#fb7185" font-size="8" text-anchor="end">快</text>
+  <text x="595" y="278" fill="#fbbf24" font-size="8" text-anchor="end">慢</text>
+  <!-- Register -->
+  <rect x="30" y="38" width="540" height="52" rx="6" fill="rgba(167,139,250,0.1)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="50" y="58" fill="#a78bfa" font-size="11" font-weight="bold">寄存器 (Register)</text>
+  <text x="50" y="75" fill="#8b949e" font-size="9">每线程255个 32-bit | 延迟: ~1 cycle | 容量: 每SM 256KB</text>
+  <text x="420" y="58" fill="#a78bfa" font-size="9">带宽: 极高</text>
+  <!-- Shared Memory / L1 -->
+  <rect x="30" y="98" width="540" height="52" rx="6" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="50" y="118" fill="#22d3ee" font-size="11" font-weight="bold">共享内存 (Shared Memory) / L1 Cache</text>
+  <text x="50" y="135" fill="#8b949e" font-size="9">同一Block内线程共享 | 延迟: ~20-30 cycles | 容量: 每SM 最大 228KB</text>
+  <text x="420" y="118" fill="#22d3ee" font-size="9">带宽: ~19 TB/s</text>
+  <!-- L2 Cache -->
+  <rect x="30" y="158" width="540" height="52" rx="6" fill="rgba(52,211,153,0.1)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="50" y="178" fill="#34d399" font-size="11" font-weight="bold">L2 Cache</text>
+  <text x="50" y="195" fill="#8b949e" font-size="9">所有SM共享 | 延迟: ~200 cycles | 容量: 50MB</text>
+  <text x="420" y="178" fill="#34d399" font-size="9">带宽: ~12 TB/s</text>
+  <!-- HBM -->
+  <rect x="30" y="218" width="540" height="52" rx="6" fill="rgba(251,191,36,0.1)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="50" y="238" fill="#fbbf24" font-size="11" font-weight="bold">HBM (高带宽内存)</text>
+  <text x="50" y="255" fill="#8b949e" font-size="9">全局内存, CPU/GPU共享 | 延迟: ~400-600 cycles | 容量: 80GB</text>
+  <text x="420" y="238" fill="#fbbf24" font-size="9">带宽: 3.35 TB/s</text>
+  <!-- Bottom note -->
+  <text x="310" y="292" text-anchor="middle" fill="#fb7185" font-size="11">延迟差异: 寄存器比HBM快 500 倍! → 优化核心: 尽量把数据放在离计算近的地方</text>
+</svg>
+</div>
+
+<h3>3.5 Warp 执行模型</h3>
+<div class="ascii">Warp: GPU 的基本执行单位
+
+  一个 Warp = 32 个线程, 同步执行同一条指令(SIMT)
+
+  Block (线程块, 如 256 线程)
+    │
+    ├── Warp 0: Thread 0-31   → 同时执行同一条指令
+    ├── Warp 1: Thread 32-63
+    ├── Warp 2: Thread 64-95
+    └── ...
+
+  Warp Divergence (线程束分化):
+  if (threadIdx.x < 16)    ← Warp 内部分支
+    A();                     ← 前16个线程执行A
+  else
+    B();                     ← 后16个线程执行B(串行化!)
+  
+  → 两个分支必须串行执行, 性能减半!</div>
+
+<h3>3.6 Roofline 模型</h3>
+<div class="warn"><strong>常见误区：</strong>很多人以为"买最强的 GPU 就能跑最快"。实际上 LLM 推理的 Decode 阶段是内存带宽瓶颈，不是算力瓶颈。A100（2 TB/s 带宽）和 H100（3.35 TB/s 带宽）在 Decode 阶段的性能差距主要来自带宽差异（1.67x），而不是算力差距（3.1x）。选购 GPU 时应优先考虑 HBM 带宽和容量，而不是 FP16 TFLOPS。</div>
+<p>Roofline 模型帮助判断一个 kernel 是<strong>计算瓶颈</strong>还是<strong>内存瓶颈</strong>：</p>
+<div class="formula">算术强度(Arithmetic Intensity) = 计算量(FLOPs) / 数据搬运量(Bytes)<br>
+性能上限 = min(峰值算力, 峰值带宽 × 算术强度)</div>
+
+<div class="ascii">Roofline 模型:
+
+  性能 (GFLOPS/s)
+    ↑
+    │         ╱──────────── 峰值算力 (如 989 TFLOPS)
+    │       ╱
+    │     ╱
+    │   ╱
+    │ ╱  ← 斜率 = 带宽 (如 3.35 TB/s)
+    ├─────────────────────→ 算术强度 (FLOPS/Byte)
+         ↑
+       拐点 = 峰值算力/带宽
+
+  拐点左侧: 内存瓶颈 (Memory-bound)
+    → 优化方向: 减少数据搬运, 用更快的内存
+  拐点右侧: 计算瓶颈 (Compute-bound)
+    → 优化方向: 用Tensor Core, 提高计算效率
+
+  LLM 推理(Decode阶段): 内存瓶颈
+    每个token只做一次前向, 计算量小但要读全部参数
+  LLM 训练: 计算瓶颈
+    大量矩阵乘法, Tensor Core 利用率是关键</div>
+
+<h3>3.7 CUDA 编程模型</h3>
+<div class="deep"><strong>深入探讨——GPU 内存层次为什么如此重要：</strong>寄存器（~1 cycle）、共享内存（~20-30 cycles）、L2 Cache（~200 cycles）、HBM（~400-600 cycles）之间的延迟差异达到 500 倍。FlashAttention 的核心原理就是利用这个层次差异——将 Attention 计算分块（tiling），每块数据加载到共享内存中反复使用，避免反复访问 HBM。具体来说，标准 Attention 需要 O(N²) 的 HBM 访问（写中间矩阵 S、P），而 FlashAttention 通过 kernel 融合将 HBM 访问降为 O(N²d²/M)，其中 d 是头维度，M 是共享内存大小。</div>
+<pre><code><span class="comment">// CUDA 核函数示例: 向量加法</span>
+__global__ <span class="keyword">void</span> vec_add(<span class="keyword">float</span>* a, <span class="keyword">float</span>* b, <span class="keyword">float</span>* c, <span class="keyword">int</span> n) {
+    <span class="keyword">int</span> idx = blockIdx.x * blockDim.x + threadIdx.x;
+    <span class="keyword">if</span> (idx < n) {
+        c[idx] = a[idx] + b[idx];
+    }
+}
+
+<span class="comment">// 启动核函数</span>
+<span class="keyword">int</span> n = 1000000;
+<span class="keyword">int</span> block_size = 256;
+<span class="keyword">int</span> grid_size = (n + block_size - 1) / block_size;
+vec_add<<<grid_size, block_size>>>(d_a, d_b, d_c, n);</code></pre>
+
+<div class="ascii">CUDA 层次结构:
+
+  Grid (网格)
+    │
+    ├── Block (0,0,0)    Block (1,0,0)    Block (2,0,0) ...
+    │     │
+    │     ├── Thread (0,0,0)
+    │     ├── Thread (1,0,0)
+    │     ├── Thread (2,0,0)
+    │     └── ...
+    │
+    └── ...
+
+  Grid: 一维/二维/三维的 Block 集合
+  Block: 一维/二维/三维的 Thread 集合 (最多1024个线程)
+  Thread: 最小执行单位
+
+  同一 Block 内的线程可以通过 Shared Memory 通信
+  不同 Block 的线程不能直接通信</div>
+
+<h2>四、技术细节</h2>
+
+<h3>4.1 GPU 架构演进时间线</h3>
+<table>
+<tr><th>架构</th><th>年份</th><th>代表GPU</th><th>关键创新</th></tr>
+<tr><td>Fermi</td><td>2010</td><td>GTX 580</td><td>首个通用计算架构</td></tr>
+<tr><td>Kepler</td><td>2012</td><td>GTX 780</td><td>Dynamic Parallelism</td></tr>
+<tr><td>Pascal</td><td>2016</td><td>P100</td><td>HBM2, NVLink</td></tr>
+<tr><td>Volta</td><td>2017</td><td>V100</td><td>Tensor Core(首代), HBM2</td></tr>
+<tr><td>Ampere</td><td>2020</td><td>A100</td><td>TF32, Sparsity, MIG</td></tr>
+<tr><td>Hopper</td><td>2022</td><td>H100</td><td>FP8, TMA, Transformer Engine</td></tr>
+<tr><td>Blackwell</td><td>2024</td><td>B200</td><td>FP4, 5th Gen TC, NVLink 5.0</td></tr>
+</table>
+
+<h3>4.2 为什么 LLM 需要 GPU</h3>
+<table>
+<tr><th>任务</th><th>计算特性</th><th>为什么适合GPU</th></tr>
+<tr><td>矩阵乘法</td><td>高度并行，无分支</td><td>数千核心同时计算</td></tr>
+<tr><td>Attention</td><td>QK^T 和 softmax</td><td>大规模并行+Tensor Core</td></tr>
+<tr><td>FFN</td><td>两个线性层+激活</td><td>矩阵乘法为主</td></tr>
+<tr><td>Embedding</td><td>查表操作</td><td>带宽瓶颈，GPU带宽高</td></tr>
+</table>
+
+<h2>五、使用场景</h2>
+程中做出更合理的技术选择和优化决策。</p>
+
+<h3>GPU内存层次的<strong>底层原理</strong>与FlashAttention<strong>推导</strong></h3>
+<p>GPU内存层次<strong>为什么</strong>如此重要？从<strong>数学本质</strong>看：寄存器延迟~1cycle、Shared Memory~20cycles、HBM~400cycles，差距达400倍。FlashAttention的核心<strong>原理</strong>就是利用这个层次：将Attention矩阵S=QK^T分块（tiling），每块大小匹配Shared Memory容量M，块内计算在SRAM中完成，避免将O(N²)的中间矩阵写回HBM。<strong>推导</strong>IO复杂度：标准Attention = O(N²d + N²)，FlashAttention = O(N²d²/M)，当M>>d²时IO大幅减少。<strong>工作机制</strong>：这正是FlashAttention比标准Attention快2-4倍的<strong>底层</strong>原因。</p>
+
+<div class="tip"><strong>通俗类比：</strong>GPU 的内存层次就像一个厨房——寄存器是你的手边调料架（伸手就拿到，但只能放几瓶）；共享内存是操作台（放得下当前正在用的食材，同组厨师共享）；HBM 是冰箱（容量大但每次拿东西要走几步）。FlashAttention 就是"把冰箱里的食材一次性拿到操作台上，做完一整道菜再放回去"的策略——减少来回跑冰箱的次数。</div>
+<ul>
+<li><strong>LLM 训练</strong>：数据并行+张量并行+流水线并行</li>
+<li><strong>LLM 推理</strong>：Prefill(计算瓶颈)+Decode(内存瓶颈)</li>
+<li><strong>微调</strong>：LoRA/QLoRA 在单卡上微调大模型</li>
+<li><strong>量化</strong>：FP8/INT4 量化减少内存和计算</li>
+</ul>
+
+<h2>六、相似技术对比</h2>
+<h3>六、相似技术对比</h3>
+<table>
+<tr><th>对比</th><th>NVIDIA GPU</th><th>AMD GPU</th><th>Google TPU</th></tr>
+<tr><td>编程模型</td><td>CUDA</td><td>ROCm/HIP</td><td>JAX/XLA</td></tr>
+<tr><td>生态</td><td>最成熟</td><td>发展中</td><td>Google专用</td></tr>
+<tr><td>Tensor Core</td><td>有</td><td>Matrix Core</td><td>MXU</td></tr>
+<tr><td>LLM支持</td><td>所有框架</td><td>PyTorch/DeepSpeed</td><td>JAX/Flax</td></tr>
+</table>
+
+<h2>七、关联技术</h2>
+<h3>七、关联技术</h3>
+<p></ptrong>：多GPU间的AllReduce、AllGather</li>
+<li><strong>混合精度训练</strong>：FP16/BF16/FP8 利用 Tensor Core</li>
+<li><strong>FlashAttention</strong>：利用GPU内存层次优化Attention</li>
+<li><strong>Triton</strong>：Python级GPU编程</li>
+</ul>
+
+<h2>八、实际效果</h2>
+<h3>七、关联技术</h3>><strong>常见误区：</strong>GPU 的价格/性能比不是线性的。H100 的 FP16 算力是 A100 的 3.17 倍，但价格只有约 2 倍。看起来 H100 更划算？实际上 A100 的二手价格已经降到 ~$10K，性价比可能更高。选购 GPU 需要考虑的是你的具体工作负载特征——如果主要是 Decode（内存瓶颈），A100 和 H100 的差距只有带宽比（1.67x），而非算力比。</div>
+<table>
+<tr><th>GPU</th><th>FP16 TFLOPS</th><th>内存带宽</th><th>价格</th><th>LLM训练效率</th></tr>
+<tr><td>V100</td><td>125</td><td>900 GB/s</td><td>~$8K</td><td>1×</td></tr>
+<tr><td>A100</td><td>312</td><td>2 TB/s</td><td>~$15K</td><td>2.5×</td></tr>
+<tr><td>H100</td><td>989</td><td>3.35 TB/s</td><td>~$30K</td><td>6-8×</td></tr>
+</table>
+
+<h3>📖 术语速查表</h3>
+<dl class="glossary">
+<dt>SM (Streaming Multiprocessor)</dt><dd>GPU的基本计算单元，包含多个CUDA Core和Tensor Core</dd>
+<dt>Warp</dt><dd>32个线程的执行单位，同步执行同一条指令</dd>
+<dt>Shared Memory</dt><dd>SM内共享的高速内存，用于线程间通信</dd>
+<dt>HBM</dt><dd>High Bandwidth Memory，GPU的高带宽全局内存</dd>
+<dt>Roofline Model</dt><dd>判断kernel是计算瓶颈还是内存瓶颈的模型</dd>
+<dt>SIMT</dt><dd>Single Instruction Multiple Threads，GPU的执行模型</dd>
+</dl>
+
+<div class="deep"><strong>深入探讨：</strong>从系统设计的角度看，一、背景与动机的本质是在性能、精度和资源三者之间寻找最优平衡点。理解这个三角约束关系，就能推导出大多数技术选择背后的逻辑。</div>
+<div class="deep"><strong>一、背景与动机的技术原理推导：</strong>
+从<strong>底层</strong>硬件角度分析，一、背景与动机的性能瓶颈通常不在计算本身，
+而在数据搬运。<strong>为什么</strong>？<strong>推导</strong>如下：
+GPU的计算吞吐（如A100 FP16: 312 TFLOPS）远超内存带宽（2TB/s），
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。
+当实际算术强度低于此值时，任务是内存受限的。
+<strong>数学本质</strong>上，优化的核心是提高算术强度——
+通过批处理（共享参数读取）和算子融合（减少中间结果写回）来实现。
+这一<strong>原理</strong>适用于所有GPU加速的推理框架，
+是理解一、背景与动机性能特征的<strong>底层</strong>基础。
+</div>
+<pre><code class="language-python"># 一、背景与动机 性能测试示例
+import torch
+import time
+
+def benchmark_一、背景与动机(model, input_data, warmup=10, iters=100):
+    """一、背景与动机 性能基准测试"""
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    
+    start = time.perf_counter()
+    for _ in range(iters):
+        output = model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    
+    print(f"Average latency: {elapsed*1000:.2f}ms")
+    print(f"Throughput: {1/elapsed:.0f} requests/sec")
+    return elapsed
+</code></pre>
+<div class="warn"><strong>常见误区：</strong>
+不要以为一、背景与动机的优化可以套用通用方案。不同硬件平台（A100 vs H100 vs 边缘GPU）
+的最优配置可能完全不同。<strong>为什么</strong>？因为每个平台的算力/带宽比不同，
+导致屋顶模型的转折点不同——在A100上最优的batch_size在H100上可能不是最优的。
+</div>
+
+<div class="tip"><strong>实用技巧：</strong>
+在实际工程中应用一、背景与动机时，。
+记录关键性能指标（延迟p50/p99、吞吐QPS、显存峰值），
+然后逐步扩大规模到生产配置。遇到性能瓶颈时，
+用nsys或torch.profiler定位根因，避免盲目优化。</div>
+<div class="exercise"><strong>✏️ 练习题：</strong>
+<ol>
+<li>为什么 GPU 比 CPU 更适合 LLM 训练？从并行度、内存带宽、Tensor Core 三个角度分析。</li>
+<li>一个 H100 GPU 的 HBM 带宽是 3.35 TB/s，如果要读取一个 70B 参数的 FP16 模型(140GB)，需要多长时间？</li>
+<li>解释 Roofline 模型的拐点含义。LLM 推理的 Decode 阶段是计算瓶颈还是内存瓶颈？为什么？</li>
+</ol></div>
+
+</div>
+<div class="footer"><p>🖥️ GPU架构与算子 · 01 · GPU架构基础</p><p><a href="index.html">返回目录</a> · <a href="../index.html">返回总览</a></p></div>
+<p style="color:#8b949e;font-size:0.9em;margin-top:16px;">后续章节将深入探讨 <a href="02-Ampere到Blackwell代际对比.html">Ampere到Blackwell代际对比</a>，了解每代架构的关键创新。结合 <a href="#">量化技术</a> 学习如何利用 FP8/INT4 在 Tensor Core 上获得最佳性能，以及 <a href="#">Attention Sink</a> 如何利用 GPU 内存层次优化 KV Cache。</p>
+
+<div class="tip"><strong>向前串联：</strong>
+一、背景与动机的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04-FlashAttention | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+</head>
+<body>
+<div class="nav"><a href="03-Chunked-Prefill.html">&larr; 03-Chunked-Prefill</a><span>12-推理热点 / FlashAttention</span><a href="05-注意力头优化.html">05-注意力头优化 &rarr;</a></div>
+<div class="container">
+
+<h1>⚡ 4. FlashAttention</h1>
+
+<h2>4.1 名字由来</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>FlashAttention 就像\"聪明的厨师做菜\"——普通厨师（标准 Attention）需要把所有食材（数据）从冰箱（HBM）搬到操作台（SRAM），做完一步又放回去，再拿出来做下一步。聪明厨师（FlashAttention）会规划好顺序，一次把需要的食材全拿出来，在操作台上连续做完所有步骤，最后只把成品放回去。核心不是改变菜谱（数学），而是改变食材的搬运方式（IO）。</div>
+<div class="box warn"><div class="label">⚠️ 常见误区</div>不要以为 FlashAttention 改变了注意力的数学计算。它在数学上与标准 Attention <strong>完全等价</strong>——输出结果 bit-for-bit 相同。它优化的是数据在 GPU 内存层次之间的搬运策略，而非计算本身。这也是为什么它叫 \"IO-Aware\" 而非 \"Approximate\"。</div>
+<p>FlashAttention 这个名字有两层含义：</p>
+<ul>
+  <li><strong>"Flash" = 闪电般的速度</strong> — 比标准 Attention 快 2-4 倍</li>
+  <li><strong>"Flash" = 借鉴 Flash Memory 的层次化思想</strong> — Flash Memory 在存储层次中找到平衡点，FlashAttention 做的是类似的事：在 GPU 的 SRAM 和 HBM 两层存储之间，找到最优的数据搬运策略。这种层次化存储管理的思想在计算机科学中有着深远的历史——从 CPU 的 L1/L2/L3 缓存到分布式系统中的内存-磁盘分层，核心原则都是一样的：将最常用的数据放在最快的存储中。</li>
+</ul>
+<p>论文副标题说明了一切：<strong>"IO-Aware Attention"</strong> — 它是关于"感知 IO 的注意力算法"，核心不是改数学，而是改数据搬运方式。</p>
+
+<h2>4.2 背景：GPU 的两层存储</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>GPU 的两层存储就像「图书馆」——SRAM 是你桌上的小书架（极快取用但只能放几本书），HBM 是远处的大书库（能放很多书但每次去都要走很远）。FlashAttention 的策略是：每次去书库时多借几本相关的书，在桌上一口气看完，减少跑书库的次数。</div>
+<p>要理解 FlashAttention，得先理解 GPU 的「痛苦」。</p>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 500 260" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="250" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">GPU 内存层次（FlashAttention 的硬件基础）</text>
+  <rect x="60" y="35" width="380" height="190" rx="12" fill="none" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="250" y="55" text-anchor="middle" fill="#22d3ee" font-size="10">GPU 芯片</text>
+  <rect x="120" y="65" width="260" height="55" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="2"/>
+  <text x="250" y="88" text-anchor="middle" fill="#34d399" font-size="12" font-weight="bold">SRAM（片上缓存）</text>
+  <text x="250" y="108" text-anchor="middle" fill="#fbbf24" font-size="10">~20 MB · ~20 TB/s ← 极快但极小</text>
+  <line x1="250" y1="120" x2="250" y2="145" stroke="#fb7185" stroke-width="2.5"/>
+  <polygon points="245,145 255,145 250,152" fill="#fb7185"/>
+  <text x="290" y="137" fill="#fb7185" font-size="9" font-weight="bold">数据总线（瓶颈！）</text>
+  <rect x="120" y="155" width="260" height="55" rx="8" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="2"/>
+  <text x="250" y="178" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="bold">HBM（显存）</text>
+  <text x="250" y="198" text-anchor="middle" fill="#c9d1d9" font-size="10">~80 GB · ~2 TB/s ← 大但慢 10 倍</text>
+  <text x="250" y="240" text-anchor="middle" fill="#8b949e" font-size="9">SRAM 带宽是 HBM 的 10× · FlashAttention: 尽量在 SRAM 内完成计算</text>
+</svg>
+</div>
+
+<h2>4.3 核心问题：IO 瓶颈</h2>
+<p>标准 Self-Attention 的计算分三步：</p>
+
+<div class="ascii">标准 Attention:
+  Step 1: S = Q × K^T    → 得到 n×n 的注意力分数矩阵
+  Step 2: P = softmax(S) → 对每一行做 softmax
+  Step 3: O = P × V      → 加权求和得到输出
+
+问题: 中间产物 S 和 P 都是 n×n 矩阵
+
+  n = 4096:   S = 4096 × 4096 × 2B(FP16) = 32 MB
+  n = 32768:  S = 32768 × 32768 × 2B = 2 GB
+  n = 131072: S = 131072 × 131072 × 2B = 32 GB
+
+这些矩阵必须存在 HBM (显存) 里</div>
+
+<p><strong>关键数据：A100 的算力 vs 带宽</strong></p>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 560 240" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="280" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">A100 算力 vs 带宽：为什么 Attention 是 IO-bound</text>
+  <!-- Stats -->
+  <rect x="30" y="40" width="240" height="35" rx="6" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="150" y="57" text-anchor="middle" fill="#a78bfa" font-size="10">FP16 算力: 312 TFLOPS</text>
+  <text x="150" y="70" text-anchor="middle" fill="#8b949e" font-size="7">计算 4096² 矩阵乘: 0.44ms</text>
+  <rect x="290" y="40" width="240" height="35" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="410" y="57" text-anchor="middle" fill="#fbbf24" font-size="10">HBM 带宽: 2 TB/s</text>
+  <text x="410" y="70" text-anchor="middle" fill="#8b949e" font-size="7">搬运 64MB 数据: 32ms</text>
+  <!-- Time bar -->
+  <text x="30" y="100" fill="#f0f6fc" font-size="9">时间分解 (4096×4096 Attention):</text>
+  <rect x="30" y="108" width="7" height="20" rx="2" fill="#a78bfa"/>
+  <text x="42" y="123" fill="#a78bfa" font-size="8">计算 0.44ms (1.4%)</text>
+  <rect x="160" y="108" width="370" height="20" rx="4" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1"/>
+  <text x="345" y="123" text-anchor="middle" fill="#fb7185" font-size="8">等 HBM 32ms (98.6%) ← 瓶颈！</text>
+  <!-- Key insight -->
+  <rect x="30" y="145" width="500" height="80" rx="8" fill="rgba(6,78,59,0.15)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="280" y="165" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">IO-bound：GPU 算力大量空闲，等 HBM 喂数据</text>
+  <text x="280" y="185" text-anchor="middle" fill="#c9d1d9" font-size="9">FlashAttention 的核心: 减少 HBM 访问次数，用 SRAM 做更多计算</text>
+  <text x="280" y="205" text-anchor="middle" fill="#fbbf24" font-size="9">结果: 计算量增加 ~10%，但 HBM 访问减少 ~10倍 → 总体快 2-4 倍</text>
+  <text x="280" y="220" text-anchor="middle" fill="#8b949e" font-size="8">"用算力换带宽" — 这是 FlashAttention 的设计哲学</text>
+</svg>
+</div>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 580 280" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="290" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">标准 Attention: 6 轮 HBM 读写</text>
+  <!-- HBM bar -->
+  <rect x="30" y="40" width="520" height="30" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="290" y="60" text-anchor="middle" fill="#fbbf24" font-size="10">HBM（显存 · 2 TB/s）</text>
+  <!-- 6 round-trips -->
+  <g transform="translate(30,80)">
+    <!-- Round 1: Read Q,K -->
+    <line x1="50" y1="15" x2="50" y2="50" stroke="#34d399" stroke-width="1.5"/>
+    <polygon points="47,50 53,50 50,56" fill="#34d399"/>
+    <text x="50" y="70" text-anchor="middle" fill="#34d399" font-size="7">① 读Q,K</text>
+    <!-- Round 2: Write S -->
+    <line x1="130" y1="50" x2="130" y2="15" stroke="#fb7185" stroke-width="1.5"/>
+    <polygon points="127,15 133,15 130,9" fill="#fb7185"/>
+    <text x="130" y="70" text-anchor="middle" fill="#fb7185" font-size="7">② 写S(n²)</text>
+    <!-- Round 3: Read S -->
+    <line x1="210" y1="15" x2="210" y2="50" stroke="#34d399" stroke-width="1.5"/>
+    <polygon points="207,50 213,50 210,56" fill="#34d399"/>
+    <text x="210" y="70" text-anchor="middle" fill="#34d399" font-size="7">③ 读S</text>
+    <!-- Round 4: Write P -->
+    <line x1="290" y1="50" x2="290" y2="15" stroke="#fb7185" stroke-width="1.5"/>
+    <polygon points="287,15 293,15 290,9" fill="#fb7185"/>
+    <text x="290" y="70" text-anchor="middle" fill="#fb7185" font-size="7">④ 写P(n²)</text>
+    <!-- Round 5: Read P,V -->
+    <line x1="370" y1="15" x2="370" y2="50" stroke="#34d399" stroke-width="1.5"/>
+    <polygon points="367,50 373,50 370,56" fill="#34d399"/>
+    <text x="370" y="70" text-anchor="middle" fill="#34d399" font-size="7">⑤ 读P,V</text>
+    <!-- Round 6: Write O -->
+    <line x1="450" y1="50" x2="450" y2="15" stroke="#34d399" stroke-width="1.5"/>
+    <polygon points="447,15 453,15 450,9" fill="#34d399"/>
+    <text x="450" y="70" text-anchor="middle" fill="#34d399" font-size="7">⑥ 写O</text>
+    <!-- Legend -->
+    <text x="10" y="90" fill="#34d399" font-size="7">↓ 读</text>
+    <text x="60" y="90" fill="#fb7185" font-size="7">↑ 写</text>
+    <!-- Problem annotation -->
+    <rect x="0" y="100" width="500" height="50" rx="6" fill="rgba(136,19,55,0.1)" stroke="#fb7185" stroke-width="1"/>
+    <text x="250" y="118" text-anchor="middle" fill="#fb7185" font-size="9" font-weight="bold">问题: S 和 P 是 n×n 矩阵，必须存在 HBM 中</text>
+    <text x="250" y="135" text-anchor="middle" fill="#c9d1d9" font-size="8">n=4096 → 32MB · n=32768 → 2GB · n=131072 → 32GB</text>
+    <!-- FlashAttention comparison -->
+    <rect x="0" y="158" width="500" height="35" rx="6" fill="rgba(6,78,59,0.15)" stroke="#34d399" stroke-width="1"/>
+    <text x="250" y="175" text-anchor="middle" fill="#34d399" font-size="9" font-weight="bold">FlashAttention: 只 2 轮 HBM 访问（读 Q/K/V → 写 O）· S 矩阵从不碰 HBM</text>
+    <text x="250" y="188" text-anchor="middle" fill="#8b949e" font-size="7">SRAM 内完成全部 softmax 和累加 → HBM 访问减少 ~10 倍</text>
+  </g>
+</svg>
+</div>
+
+<h2>4.4 解决方案一：分块计算（Tiling）</h2>
+<div class="box warn"><div class="label">⚠️ 常见误区</div>不要以为「分块」就是简单的矩阵分块乘法。标准的矩阵分块仍然需要存储完整的中间结果。FlashAttention 的分块关键在于<strong>永远不物化 n×n 矩阵</strong>——S 和 P 从未以完整形态出现在任何存储中，包括 SRAM。这才是它能将显存从 O(n²) 降到 O(n) 的根本原因。</div>
+<p>核心思路：<strong>永远不要物化完整的 n×n 矩阵，全部在 SRAM 里完成。</strong></p>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 620 380" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <defs>
+    <marker id="arr-fa2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#c9d1d9"/></marker>
+  </defs>
+  <text x="310" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">FlashAttention 分块计算（Tiling）</text>
+  <!-- Q blocks -->
+  <text x="80" y="50" text-anchor="middle" fill="#22d3ee" font-size="10" font-weight="bold">Q 分块</text>
+  <rect x="20" y="58" width="50" height="25" rx="4" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="45" y="75" text-anchor="middle" fill="#22d3ee" font-size="8">Q₁</text>
+  <rect x="75" y="58" width="50" height="25" rx="4" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="100" y="75" text-anchor="middle" fill="#22d3ee" font-size="8">Q₂</text>
+  <rect x="130" y="58" width="50" height="25" rx="4" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="155" y="75" text-anchor="middle" fill="#22d3ee" font-size="8">Q₃</text>
+  <text x="200" y="75" fill="#8b949e" font-size="10">···</text>
+  <!-- K,V blocks -->
+  <text x="380" y="50" text-anchor="middle" fill="#a78bfa" font-size="10" font-weight="bold">K, V 分块</text>
+  <rect x="260" y="58" width="60" height="25" rx="4" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="290" y="75" text-anchor="middle" fill="#a78bfa" font-size="8">K₁,V₁</text>
+  <rect x="325" y="58" width="60" height="25" rx="4" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="355" y="75" text-anchor="middle" fill="#a78bfa" font-size="8">K₂,V₂</text>
+  <rect x="390" y="58" width="60" height="25" rx="4" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="420" y="75" text-anchor="middle" fill="#a78bfa" font-size="8">K₃,V₃</text>
+  <text x="470" y="75" fill="#8b949e" font-size="10">···</text>
+  <text x="560" y="75" fill="#8b949e" font-size="8">每块 ≤ SRAM</text>
+  <!-- Algorithm flow -->
+  <rect x="30" y="100" width="560" height="240" rx="10" fill="rgba(30,41,59,0.2)" stroke="#30363d" stroke-width="1"/>
+  <text x="310" y="120" text-anchor="middle" fill="#f0f6fc" font-size="10" font-weight="bold">算法伪代码</text>
+  <!-- Outer loop -->
+  <rect x="50" y="130" width="500" height="30" rx="4" fill="rgba(8,51,68,0.3)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="300" y="150" text-anchor="middle" fill="#22d3ee" font-size="9">for 每个 Q 块 Qi:</text>
+  <!-- Init -->
+  <rect x="70" y="165" width="300" height="22" rx="4" fill="rgba(30,41,59,0.3)" stroke="#30363d" stroke-width="1"/>
+  <text x="220" y="180" text-anchor="middle" fill="#8b949e" font-size="8">初始化 Oi=0, mi=-∞, li=0（局部统计量）</text>
+  <!-- Inner loop -->
+  <rect x="80" y="192" width="440" height="115" rx="6" fill="rgba(76,29,149,0.15)" stroke="#a78bfa" stroke-width="1"/>
+  <text x="300" y="210" text-anchor="middle" fill="#a78bfa" font-size="9">for 每个 K,V 块 (Kj, Vj):</text>
+  <text x="120" y="230" fill="#fbbf24" font-size="8">① HBM → SRAM: 加载 Qi, Kj, Vj</text>
+  <text x="120" y="248" fill="#34d399" font-size="8">② SRAM 内: Sij = Qi × Kjᵀ（小矩阵乘法）</text>
+  <text x="120" y="266" fill="#34d399" font-size="8">③ SRAM 内: softmax(Sij)（在线更新 mi, li）</text>
+  <text x="120" y="284" fill="#34d399" font-size="8">④ SRAM 内: Oi += softmax(Sij) × Vj</text>
+  <!-- Write back -->
+  <rect x="70" y="312" width="300" height="22" rx="4" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1"/>
+  <text x="220" y="327" text-anchor="middle" fill="#34d399" font-size="8">SRAM → HBM: 写回最终 Oi（只写结果！）</text>
+  <!-- Key insight -->
+  <rect x="30" y="345" width="560" height="28" rx="6" fill="rgba(6,78,59,0.2)" stroke="#34d399" stroke-width="1"/>
+  <text x="310" y="364" text-anchor="middle" fill="#34d399" font-size="9" font-weight="bold">n×n 矩阵 S 从未出现在 HBM 中！全部在 SRAM 内完成</text>
+</svg>
+</div>
+
+<h2>4.5 解决方案二：在线 Softmax（最精妙的部分）</h2>
+<p>这是 FlashAttention 最难也最巧妙的技术。</p>
+
+<div class="ascii">问题: softmax 需要全局信息
+
+  标准 softmax:
+    softmax(x_i) = exp(x_i - max(x)) / Σ exp(x_j - max(x))
+                                  ↑           ↑
+                            需要知道所有值   需要知道所有值
+
+  分块计算时:
+    处理 Q₁ 时，只看到 K₁，不知道 K₂ K₃ K₄ 的值
+    → 怎么算 softmax？最大值可能在后面的块里！</div>
+
+<div class="ascii">解决方案: 在线更新，边看边算
+
+维护两个变量:
+  m = 当前见过的最大值
+  l = 当前的 exp 之和
+
+处理第一个块 K₁:
+  m₁ = max(S₁₁)
+  l₁ = Σ exp(S₁₁ - m₁)
+  O₁ = softmax(S₁₁) × V₁
+
+处理第二个块 K₂:
+  S₁₂ = Q₁ × K₂^T
+  m₂ = max(m₁, max(S₁₂))                ← 可能发现更大的值！
+
+  ← 之前用 m₁ 算的 softmax 是错的
+  ← 解决: 用修正因子 exp(m₁ - m₂) 修正之前的 O₁
+
+  l₂ = l₁ × exp(m₁ - m₂) + Σ exp(S₁₂ - m₂)  ← 修正 l
+  O₁ = O₁ × (l₁ × exp(m₁ - m₂) / l₂)         ← 修正 O
+       + softmax(S₁₂) × V₁ × ...               ← 加上新块
+
+处理第三、第四块: 同理，逐块修正
+
+最终结果: 数学上完全等价于标准 softmax！
+不是近似！不是采样！是精确计算！</div>
+
+<div class="box tip"><div class="label">💡 为什么在线 Softmax 是精确的？</div>
+关键在于：每次发现更大的值时，用修正因子 <code>exp(m_old - m_new)</code> 修正之前的所有累加值。这个修正在数学上是精确的——它等价于"先看完所有值再算 softmax"。Tri Dao 的论文给出了严格的数学证明。</div>
+
+<h2>4.6 解决方案三：重计算（Recomputation）</h2>
+<p>训练时的额外问题：反向传播需要注意力矩阵 P。</p>
+
+<div class="ascii">训练时:
+  前向: Q, K → S → P → O
+  反向: 需要 P 来计算梯度
+
+  标准做法: 前向时把 P(n×n) 存在 HBM → 反向时读出来
+  问题:    P 太大，存不下
+
+FlashAttention 做法:
+  前向时不存 P（反正也没物化）
+  反向时: 用保存的 m, l（统计量，很小）重新从 Q, K 计算 P
+  → 用计算换存储，多算一次但省了 O(n²) 的显存
+
+存储对比 (n=32768):
+  标准: 存 P(32768×32768×2B) = 2 GB
+  Flash: 存 m(32768×4B) + l(32768×4B) = 256 KB
+  差距: 8000 倍</div>
+
+<h2>4.7 三个原理的协同</h2>
+
+<div class="ascii">┌──────────────────────────────────────────────────┐
+│              FlashAttention 三板斧                 │
+│                                                   │
+│  ① Tiling (分块)                                  │
+│     把大矩阵切成 SRAM 放得下的小块                   │
+│     → 解决"SRAM 太小"的问题                        │
+│                                                   │
+│  ② Online Softmax (在线 softmax)                  │
+│     边看边算，逐块更新，不需要全局信息                │
+│     → 解决"分块后怎么算 softmax"的问题              │
+│                                                   │
+│  ③ Recomputation (重计算)                          │
+│     反向传播时不存中间结果，现场重算                  │
+│     → 解决"训练时显存不够"的问题                    │
+│                                                   │
+│  三者结合:                                         │
+│  显存 O(n²) → O(n)                                │
+│  速度 2-4x                                        │
+│  精度完全不变                                      │
+└──────────────────────────────────────────────────┘</div>
+
+<h2>4.8 FlashAttention 的工程实现细节</h2>
+<div class="box deep"><div class="label">🔬 FlashAttention 的 CUDA Kernel 设计</div>FlashAttention 的 CUDA 实现是其高性能的关键。与传统的注意力实现不同，FlashAttention 的 Kernel 需要精心设计线程块（thread block）的分工和共享内存（SRAM）的使用。每个线程块负责处理一个 Q 块，内部的线程协作完成 Q×K^T 矩阵乘法和 softmax 计算。关键的工程优化包括：(1) <strong>协同加载</strong>——所有线程协作从 HBM 加载 Q、K、V 块到共享内存，使用 __syncthreads() 同步后才开始计算；(2) <strong>寄存器缓存</strong>——将 softmax 的统计量（m 和 l）保存在寄存器中，避免反复读写共享内存；(3) <strong>向量化访存</strong>——使用 float4 或 half2 类型一次加载多个元素，提高内存访问效率；(4) <strong>算术强度优化</strong>——通过调整块大小（block size），使得计算量与访存量的比值接近 GPU 的算术强度上限，充分利用 GPU 的计算能力。</div>
+
+<div class="ascii">FlashAttention CUDA Kernel 执行流程:
+
+每个 Thread Block 处理一个 Q 块:
+
+  Thread Block (TB)
+  ┌───────────────────────────────────────────┐
+  │  共享内存 (SRAM):                          │
+  │  ┌─────────┐ ┌─────────┐ ┌─────────┐     │
+  │  │ Qi 块   │ │ Kj 块   │ │ Vj 块   │     │
+  │  │ (loaded)│ │ (loaded)│ │ (loaded)│     │
+  │  └─────────┘ └─────────┘ └─────────┘     │
+  │                                           │
+  │  寄存器: mi, li (softmax统计量)            │
+  │                                           │
+  │  执行循环:                                 │
+  │  for j in KV_blocks:                      │
+  │    1. 协作加载 Kj, Vj → 共享内存           │
+  │    2. __syncthreads()                     │
+  │    3. 各线程计算 Sij = Qi × Kjᵀ           │
+  │    4. 在线更新 mi, li, Oi                 │
+  │    5. __syncthreads()                     │
+  │  写回 Oi → HBM                            │
+  └───────────────────────────────────────────┘</div>
+
+<div class="box tip"><div class="label">💡 PyTorch 中使用 FlashAttention</div>PyTorch 2.0+ 已经内置了 FlashAttention 支持，通过 <code>torch.nn.functional.scaled_dot_product_attention</code> 函数自动调用。开发者无需手动编写 CUDA 代码，只需设置 <code>is_causal=True</code> 即可启用因果注意力掩码。如果系统安装了 flash-attn 库，PyTorch 会自动选择 FlashAttention 后端；否则会回退到内存高效的 xFormers 实现或标准实现。在实际使用中，建议通过 <code>torch.backends.cuda.flash_sdp_enabled()</code> 检查 FlashAttention 是否可用。对于 HuggingFace Transformers 库，只需在模型配置中设置 <code>attn_implementation="flash_attention_2"</code> 即可启用。</div>
+
+<h2>4.9 实测效果</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>FlashAttention 的加速效果就像「高速公路 vs 市区道路」——短距离（短序列）差距不大，但长距离（长序列）时高速公路（FlashAttention）的优势是压倒性的。序列越长，n×n 矩阵越大，IO 瓶颈越严重，FlashAttention 的优势越明显。</div>
+
+<table>
+<tr><th>指标</th><th>标准 Attention</th><th>FlashAttention</th></tr>
+<tr><td>显存占用</td><td>O(n²)</td><td>O(n)</td></tr>
+<tr><td>计算速度</td><td>1x</td><td>2-4x</td></tr>
+<tr><td>精度</td><td>精确</td><td>精确 (数学等价)</td></tr>
+<tr><td>最大序列长度</td><td>受显存限制</td><td>可处理 128K+</td></tr>
+</table>
+
+<div class="ascii">实测数据 (A100-80GB, LLaMA-7B):
+
+序列长度    标准Attention         FlashAttention-2
+4096       32MB 额外显存          ~0MB 额外显存
+16384      512MB                 ~0MB
+65536      8GB (OOM!)            ~0MB, 正常运行
+131072     不可能                 可以跑
+
+速度方面:
+  短序列 (<2K): 提升有限 (本来就不慢)
+  长序列 (32K+): 提升 2-4 倍 (IO 瓶颈被消除)</div>
+
+<h2>4.10 版本演进</h2>
+
+<table>
+<tr><th>版本</th><th>时间</th><th>GPU</th><th>关键改进</th></tr>
+<tr><td>FlashAttention-1</td><td>2022</td><td>A100</td><td>首次提出 IO-aware attention，2-4x 加速</td></tr>
+<tr><td>FlashAttention-2</td><td>2023</td><td>A100/H100</td><td>跨序列维度并行，再快 2x，支持更多 GPU</td></tr>
+<tr><td>FlashAttention-3</td><td>2024</td><td>H100</td><td>利用 H100 异步特性 (WGMMA/TMA)，支持 FP8</td></tr>
+</table>
+
+<h2>4.11 相似用途的技术</h2>
+
+<table>
+<tr><th>技术</th><th>思路</th><th>与 FlashAttention 的区别</th></tr>
+<tr><td>FlashDecoding</td><td>专为 decode 优化（序列=1，batch大）</td><td>FA 针对 prefill（序列长）</td></tr>
+<tr><td>Ring Attention</td><td>长序列分到多卡，每卡用 FA 算本地块</td><td>分布式场景的扩展</td></tr>
+<tr><td>PagedAttention</td><td>KV Cache 分页管理</td><td>解决存储问题，不解决计算问题</td></tr>
+<tr><td>稀疏注意力</td><td>只算部分 token 对，O(n) 复杂度</td><td>近似方法，有精度损失</td></tr>
+<tr><td>线性注意力 (Mamba)</td><td>用 RNN 方式避免 n×n 矩阵</td><td>完全不同的架构范式</td></tr>
+</table>
+
+<h2>4.12 关联度高的技术</h2>
+
+<div class="ascii">FlashAttention 的技术关联:
+
+  FlashAttention ←── 核心计算优化
+       │
+       ├── PagedAttention     ← 解决存储，FA 解决计算，天然搭配
+       ├── 连续批处理          ← FA 让每步更快，批处理让更多请求同时算
+       ├── GQA/MLA            ← 减少 KV 头数，直接减少 FA 计算量
+       ├── 量化 (FP8)         ← FA-3 原生支持，H100 上进一步加速
+       └── 投机解码            ← 验证阶段需要快速注意力，FA 是基础设施</div>
+
+<h2>4.13 使用场景</h2>
+
+<table>
+<tr><th>场景</th><th>是否需要</th><th>说明</th></tr>
+<tr><td>长序列推理 (32K+)</td><td>✅ 必须</td><td>不用 FA 直接 OOM</td></tr>
+<tr><td>高吞吐推理服务</td><td>✅ 必须</td><td>速度差 2-4 倍</td></tr>
+<tr><td>训练大模型</td><td>✅ 必须</td><td>几乎所有主流训练框架默认开启</td></tr>
+<tr><td>短序列推理 (<2K)</td><td>⚪ 可选</td><td>标准 Attention 也够快</td></tr>
+<tr><td>线性注意力模型 (Mamba)</td><td>❌ 不需要</td><td>不用 n×n 注意力</td></tr>
+</table>
+
+<div class="box info"><div class="label">💡 现状</div>
+2025-2026 年的主流推理引擎（vLLM、TensorRT-LLM、SGLang、llama.cpp）全部默认启用 FlashAttention。它已经不是「可选优化」，而是<strong>注意力计算的默认实现</strong>。FlashAttention 的成功还催生了一系列"IO-Aware"的 GPU 算子优化工作——研究者开始关注其他计算密集型操作（如 Layer Normalization、Softmax）的 IO 瓶颈，推动了整个 GPU 算子优化领域的发展。在 H100 和后续的 B100/B200 GPU 上，FlashAttention 的优化思路被进一步扩展——利用更大的 SRAM、更快的 HBM 带宽、以及新的异步计算能力，FlashAttention 的性能还在持续提升。可以说，FlashAttention 不仅解决了一个具体的技术问题，更开创了"IO-Aware 算法设计"这一重要的研究方向。</div>
+
+<h3>4.14 FlashAttention 的内存访问模式分析</h3>
+<p>FlashAttention 的性能优势源于其对 GPU 内存访问模式的深度优化。理解 IO 复杂度是评估其效率的关键。</p>
+
+<div class="ascii">FlashAttention IO 复杂度分析:
+
+  标准 Attention IO 复杂度:
+    读 Q, K, V:  O(n × d)        ← 从 HBM 读取
+    写 S:        O(n²)            ← 写入 HBM (n×n 矩阵)
+    读 S:        O(n²)            ← 从 HBM 读取
+    写 P:        O(n²)            ← 写入 HBM
+    读 P, V:     O(n² + n × d)   ← 从 HBM 读取
+    写 O:        O(n × d)         ← 写入 HBM
+    总计:        O(n² + n × d)
+
+  FlashAttention IO 复杂度:
+    读 Q, K, V:  O(n × d × M/B)  ← 分块读取，M=SRAM大小
+    内部计算:     全部在 SRAM
+    写 O:        O(n × d)         ← 只写最终结果
+    总计:        O(n² × d² / M)
+
+  当 M = Θ(d²) 时 (现代 GPU SRAM 通常满足):
+    FlashAttention IO = O(n² × d² / d²) = O(n²)
+    但常数因子差异巨大 → 实际减少 5-10 倍 HBM 访问</div>
+
+<h3>4.15 FlashAttention 与硬件协同设计</h3>
+<p>FlashAttention 的成功不仅是算法创新，更是算法与硬件协同设计的典范。A100 GPU 的 SRAM 为 192KB（每个 SM），H100 提升到 256KB。FlashAttention 的分块大小正是根据 SRAM 容量精确计算的。</p>
+
+<table>
+<tr><th>GPU 架构</th><th>SRAM/SM</th><th>HBM 带宽</th><th>FA-2 速度</th><th>FA-3 速度</th></tr>
+<tr><td>A100 (Ampere)</td><td>192 KB</td><td>2 TB/s</td><td>基线</td><td>N/A</td></tr>
+<tr><td>H100 (Hopper)</td><td>256 KB</td><td>3.35 TB/s</td><td>1.5x vs A100</td><td>2x vs FA-2</td></tr>
+<tr><td>H200 (Hopper)</td><td>256 KB</td><td>4.8 TB/s</td><td>1.3x vs H100</td><td>1.5x vs FA-2</td></tr>
+<tr><td>B100 (Blackwell)</td><td>512 KB</td><td>8 TB/s</td><td>预计 2x</td><td>预计 2.5x</td></tr>
+</table>
+
+<h3>4.16 FlashAttention 在不同注意力变体中的应用</h3>
+<p>FlashAttention 的分块计算思想可以推广到各种注意力变体。不同的注意力模式需要不同的分块策略。</p>
+
+<div class="ascii">FlashAttention 与注意力变体:
+
+  标准因果注意力 (Causal):
+    只需要下三角部分
+    FA 优化: 跳过上三角块的计算
+    → 实际计算量减半
+
+  滑动窗口注意力 (Sliding Window):
+    每个 token 只关注前后 W 个 token
+    FA 优化: 只加载窗口内的 KV 块
+    → IO 进一步减少
+
+  稀疏注意力 (Sparse):
+    只计算部分 token 对
+    FA 优化: 跳过不需要的块
+    → 与稀疏模式叠加
+
+  多查询注意力 (MQA/GQA):
+    KV 头数少于 Q 头数
+    FA 优化: KV 块更小，SRAM 利用率更高
+    → GQA 是 FA 的最佳搭档</div>
+
+<h3>4.17 FlashAttention 的数值稳定性</h3>
+<p>FlashAttention 的在线 Softmax 算法在数值稳定性方面做了精心设计。标准 softmax 通过减去最大值来避免 exp 溢出，FlashAttention 同样遵循这一原则。</p>
+
+<div class="box deep"><div class="label">🔬 数值稳定性的工程细节</div>在线 Softmax 的数值稳定性面临两个挑战：(1) 每次更新最大值 m 时，需要重新缩放之前的累加结果，缩放因子 exp(m_old - m_new) 在差距很大时可能下溢为零；(2) 累加器 l 的精度——在 FP16/BF16 下大量小数相加可能丢失精度。FlashAttention 的解决方案是：(a) 使用 FP32 存储 m 和 l 统计量；(b) 在计算 softmax 时使用 log-space 算法避免 exp 溢出；(c) 残差连接在 FP32 下累加。这些工程细节确保了输出与标准 Attention 在 FP32 下的误差小于 1e-5。</div>
+
+<h3>4.18 FlashAttention 的 Kernel 调优实践</h3>
+<p>FlashAttention 的 CUDA Kernel 经过多轮优化，每个细节都影响最终性能。</p>
+
+<pre><code><span class="comment">// FlashAttention CUDA Kernel 关键参数 (伪代码)</span>
+<span class="keyword">const</span> int Br = 128;  <span class="comment">// Q 块的行数</span>
+<span class="keyword">const</span> int Bc = 128;  <span class="comment">// KV 块的列数</span>
+<span class="keyword">const</span> int d = 128;   <span class="comment">// head 维度</span>
+
+<span class="comment">// 共享内存分配:</span>
+<span class="comment">// Q_smem: Br × d × sizeof(half) = 128 × 128 × 2 = 32 KB</span>
+<span class="comment">// K_smem: Bc × d × sizeof(half) = 128 × 128 × 2 = 32 KB</span>
+<span class="comment">// V_smem: Bc × d × sizeof(half) = 128 × 128 × 2 = 32 KB</span>
+<span class="comment">// 总计: 96 KB (A100 SRAM: 192 KB → 可以放下)</span>
+
+__global__ <span class="keyword">void</span> flash_attn_kernel(
+    half* Q, half* K, half* V, half* O,
+    float* m, float* l, int n, int d
+) {
+    __shared__ half Q_smem[Br][d], K_smem[Bc][d], V_smem[Bc][d];
+    <span class="keyword">int</span> q_block = blockIdx.x;
+    load_to_smem(Q_smem, Q, q_block);
+    __syncthreads();
+    
+    <span class="keyword">for</span> (<span class="keyword">int</span> j = 0; j < num_kv_blocks; j++) {
+        load_to_smem(K_smem, K, j);
+        load_to_smem(V_smem, V, j);
+        __syncthreads();
+        compute_sij(Q_smem, K_smem, S_local);  <span class="comment">// Q × K^T</span>
+        update_stats(S_local, m, l, O_local);   <span class="comment">// 在线 softmax</span>
+        __syncthreads();
+    }
+    store_to_hbm(O, O_local, q_block);  <span class="comment">// 只写最终结果</span>
+}</code></pre>
+
+<h3>4.19 FlashAttention 在推理服务中的集成</h3>
+<p>FlashAttention 不仅是独立的算子优化，它与整个推理服务栈深度集成。</p>
+
+<div class="ascii">FlashAttention 在推理栈中的位置:
+
+  用户请求
+      │
+      ▼
+  ┌──────────────────┐
+  │ 连续批处理 (调度器) │
+  │ 动态合并多个请求    │
+  └────────┬─────────┘
+           │
+           ▼
+  ┌──────────────────┐
+  │ PagedAttention    │
+  │ KV Cache 分页管理  │
+  └────────┬─────────┘
+           │
+           ▼
+  ┌──────────────────┐
+  │ FlashAttention    │  ← 计算优化
+  │ IO-Aware 分块计算  │
+  └────────┬─────────┘
+           │
+           ▼
+      输出 token</div>
+
+<h3>4.20 FlashAttention 的未来发展方向</h3>
+<p>FlashAttention 的研究仍在快速演进，以下几个方向值得持续关注。异构计算方面，将 FlashAttention 的思想扩展到 CPU、NPU 等其他硬件平台是重要的研究方向。稀疏 FlashAttention 方面，结合稀疏注意力模式在 O(n) 复杂度下实现高效计算是未来的关键突破点。FlashAttention-4 将利用下一代 GPU（Blackwell）的新特性进一步提升性能。长上下文优化方面，针对 1M+ token 的超长上下文场景优化分块策略和通信模式是当前的热点。</p>
+
+<div class="box tip"><div class="label">💡 工程实践建议</div>在实际部署 FlashAttention 时需要注意：(1) 确保 GPU 架构与 FA 版本匹配——A100 用 FA-2，H100 用 FA-3；(2) 检查 head_dim 是否是 64 的倍数——不是的话性能可能下降 20-30%；(3) 在使用自定义注意力掩码时验证 FA 的输出是否符合预期；(4) 监控 GPU 显存使用——虽然 FA 减少了中间结果的显存，但 KV Cache 仍然线性增长。</div>
+
+<div class="box tip"><div class="label">✅ 本章要点</div>
+<ol>
+  <li><strong>IO-Aware</strong>：FlashAttention 不改数学，改数据搬运方式——核心是减少 HBM 访问</li>
+  <li><strong>三板斧</strong>：Tiling（分块）+ Online Softmax（在线更新）+ Recomputation（重计算）</li>
+  <li><strong>精确计算</strong>：数学上完全等价于标准 Attention，不是近似方法</li>
+  <li><strong>显存 O(n²)→O(n)</strong>：n×n 注意力矩阵从不物化，支持 128K+ 长序列</li>
+  <li><strong>速度 2-4x</strong>：序列越长优势越明显，已成为所有主流推理引擎的默认实现</li>
+</ol>
+</div>
+
+<div class="box warn"><div class="label">⚠️ FlashAttention 的已知限制</div>FlashAttention 虽然强大，但仍有一些已知限制需要了解：(1) 不支持稀疏注意力掩码——FA 假设所有 token 对之间都有注意力连接，对于自定义稀疏掩码需要使用其他方案。(2) 对 head_dim 有要求——FA-2 要求 head_dim 是 64 的倍数以获得最优性能。(3) 不同 GPU 架构需要不同的版本——FA-2 针对 A100/H100 优化，其他 GPU 可能需要不同的编译配置。(4) 与某些自定义注意力模式不兼容——如 ALiBi 等特殊偏置需要额外处理。在实际部署中，建议始终验证 FlashAttention 的输出与标准实现的一致性，确保数值精度满足业务需求。特别是在混合精度训练和量化推理场景下，需要仔细验证数值稳定性。</div>
+
+<div class="box tip"><div class="label">🗺️ 学习路径</div>
+FlashAttention 是注意力计算的革命性优化。建议：① 理解 GPU 的两层存储（SRAM vs HBM）→ ② 掌握 IO 瓶颈的本质 → ③ 学习 Tiling + 在线 Softmax + 重计算三板斧 → ④ 了解 FlashAttention-3 的最新进展。完成后进入 05-注意力头优化。
+</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨：在线 Softmax 的数学证明</div>
+在线 Softmax 是 FlashAttention 最精妙的部分。核心问题：标准 softmax 需要全局最大值 max(x) 和全局求和 Σexp(x_j)，但分块计算时我们只看到一部分数据。解决方案是维护两个「running statistics」：m（当前最大值）和 l（当前 exp 之和）。当我们看到新的数据块时，可能出现更大的值，此时需要修正之前的结果。修正公式：O_new = O_old × exp(m_old - m_new) × l_old / l_new + softmax(S_new) × V_new × ...。这个修正的数学正确性可以通过归纳法证明：假设处理前 k 个块的结果是正确的，处理第 k+1 个块时，修正因子 exp(m_old - m_new) 保证了所有之前的 exp 值都被正确缩放。最终结果与先看完所有数据再算 softmax 完全等价——这不是近似，是精确计算。Tri Dao 的论文附录 A 给出了完整的数学证明。
+</div>
+
+<div class="box deep"><div class="label">🔬 深入探讨：FlashAttention-3 的异步计算优化</div>
+FlashAttention-3 专为 H100 GPU 优化，利用了 H100 的三个新特性：(1) WGMMA（Warp Group Matrix Multiply-Accumulate）——更大的矩阵乘法单元，一次计算 64×64 的矩阵块；(2) TMA（Tensor Memory Accelerator）——异步数据搬运，计算和访存可以完全重叠；(3) FP8 支持——在 H100 上 FP8 的算力是 FP16 的 2 倍。FA-3 的核心创新是「异步流水线」——当一个 warp group 在 SRAM 中计算 softmax 时，另一个 warp group 正在从 HBM 加载下一块的数据，第三个 warp group 在做矩阵乘法。这种三级流水线可以将 GPU 利用率从 FA-2 的 50-70% 提升到 70-90%。在 H100 上，FA-3 的速度比 FA-2 再快 1.5-2 倍。
+</div>
+
+<div class="box exercise"><div class="label">🎯 练习</div>
+<ol>
+<li>显存对比：计算 n=4096, 16384, 65536 时，标准 Attention 和 FlashAttention 的显存占用差异。</li>
+<li>IO 计算：计算 A100 上，处理 n=32768 的注意力时，标准 Attention 需要多少次 HBM 访问，FlashAttention 需要多少次。</li>
+<li>代码实践：用 PyTorch 的 torch.nn.functional.scaled_dot_product_attention（集成了 FlashAttention）测试不同序列长度下的速度。</li>
+</ol>
+</div>
+
+<div class="next-prev"><a href="03-Chunked-Prefill.html">← 03-Chunked-Prefill</a><a href="05-注意力头优化.html">05-注意力头优化 →</a></div>
+
+</div>
+<p>FlashAttention是一种IO感知的精确注意力算法，通过优化GPU内存访问模式实现了显著的加速效果。其核心思想是利用GPU的SRAM（共享内存）进行分块计算，避免了将完整的注意力矩阵写入HBM（高带宽内存）的IO瓶颈。算法通过在线softmax技巧，逐块计算注意力分数和输出，保持数值精度的同时将内存复杂度从O(N²)降低到O(N)。FlashAttention-2进一步优化了并行策略和工作分配，实现了接近理论峰值的GPU利用率。FlashAttention-3则利用了异步计算和低精度指令进一步加速。在实际部署中，FlashAttention已成为几乎所有主流Transformer训练和推理框架的标配组件。</p>
+<div class="footer"><p>LLM 系统学习 · 04-FlashAttention</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="tip"><strong>相关章节：</strong>
+名字由来与以下内容密切相关：<a href="01-总览.html">01-总览</a> | <a href="02-连续批处理.html">02-连续批处理</a> | <a href="03-Chunked-Prefill.html">03-Chunked-Prefill</a>。建议结合学习。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+建议先在序列长度512-8192范围内对比标准注意力和FlashAttention的速度和显存差异。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+从FlashAttention的<strong>核心原理</strong>出发，通过分块（tiling）技术避免将完整的T×T注意力矩阵写入HBM。<strong>为什么</strong>标准注意力是内存瓶颈？<strong>推导</strong>：标准注意力需存储S=QK^T（T×T矩阵），对于T=4096、FP16下需要32MB的HBM读写。而GPU的SRAM仅约20MB，导致多次HBM访问。FlashAttention将Q/K/V切分为块，在SRAM中完成分块的矩阵乘法和softmax，<strong>数学本质</strong>上，这是IO-aware的算法设计，将HBM访问量从O(T²)降至O(T²d/M)（M为SRAM大小），实现了接近硬件理论极限的注意力计算速度。
+</div>
+<pre><code class="language-python"># 名字由来 - 性能基准测试
+import torch, time
+def benchmark(model, x, n=100):
+    for _ in range(10): model(x)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(n): model(x)
+    torch.cuda.synchronize()
+    print(f"Latency: {(time.perf_counter()-t0)/n*1000:.2f}ms")
+</code></pre>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释名字由来的核心原理，并举一个实际应用场景。</li>
+<li>名字由来在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比名字由来与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+名字由来的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<pre><code class="language-python"># 名字由来 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="deep"><strong>深入探讨：</strong>
+从FlashAttention的<strong>核心原理</strong>出发，通过分块（tiling）技术避免将完整的T×T注意力矩阵写入HBM。<strong>为什么</strong>标准注意力是内存瓶颈？<strong>推导</strong>：标准注意力需存储S=QK^T（T×T矩阵），对于T=4096、FP16下需要32MB的HBM读写。而GPU的SRAM仅约20MB，导致多次HBM访问。FlashAttention将Q/K/V切分为块，在SRAM中完成分块的矩阵乘法和softmax，<strong>数学本质</strong>上，这是IO-aware的算法设计，将HBM访问量从O(T²)降至O(T²d/M)（M为SRAM大小），实现了接近硬件理论极限的注意力计算速度。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习FlashAttention时，很多人只看IO分析不实际benchmark。建议对比标准注意力和FlashAttention在不同序列长度下的速度和显存占用，验证理论分析的IO减少量。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为FlashAttention的数学原理看懂了就可以跳过CUDA kernel实现。分块大小选择、在线softmax的数值稳定性等工程细节是实现高效注意力的关键。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+名字由来与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

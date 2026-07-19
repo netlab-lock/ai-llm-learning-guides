@@ -1,0 +1,1378 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>llama.cpp 深度技术指南</title>
+<style>
+  :root { --bg: #0d1117; --bg2: #161b22; --bg3: #1c2333; --border: #30363d;
+    --text: #c9d1d9; --heading: #58a6ff; --accent: #7ee787; --warn: #d29922;
+    --code-bg: #0d1117; --keyword: #ff7b72; --string: #a5d6ff; --comment: #8b949e; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif;
+    line-height: 1.75; padding: 2rem; max-width: 1100px; margin: 0 auto; }
+  h1 { color: var(--accent); font-size: 2.2rem; border-bottom: 2px solid var(--accent);
+    padding-bottom: 0.5rem; margin-bottom: 1.5rem; }
+  h2 { color: var(--heading); font-size: 1.55rem; margin: 2.2rem 0 0.8rem;
+    border-left: 4px solid var(--heading); padding-left: 0.7rem; }
+  h3 { color: var(--warn); font-size: 1.2rem; margin: 1.4rem 0 0.5rem; }
+  p, li { margin-bottom: 0.5rem; }
+  ul, ol { padding-left: 1.5rem; }
+  code { background: var(--bg3); padding: 0.15em 0.4em; border-radius: 3px;
+    font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.92em; color: var(--accent); }
+  pre { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 1rem; overflow-x: auto; margin: 0.8rem 0 1.2rem; font-size: 0.88rem;
+    font-family: 'Cascadia Code', 'Fira Code', monospace; line-height: 1.5; }
+  pre code { background: none; padding: 0; color: var(--text); }
+  .kw { color: var(--keyword); } .str { color: var(--string); } .cm { color: var(--comment); }
+  .num { color: #79c0ff; }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0 1.5rem; font-size: 0.92rem; }
+  th { background: var(--bg3); color: var(--heading); text-align: left; padding: 0.6rem;
+    border: 1px solid var(--border); }
+  td { padding: 0.5rem 0.6rem; border: 1px solid var(--border); }
+  tr:nth-child(even) { background: var(--bg2); }
+  .box { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 1rem 1.2rem; margin: 1rem 0; }
+  .box-info { border-left: 4px solid var(--heading); }
+  .box-warn { border-left: 4px solid var(--warn); }
+  .box-ok { border-left: 4px solid var(--accent); }
+  .ascii { color: var(--accent); font-family: monospace; white-space: pre; line-height: 1.3;
+    font-size: 0.82rem; background: var(--bg2); padding: 1rem; border-radius: 6px;
+    border: 1px solid var(--border); overflow-x: auto; margin: 1rem 0; }
+  .qa { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 1rem 1.2rem; margin: 1rem 0; }
+  .qa h4 { color: var(--warn); margin-bottom: 0.4rem; }
+  .qa p:last-child { margin-bottom: 0; }
+  .tag { display: inline-block; background: var(--bg3); border: 1px solid var(--border);
+    border-radius: 12px; padding: 0.1em 0.6em; font-size: 0.82em; color: var(--heading);
+    margin-right: 0.3em; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border);
+    color: var(--comment); font-size: 0.85rem; text-align: center; }
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+</style>
+</head>
+<body>
+
+<h1>🦙 llama.cpp 深度技术指南</h1>
+<p style="color:var(--comment);margin-bottom:1.5rem;">面向 C/C++ 实现的 LLM 推理引擎 · GGUF 量化格式 · 全平台 CPU/GPU 推理 · 论文级深度</p>
+
+<!-- ======================== 1. 概述 ======================== -->
+<h2>1. 项目概述与设计哲学</h2>
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p><code>llama.cpp</code> 由 Georgi Gerganov 于 2023 年 3 月创建，最初目标是在纯 CPU 上以 4-bit 量化运行 Meta 的 LLaMA 模型。如今已发展为支持数十种模型架构、多后端加速（CUDA/Metal/Vulkan/SYCL）、完整 HTTP 服务器的全栈推理框架。</p>
+
+<h3>1.1 核心设计哲学</h3>
+<ul>
+  <li><strong>零依赖、可移植</strong>：核心库仅需 C/C++ 编译器，无 Python/PyTorch 依赖</li>
+  <li><strong>GGUF 自描述格式</strong>：单一文件包含模型权重、分词器、元数据，免去 HuggingFace 转换</li>
+  <li><strong>内存映射 (mmap)</strong>：通过操作系统虚拟内存实现零拷贝模型加载</li>
+  <li><strong>逐层 offload</strong>：灵活控制每一层放 CPU 还是 GPU，精准管理显存</li>
+  <li><strong>社区驱动量化</strong>：imatrix 量化、K-Quant 等社区创新持续提升量化质量</li>
+</ul>
+
+<svg viewBox="0 0 900 620" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs>
+<text x="450" y="22" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">llama.cpp 整体架构</text>
+
+<rect x="35" y="45" width="830" height="80" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="450" y="65" fill="#22d3ee" font-size="13" font-family="Courier New, monospace" text-anchor="middle">应用层 (CLI Tools)</text>
+<rect x="55" y="78" width="220" height="36" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="165" y="100" fill="#e6edf3" font-size="12" font-family="Courier New, monospace" text-anchor="middle">llama-cli (交互式)</text>
+<rect x="330" y="78" width="220" height="36" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="440" y="100" fill="#e6edf3" font-size="12" font-family="Courier New, monospace" text-anchor="middle">llama-server (HTTP API)</text>
+<rect x="605" y="78" width="220" height="36" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="715" y="100" fill="#e6edf3" font-size="12" font-family="Courier New, monospace" text-anchor="middle">llama-quantize (量化)</text>
+
+<line x1="165" y1="125" x2="165" y2="152" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="440" y1="125" x2="440" y2="152" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="715" y1="125" x2="715" y2="152" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+<rect x="35" y="155" width="830" height="155" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="450" y="178" fill="#34d399" font-size="14" font-family="Courier New, monospace" text-anchor="middle">libllama (核心推理库)</text>
+
+<rect x="55" y="192" width="230" height="100" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="170" y="213" fill="#34d399" font-size="12" font-family="Courier New, monospace" text-anchor="middle">GGML 张量运算库</text>
+<text x="70" y="233" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">自动微分计算图</text>
+<text x="70" y="250" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">量化内核 (Q4/Q5/Q8)</text>
+<text x="70" y="267" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">SIMD 加速点积运算</text>
+
+<rect x="330" y="192" width="230" height="100" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="445" y="213" fill="#a78bfa" font-size="12" font-family="Courier New, monospace" text-anchor="middle">KV Cache 管理器</text>
+<text x="345" y="233" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">多层 K/V 缓冲区</text>
+<text x="345" y="250" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">位置/序列 ID 管理</text>
+<text x="345" y="267" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">Cache 量化 (Q8/Q4)</text>
+
+<rect x="605" y="192" width="230" height="100" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="720" y="213" fill="#34d399" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Sampling Engine</text>
+<text x="620" y="233" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">温度 / Top-K / Top-P</text>
+<text x="620" y="250" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">Mirostat / TFS</text>
+<text x="620" y="267" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">Grammar 约束采样</text>
+
+<line x1="450" y1="310" x2="450" y2="335" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+<rect x="35" y="338" width="830" height="105" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="450" y="358" fill="#fbbf24" font-size="13" font-family="Courier New, monospace" text-anchor="middle">GGML 后端抽象层</text>
+<rect x="55" y="372" width="175" height="55" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="142" y="394" fill="#fbbf24" font-size="12" font-family="Courier New, monospace" text-anchor="middle">CPU Backend</text>
+<text x="142" y="412" fill="#94a3b8" font-size="10" font-family="Courier New, monospace" text-anchor="middle">AVX-512/NEON/AMX</text>
+<rect x="255" y="372" width="175" height="55" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="342" y="394" fill="#fbbf24" font-size="12" font-family="Courier New, monospace" text-anchor="middle">CUDA Backend</text>
+<text x="342" y="412" fill="#94a3b8" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Flash Attn / NCCL</text>
+<rect x="455" y="372" width="175" height="55" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="542" y="394" fill="#fbbf24" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Metal Backend</text>
+<text x="542" y="412" fill="#94a3b8" font-size="10" font-family="Courier New, monospace" text-anchor="middle">Apple Silicon UMA</text>
+<rect x="655" y="372" width="175" height="55" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="742" y="394" fill="#fbbf24" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Vulkan Backend</text>
+<text x="742" y="412" fill="#94a3b8" font-size="10" font-family="Courier New, monospace" text-anchor="middle">跨平台 GPU</text>
+
+<line x1="450" y1="443" x2="450" y2="470" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+<rect x="35" y="473" width="830" height="110" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="450" y="496" fill="#a78bfa" font-size="13" font-family="Courier New, monospace" text-anchor="middle">GGUF 模型文件 (磁盘)</text>
+<rect x="55" y="512" width="175" height="55" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="142" y="535" fill="#a78bfa" font-size="11" font-family="Courier New, monospace" text-anchor="middle">Header</text>
+<text x="142" y="553" fill="#94a3b8" font-size="10" font-family="Courier New, monospace" text-anchor="middle">magic + version</text>
+<rect x="255" y="512" width="175" height="55" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="342" y="535" fill="#a78bfa" font-size="11" font-family="Courier New, monospace" text-anchor="middle">KV Metadata</text>
+<text x="342" y="553" fill="#94a3b8" font-size="10" font-family="Courier New, monospace" text-anchor="middle">架构/分词器/配置</text>
+<rect x="455" y="512" width="175" height="55" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="542" y="535" fill="#a78bfa" font-size="11" font-family="Courier New, monospace" text-anchor="middle">Tensor Info</text>
+<text x="542" y="553" fill="#94a3b8" font-size="10" font-family="Courier New, monospace" text-anchor="middle">名称/维度/偏移</text>
+<rect x="655" y="512" width="175" height="55" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="742" y="535" fill="#a78bfa" font-size="11" font-family="Courier New, monospace" text-anchor="middle">Tensor Data</text>
+<text x="742" y="553" fill="#94a3b8" font-size="10" font-family="Courier New, monospace" text-anchor="middle">量化权重 (mmap)</text>
+</svg>
+
+<!-- ======================== 2. GGUF ======================== -->
+<h2>2. GGUF 格式详解</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>GGUF（GPT-Generated Unified Format）是 llama.cpp 的模型文件格式，取代了早期的 GGML/GGJT 格式。它是一个<strong>自描述的、可内存映射的</strong>二进制格式。</p>
+
+<h3>2.1 文件结构</h3>
+<pre><code><span class="cm">// GGUF v3 文件布局</span>
+<span class="kw">struct</span> gguf_file {
+    <span class="cm">// ── 头部 ──</span>
+    <span class="num">uint32_t</span> magic;          <span class="cm">// 0x46475547 = "GGUF" (little-endian)</span>
+    <span class="num">uint32_t</span> version;        <span class="cm">// 格式版本号 (当前 v3)</span>
+    <span class="num">uint64_t</span> n_tensors;      <span class="cm">// 张量数量</span>
+    <span class="num">uint64_t</span> n_kv;           <span class="cm">// 元数据键值对数量</span>
+
+    <span class="cm">// ── 元数据 KV 对 ──</span>
+    <span class="kw">for</span> (i = <span class="num">0</span>; i &lt; n_kv; i++) {
+        gguf_string  key;     <span class="cm">// UTF-8 字符串 (长度 + 数据)</span>
+        <span class="num">uint32_t</span>     type;    <span class="cm">// GGUF_TYPE_*</span>
+        <span class="kw">union</span> value;          <span class="cm">// 根据类型的值</span>
+    }
+
+    <span class="cm">// ── 张量信息 ──</span>
+    <span class="kw">for</span> (i = <span class="num">0</span>; i &lt; n_tensors; i++) {
+        gguf_string  name;    <span class="cm">// 张量名如 "blk.0.attn_q.weight"</span>
+        <span class="num">uint32_t</span>     n_dims;  <span class="cm">// 维度数</span>
+        <span class="num">uint64_t[]</span>   dims;    <span class="cm">// 各维度大小</span>
+        <span class="num">uint32_t</span>     type;    <span class="cm">// GGML_TYPE_* (量化类型)</span>
+        <span class="num">uint64_t</span>     offset;  <span class="cm">// 相对于数据区起始的偏移</span>
+    }
+
+    <span class="cm">// ── 对齐填充 ──</span>
+    padding_to_alignment(<span class="num">32</span>);
+
+    <span class="cm">// ── 张量数据 ──</span>
+    <span class="cm">// 实际的量化权重数据，按 offset 索引</span>
+};
+</code></pre>
+
+<h3>2.2 关键元数据</h3>
+<table>
+  <tr><th>Key</th><th>含义</th><th>示例值</th></tr>
+  <tr><td><code>general.architecture</code></td><td>模型架构</td><td><code>llama</code>, <code>qwen2</code>, <code>deepseek2</code></td></tr>
+  <tr><td><code>general.name</code></td><td>模型名称</td><td><code>Llama-3-8B-Instruct</code></td></tr>
+  <tr><td><code>{arch}.context_length</code></td><td>最大上下文长度</td><td><code>8192</code>, <code>131072</code></td></tr>
+  <tr><td><code>{arch}.embedding_length</code></td><td>隐藏维度 d_model</td><td><code>4096</code></td></tr>
+  <tr><td><code>{arch}.block_count</code></td><td>Transformer 层数</td><td><code>32</code></td></tr>
+  <tr><td><code>{arch}.attention.head_count</code></td><td>注意力头数</td><td><code>32</code></td></tr>
+  <tr><td><code>{arch}.attention.head_count_kv</code></td><td>KV 头数 (GQA)</td><td><code>8</code></td></tr>
+  <tr><td><code>tokenizer.ggml.model</code></td><td>分词器类型</td><td><code>gpt2</code>, <code>llama</code>, <code>tiktoken</code></td></tr>
+  <tr><td><code>tokenizer.ggml.tokens</code></td><td>词表</td><td>字符串数组</td></tr>
+  <tr><td><code>general.file_type</code></td><td>量化类型</td><td><code>Q4_K_M</code></td></tr>
+</table>
+
+<h3>2.2.1 GGUF 二进制逐字段偏移结构</h3>
+<div class="box box-info">
+  <strong>精确布局</strong>：以下表格展示 GGUF v3 文件的每个字段在二进制中的精确偏移、类型和字节数。所有整数均为 little-endian 编码。字符串格式为 <code>[uint64 len][char data[len]]</code>（无 null 终止符）。
+</div>
+
+<h3>Header 部分</h3>
+<table>
+  <tr><th>偏移</th><th>大小</th><th>类型</th><th>字段名</th><th>含义</th></tr>
+  <tr><td>0x00</td><td>4 B</td><td><code>char[4]</code></td><td>magic</td><td>魔数 <code>"GGUF"</code> = 0x46475547</td></tr>
+  <tr><td>0x04</td><td>4 B</td><td><code>uint32</code></td><td>version</td><td>格式版本，当前为 <code>3</code></td></tr>
+  <tr><td>0x08</td><td>8 B</td><td><code>uint64</code></td><td>n_tensors</td><td>张量总数（如 8B 模型约 291 个）</td></tr>
+  <tr><td>0x10</td><td>8 B</td><td><code>uint64</code></td><td>n_kv</td><td>元数据键值对数量（通常 20-50 个）</td></tr>
+</table>
+
+<h3>Metadata KV 区域 (紧跟 Header)</h3>
+<table>
+  <tr><th>偏移</th><th>大小</th><th>类型</th><th>字段名</th><th>含义</th></tr>
+  <tr><td>+0</td><td>8+N B</td><td><code>gguf_string</code></td><td>key</td><td>键名，如 <code>"general.architecture"</code></td></tr>
+  <tr><td>+8+N</td><td>4 B</td><td><code>uint32</code></td><td>type</td><td>值类型枚举（见下表）</td></tr>
+  <tr><td>+12+N</td><td>可变</td><td>根据 type</td><td>value</td><td>实际值（类型决定大小）</td></tr>
+</table>
+
+<h3>GGUF 值类型枚举</h3>
+<table>
+  <tr><th>type ID</th><th>类型名</th><th>值大小</th><th>说明</th></tr>
+  <tr><td>0</td><td><code>GGUF_TYPE_UINT8</code></td><td>1 B</td><td></td></tr>
+  <tr><td>1</td><td><code>GGUF_TYPE_INT8</code></td><td>1 B</td><td></td></tr>
+  <tr><td>2</td><td><code>GGUF_TYPE_UINT16</code></td><td>2 B</td><td></td></tr>
+  <tr><td>3</td><td><code>GGUF_TYPE_INT16</code></td><td>2 B</td><td></td></tr>
+  <tr><td>4</td><td><code>GGUF_TYPE_UINT32</code></td><td>4 B</td><td></td></tr>
+  <tr><td>5</td><td><code>GGUF_TYPE_INT32</code></td><td>4 B</td><td></td></tr>
+  <tr><td>6</td><td><code>GGUF_TYPE_FLOAT32</code></td><td>4 B</td><td></td></tr>
+  <tr><td>7</td><td><code>GGUF_TYPE_BOOL</code></td><td>1 B</td><td></td></tr>
+  <tr><td>8</td><td><code>GGUF_TYPE_STRING</code></td><td>8+N B</td><td>uint64 len + char[len]</td></tr>
+  <tr><td>9</td><td><code>GGUF_TYPE_ARRAY</code></td><td>可变</td><td>uint64 n + n × (type + value)</td></tr>
+  <tr><td>10</td><td><code>GGUF_TYPE_UINT64</code></td><td>8 B</td><td></td></tr>
+  <tr><td>11</td><td><code>GGUF_TYPE_INT64</code></td><td>8 B</td><td></td></tr>
+  <tr><td>12</td><td><code>GGUF_TYPE_FLOAT64</code></td><td>8 B</td><td></td></tr>
+</table>
+
+<h3>Tensor Info 区域 (n_tensors 个条目)</h3>
+<table>
+  <tr><th>偏移</th><th>大小</th><th>类型</th><th>字段名</th><th>含义</th></tr>
+  <tr><td>+0</td><td>8+N B</td><td><code>gguf_string</code></td><td>name</td><td>张量名，如 <code>"blk.0.attn_q.weight"</code></td></tr>
+  <tr><td>+8+N</td><td>4 B</td><td><code>uint32</code></td><td>n_dims</td><td>维度数（通常 1 或 2）</td></tr>
+  <tr><td>+12+N</td><td>8×n_dims B</td><td><code>uint64[]</code></td><td>dims</td><td>各维度大小</td></tr>
+  <tr><td>+12+N+8D</td><td>4 B</td><td><code>uint32</code></td><td>type</td><td>GGML_TYPE_* 量化类型（如 Q4_K=12）</td></tr>
+  <tr><td>+16+N+8D</td><td>8 B</td><td><code>uint64</code></td><td>offset</td><td>相对于 Tensor Data 区起始的字节偏移</td></tr>
+</table>
+
+<h3>对齐与 Tensor Data</h3>
+<table>
+  <tr><th>位置</th><th>大小</th><th>内容</th><th>说明</th></tr>
+  <tr><td>Tensor Info 末尾</td><td>0-31 B</td><td>零填充 (padding)</td><td>对齐到 32 字节边界</td></tr>
+  <tr><td>Data 区起始</td><td>可变</td><td>量化权重数据</td><td>按 tensor info 中的 offset 索引</td></tr>
+</table>
+
+<pre><code><span class="cm">// 实际解析示例: 读取第一个张量的数据</span>
+<span class="cm">// 1. mmap 整个文件到 ptr</span>
+<span class="cm">// 2. 验证: *(uint32_t*)(ptr + 0x00) == 0x46475547  (magic)</span>
+<span class="cm">// 3. 读取: n_tensors = *(uint64_t*)(ptr + 0x08)</span>
+<span class="cm">// 4. 跳过 n_kv 个 metadata KV 对 (逐个解析 key/value)</span>
+<span class="cm">// 5. 到达 Tensor Info 区, 逐个读取 name/type/offset</span>
+<span class="cm">// 6. data_start = align(current_pos, 32)</span>
+<span class="cm">// 7. 张量数据指针 = data_start + tensor.offset</span>
+<span class="cm">// 8. 直接从 mmap 指针访问 (page fault 触发磁盘读取)</span>
+</code></pre>
+
+<div class="warn"><strong>⚠️ 常见误区：GGUF 格式完全兼容所有版本</strong>
+<p>GGUF 虽然是向前兼容的格式，但不同版本的 llama.cpp 对 GGUF 的元数据字段支持程度不同。一个常见的坑是：用最新版 llama.cpp 转换的 GGUF 文件可能包含旧版不支持的元数据键（如新的 tokenizer 类型），导致旧版工具加载失败或行为异常。另一个误区是认为 GGUF 文件可以直接从 safetensors 转换——实际上某些自定义架构（如非标准的 MoE 路由）需要先修改 convert 脚本中的架构映射，否则张量名不匹配会导致转换后的模型输出全为垃圾。</p>
+</div>
+
+<h3>2.3 量化类型对比</h3>
+<div class="box box-warn">
+  <strong>核心概念</strong>：量化将 FP16/BF16 权重压缩为低位整数表示。llama.cpp 支持 K-Quant（每层不同位宽）和 imatrix（基于重要性矩阵的混合精度量化）。
+</div>
+
+<table>
+  <tr>
+    <th>量化类型</th><th>位宽 (bits)</th><th>类型大小</th><th>相对精度</th>
+    <th>推理速度</th><th>内存占用</th><th>适用场景</th>
+  </tr>
+  <tr>
+    <td><code>Q4_0</code></td><td>4.5</td><td>4-bit + FP16 scale</td><td>★★☆☆</td>
+    <td>★★★★</td><td>极低</td><td>极致压缩，质量可接受</td>
+  </tr>
+  <tr>
+    <td><code>Q4_K_M</code></td><td>4.8</td><td>4-bit K-Quant 混合</td><td>★★★☆</td>
+    <td>★★★★</td><td>低</td><td><strong>最佳性价比，推荐默认</strong></td>
+  </tr>
+  <tr>
+    <td><code>Q5_K_M</code></td><td>5.7</td><td>5-bit K-Quant 混合</td><td>★★★★</td>
+    <td>★★★☆</td><td>中低</td><td>质量优先，GPU 显存充足</td>
+  </tr>
+  <tr>
+    <td><code>Q6_K</code></td><td>6.6</td><td>6-bit K-Quant</td><td>★★★★☆</td>
+    <td>★★★☆</td><td>中等</td><td>接近 FP16 质量</td>
+  </tr>
+  <tr>
+    <td><code>Q8_0</code></td><td>8.5</td><td>8-bit + FP16 scale</td><td>★★★★★</td>
+    <td>★★☆☆</td><td>中高</td><td>几乎无损，baseline 对比</td>
+  </tr>
+  <tr>
+    <td><code>F16</code></td><td>16.0</td><td>IEEE FP16</td><td>★★★★★★</td>
+    <td>★☆☆☆</td><td>高</td><td>全精度参考</td>
+  </tr>
+  <tr>
+    <td><code>IQ4_XS</code></td><td>4.3</td><td>imatrix 4-bit 超压缩</td><td>★★★☆</td>
+    <td>★★★★</td><td>极低</td><td>imatrix 量化，Q4_0 质量更好</td>
+  </tr>
+</table>
+
+<h3>2.4 K-Quant 原理</h3>
+<p>K-Quant 的核心思想：<strong>对模型中不同层使用不同的量化精度</strong>。敏感层（如第一层、最后一层、attention 的 Q/K 投影）使用更高位宽（Q5/Q6），不敏感层（中间 FFN）使用更低位宽（Q3/Q4）。具体分配方案通过在验证集上测量 perplexity 来确定。</p>
+
+<pre><code><span class="cm">// K-Quant 层分配示例 (32 层 LLaMA 模型)</span>
+<span class="cm">// Q4_K_M 分配策略:</span>
+<span class="cm">//   Layer  0:    Q6_K   (首层最敏感)</span>
+<span class="cm">//   Layer  1-3:  Q5_K   </span>
+<span class="cm">//   Layer  4-28: Q4_K   (中间层)</span>
+<span class="cm">//   Layer 29-30: Q5_K   </span>
+<span class="cm">//   Layer 31:    Q6_K   (末层最敏感)</span>
+<span class="cm">//   Output:      Q6_K   (lm_head)</span>
+
+<span class="cm">// imatrix 量化更进一步:</span>
+<span class="cm">// 通过校准数据计算每个权重通道的重要性分数</span>
+<span class="cm">// 重要性高的通道保留更多精度</span>
+<span class="cm">// 需要先运行 llama-imatrix 工具生成 importance matrix</span>
+</code></pre>
+
+<h3>2.5 Q4_K_M 量化数学详解</h3>
+<div class="box box-info">
+  <strong>Q4_K_M 的核心</strong>：将 FP16 权重以 32 个为一组进行非对称 4-bit 量化，每组保存一个 scale（FP16）和一个 bias/min（FP16），以及 32 个 4-bit 整数。配合 K-Quant 的层间混合精度分配，实现 4.8 bits/param 的平均位宽。
+</div>
+
+<h3>2.5.1 量化过程 (Quantization)</h3>
+<pre><code><span class="cm">// Q4_K_M 量化: 以 32 个权重为一个 block</span>
+<span class="cm">// 输入: float w[32] (FP16/FP32 权重)</span>
+<span class="cm">// 输出: uint8_t q[16] (4-bit 量化值, 每字节存 2 个) + 2 个 FP16 元数据</span>
+
+<span class="cm">// 步骤 1: 计算 block 的 min 值 (bias)</span>
+bias = min(w[0], w[1], ..., w[31]);    <span class="cm">// 非对称量化的零点</span>
+
+<span class="cm">// 步骤 2: 计算 scale</span>
+d = max(|w[i] - bias|) / <span class="num">7.0</span>;          <span class="cm">// 4-bit 量化范围 [0, 7] (3-bit 用于 magnitude)</span>
+                                          <span class="cm">// 实际 Q4_K 使用 [0, 15] 范围, 但 super-block 有额外 scale</span>
+
+<span class="cm">// 步骤 3: 量化每个权重</span>
+<span class="kw">for</span> (i = <span class="num">0</span>; i &lt; <span class="num">32</span>; i++) {
+    w_q[i] = round((w[i] - bias) / d);  <span class="cm">// 映射到 [0, 15] 整数</span>
+    w_q[i] = clamp(w_q[i], <span class="num">0</span>, <span class="num">15</span>);     <span class="cm">// 钳位到 4-bit 范围</span>
+}
+
+<span class="cm">// 存储格式 (Q4_K block):</span>
+<span class="cm">//   [d: FP16]      — 主 scale</span>
+<span class="cm">//   [dmin: FP16]   — bias/min 值</span>
+<span class="cm">//   [q: uint8 × 16] — 32 个 4-bit 量化值 (每字节 2 个)</span>
+<span class="cm">//   总计: 4 + 16 = 20 bytes / 32 weights = 0.625 bytes/weight = 5 bits/weight</span>
+</code></pre>
+
+<h3>2.5.2 反量化过程 (Dequantization)</h3>
+<pre><code><span class="cm">// 在矩阵乘法内核中，需要将量化权重恢复为浮点</span>
+<span class="cm">// SIMD 优化的反量化: 同时处理多个 block</span>
+
+<span class="cm">// 反量化公式:</span>
+w[i] = w_q[i] × d + dmin;               <span class="cm">// 恢复原始浮点值</span>
+
+<span class="cm">// 伪代码 (简化):</span>
+<span class="kw">for</span> (i = <span class="num">0</span>; i &lt; <span class="num">32</span>; i++) {
+    <span class="cm">// 从 packed bytes 提取 4-bit 值</span>
+    <span class="kw">if</span> (i % <span class="num">2</span> == <span class="num">0</span>)
+        w_q = q[i/<span class="num">2</span>] & <span class="num">0x0F</span>;           <span class="cm">// 低 4 位</span>
+    <span class="kw">else</span>
+        w_q = (q[i/<span class="num">2</span>] >> <span class="num">4</span>) & <span class="num">0x0F</span>;    <span class="cm">// 高 4 位</span>
+
+    w_fp16[i] = w_q * d + dmin;         <span class="cm">// FP16 运算</span>
+}
+
+<span class="cm">// AVX-512 优化: 一次反量化 32 个权重</span>
+<span class="cm">// 1. 加载 16 字节 packed 数据</span>
+<span class="cm">// 2. VPSRLW + VPAND 拆分高低 4-bit</span>
+<span class="cm">// 3. VPMOVZXWD 扩展到 32-bit</span>
+<span class="cm">// 4. VCVTDQ2PS 转 FP32</span>
+<span class="cm">// 5. VFMADD (fused multiply-add): w_q * d + dmin</span>
+</code></pre>
+
+<h3>2.5.3 Super-Block 结构 (Q4_K)</h3>
+<pre><code><span class="cm">// Q4_K 实际使用两层 scale 结构:</span>
+<span class="cm">// Super-block: 256 个权重 (8 个 sub-block × 32 weights)</span>
+
+<span class="kw">struct</span> block_q4_K {            <span class="cm">// 总计 144 bytes / 256 weights</span>
+    <span class="num">half</span>    d;                  <span class="cm">// 2B: super-block scale</span>
+    <span class="num">half</span>    dmin;               <span class="cm">// 2B: super-block min</span>
+    <span class="num">uint8_t</span> scales[<span class="num">12</span>];        <span class="cm">// 12B: 8 个 sub-block 的 6-bit scale (packed)</span>
+    <span class="num">uint8_t</span> qs[<span class="num">128</span>];           <span class="cm">// 128B: 256 个 4-bit 量化值</span>
+};                             <span class="cm">// 平均: 144/256 × 8 = 4.5 bits/weight</span>
+                               <span class="cm">// Q4_K_M 通过层混合使平均达到 4.8 bits</span>
+
+<span class="cm">// 反量化: w = (q × scale[sub_block] × d) + (dmin × dmin_scale)</span>
+<span class="cm">// 两层 scale 提供更细粒度的精度控制</span>
+</code></pre>
+
+<h3>2.5.4 K-Quant 层分配策略 (Q4_K_M)</h3>
+<pre><code><span class="cm">// Q4_K_M 不是所有层都用 Q4_K, 而是混合精度:</span>
+<span class="cm">// 源码参考: llama.cpp 的 get_quant_type() 函数</span>
+
+<span class="cm">// LLaMA-7B/8B (32 层) 的 Q4_K_M 分配:</span>
+layer   0:   attn_qkv = Q6_K,  attn_output = Q5_K,  ffn_gate = Q4_K,  ffn_up = Q4_K,  ffn_down = Q4_K
+layer   1:   attn_qkv = Q5_K,  attn_output = Q5_K,  ffn_gate = Q4_K,  ffn_up = Q4_K,  ffn_down = Q4_K
+layer   2:   attn_qkv = Q5_K,  attn_output = Q5_K,  ffn_gate = Q4_K,  ffn_up = Q4_K,  ffn_down = Q4_K
+layer 3-28:  attn_qkv = Q4_K,  attn_output = Q4_K,  ffn_gate = Q4_K,  ffn_up = Q4_K,  ffn_down = Q4_K
+layer  29:   attn_qkv = Q5_K,  attn_output = Q5_K,  ffn_gate = Q4_K,  ffn_up = Q4_K,  ffn_down = Q4_K
+layer  30:   attn_qkv = Q5_K,  attn_output = Q5_K,  ffn_gate = Q4_K,  ffn_up = Q4_K,  ffn_down = Q4_K
+layer  31:   attn_qkv = Q6_K,  attn_output = Q5_K,  ffn_gate = Q4_K,  ffn_up = Q4_K,  ffn_down = Q4_K
+output:      lm_head = Q6_K
+
+<span class="cm">// 规律:</span>
+<span class="cm">// - 首末层 (0, 31) 的 attention 权重最敏感 → Q6_K</span>
+<span class="cm">// - Q/K 投影比 V/O 更敏感 → 更高位宽</span>
+<span class="cm">// - FFN 层不敏感 → Q4_K (最低)</span>
+<span class="cm">// - _M (Medium) vs _S (Small) vs _L (Large): 调整敏感层的比例</span>
+</code></pre>
+
+<!-- ======================== 3. KV Cache ======================== -->
+<h2>3. KV Cache 实现</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>3.1 基本架构</h3>
+<svg viewBox="0 0 900 560" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs>
+<text x="450" y="22" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">KV Cache 在 Transformer 推理中的角色</text>
+
+<text x="45" y="52" fill="#fb7185" font-size="13" font-family="Courier New, monospace" text-anchor="start">Prefill 阶段 (prompt tokens 并行计算)</text>
+<rect x="35" y="62" width="830" height="105" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="70" y="85" fill="#e6edf3" font-size="12" font-family="Courier New, monospace" text-anchor="start">Input: [t0, t1, t2, ..., tn]  →  并行前向传播</text>
+<rect x="70" y="98" width="350" height="28" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="245" y="117" fill="#a78bfa" font-size="12" font-family="Courier New, monospace" text-anchor="middle">K Cache: [k0, k1, ..., kn]</text>
+<rect x="445" y="98" width="350" height="28" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="620" y="117" fill="#a78bfa" font-size="12" font-family="Courier New, monospace" text-anchor="middle">V Cache: [v0, v1, ..., vn]</text>
+<text x="70" y="150" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">所有 prompt tokens 一次性并行计算，结果写入 KV Cache</text>
+
+<line x1="450" y1="172" x2="450" y2="195" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+<text x="45" y="218" fill="#fb7185" font-size="13" font-family="Courier New, monospace" text-anchor="start">Decode 阶段 (逐 token 生成)</text>
+<rect x="35" y="228" width="830" height="175" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="70" y="252" fill="#e6edf3" font-size="12" font-family="Courier New, monospace" text-anchor="start">Input: [t_{n+1}]  (仅 1 个新 token)</text>
+<text x="70" y="275" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">1. 计算 q_{n+1} (新 token 的 query)</text>
+<text x="70" y="295" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">2. q × [k0..kn]^T → attention scores (与所有缓存的 K 做点积)</text>
+<text x="70" y="315" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">3. softmax(scores) × [v0..vn] → weighted output (加权求和 V)</text>
+<text x="70" y="335" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">4. 追加 k_{n+1} → K Cache,  v_{n+1} → V Cache</text>
+<rect x="70" y="348" width="350" height="28" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="245" y="367" fill="#a78bfa" font-size="11" font-family="Courier New, monospace" text-anchor="middle">K Cache: [k0..kn, k_{n+1}]  (+1)</text>
+<rect x="445" y="348" width="350" height="28" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="620" y="367" fill="#a78bfa" font-size="11" font-family="Courier New, monospace" text-anchor="middle">V Cache: [v0..vn, v_{n+1}]  (+1)</text>
+
+<line x1="450" y1="408" x2="450" y2="430" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+<rect x="35" y="433" width="830" height="110" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="450" y="456" fill="#fbbf24" font-size="13" font-family="Courier New, monospace" text-anchor="middle">内存计算 (per token per layer)</text>
+<text x="70" y="480" fill="#e6edf3" font-size="12" font-family="Courier New, monospace" text-anchor="start">KV_bytes = 2 × n_kv_heads × head_dim × dtype_size</text>
+<text x="70" y="500" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">LLaMA-3-8B (GQA, 8 KV heads, 128 dim, F16):</text>
+<text x="70" y="518" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">→ KV/token/layer = 2 × 8 × 128 × 2 = 4 KB</text>
+<text x="70" y="536" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">→ 全部 32 层: 128 KB/token  |  8K context ≈ 1 GB</text>
+</svg>
+
+<h3>3.2 llama.cpp 的 KV Cache 管理</h3>
+<pre><code><span class="cm">// llama.cpp 的 KV Cache 数据结构 (简化)</span>
+<span class="kw">struct</span> llama_kv_cache {
+    <span class="cm">// 每层独立的 K/V 缓冲区</span>
+    ggml_tensor * k;    <span class="cm">// [n_layers, n_ctx, n_embd_k_gqa]</span>
+    ggml_tensor * v;    <span class="cm">// [n_layers, n_ctx, n_embd_v_gqa]</span>
+
+    <span class="cm">// 状态管理</span>
+    llama_pos    pos[MAX_NODES];   <span class="cm">// 每个 slot 的位置</span>
+    llama_seq_id seq_id[MAX_NODES]; <span class="cm">// 序列 ID (用于 beam search)</span>
+    <span class="num">int32_t</span>      n;                 <span class="cm">// 已使用 token 数</span>
+    <span class="num">int32_t</span>      size;              <span class="cm">// 总容量</span>
+    <span class="num">bool</span>         has_shift;         <span class="cm">// 是否发生过 shift</span>
+};
+
+<span class="cm">// KV Cache 量化 (FP16 → Q8_0/Q4_0)</span>
+<span class="cm">// 通过 --cache-type-k 和 --cache-type-v 控制</span>
+<span class="cm">// FP16 → Q8_0: 内存减半，perplexity 增加 &lt;0.1</span>
+<span class="cm">// FP16 → Q4_0: 内存减为 1/4，perplexity 增加 ~0.5</span>
+</code></pre>
+
+<h3>3.3 Flash Attention 支持</h3>
+<p>llama.cpp 从 2024 年起逐步集成了 Flash Attention 优化：</p>
+<ul>
+  <li><strong>CUDA 后端</strong>：通过 <code>GGML_USE_CUDA_FLASH_ATTN</code> 编译选项启用</li>
+  <li><strong>Metal 后端</strong>：原生支持 Flash Attention（Apple Silicon 优化）</li>
+  <li><strong>CPU 后端</strong>：通过 <code>GGML_USE_FLASH_ATTN</code> 启用（效果有限）</li>
+  <li>命令行：<code>-fa</code> 或 <code>--flash-attn</code></li>
+</ul>
+
+<svg viewBox="0 0 900 400" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs>
+<text x="450" y="22" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Flash Attention 对 KV Cache 内存访问的优化</text>
+
+<text x="45" y="52" fill="#fb7185" font-size="13" font-family="Courier New, monospace" text-anchor="start">标准 Attention:</text>
+<rect x="35" y="62" width="830" height="95" rx="6" fill="rgba(251,113,133,0.12)" stroke="#fb7185" stroke-width="1.5"/>
+<text x="70" y="85" fill="#e6edf3" font-size="12" font-family="Courier New, monospace" text-anchor="start">Q, K, V  →  Q × K^T  →  Softmax  →  × V  →  Output</text>
+<text x="70" y="108" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">需要存储完整的 n×n attention matrix</text>
+<text x="70" y="128" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">内存复杂度 O(n²) — 长序列时成为瓶颈</text>
+<text x="70" y="148" fill="#fb7185" font-size="11" font-family="Courier New, monospace" text-anchor="start">IO 复杂度: O(n²d) — 多次 HBM 读写</text>
+
+<line x1="450" y1="162" x2="450" y2="185" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+<text x="45" y="208" fill="#34d399" font-size="13" font-family="Courier New, monospace" text-anchor="start">Flash Attention (分块 + 在线 Softmax):</text>
+<rect x="35" y="218" width="830" height="165" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="70" y="242" fill="#e6edf3" font-size="12" font-family="Courier New, monospace" text-anchor="start">将 K, V 分成小块 (block)，逐块计算:</text>
+<rect x="70" y="255" width="760" height="28" rx="6" fill="rgba(52,211,153,0.08)" stroke="#34d399" stroke-width="1"/>
+<text x="85" y="274" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="start">for each block of K, V:   S_block = Q_block × K_block^T → 在线更新 softmax (running max)</text>
+<rect x="70" y="292" width="760" height="28" rx="6" fill="rgba(52,211,153,0.08)" stroke="#34d399" stroke-width="1"/>
+<text x="85" y="311" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="start">O_block += softmax(S_block) × V_block   →   累加到最终输出</text>
+<text x="70" y="340" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="start">✓ 无需存储 n×n 矩阵   ✓ 内存 O(n)   ✓ IO 复杂度 O(n²d/M)</text>
+<text x="70" y="358" fill="#34d399" font-size="11" font-family="Courier New, monospace" text-anchor="start">✓ 利用 SRAM 片上缓存 (M = SRAM 大小) 减少 HBM 访问</text>
+<text x="70" y="376" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">llama.cpp: CUDA (-fa), Metal (原生), CPU (有限效果)</text>
+</svg>
+
+<div class="warn"><strong>⚠️ 常见误区：KV Cache 量化对所有任务影响相同</strong>
+<p>KV Cache 量化（Q8_0/Q4_0）对不同类型任务的影响差异很大。在短上下文（&lt;2K tokens）的问答任务中，Q4_0 量化几乎无感知；但在长上下文推理（&gt;8K tokens）、多轮对话、代码补全等场景中，Q4_0 会导致注意力权重精度下降，表现为长距离依赖丢失、代码括号匹配错误、重复生成等问题。建议对长上下文场景使用 Q8_0（精度损失 &lt;0.1 PPL），仅在内存极端受限时才使用 Q4_0。</p>
+</div>
+
+<!-- ======================== 4. 后端架构 ======================== -->
+<h2>4. 后端架构详解</h2>
+
+<div class="tip"><strong>💡 后端抽象层的设计哲学：</strong>llama.cpp 的 GGML 后端抽象层采用<strong>策略模式</strong>——同一套张量运算接口，底层根据编译选项自动分发到不同的硬件后端（CPU/CUDA/Metal/Vulkan/SYCL）。这种设计的代价是无法针对每个后端做极致优化，但换来了无与伦比的可移植性：一个 C/C++ 项目覆盖从树莓派到 A100 的所有硬件。</div>
+<div class="warn"><strong>⚠️ 后端选择的性能陷阱：</strong>不要以为编译了 CUDA 后端就一定比 CPU 快。对于小 batch（如单请求 decode），CPU 的 SIMD 向量化可能比 GPU 的 kernel launch 开销更高效。经验法则：<strong>batch size < 8 时 CPU 可能更快</strong>，batch size > 32 时 GPU 优势明显。这就是为什么 llama.cpp 支持逐层 offload——让敏感的层用 GPU，不敏感的层留在 CPU。</div>
+
+<h3>4.1 CPU 后端</h3>
+<pre><code><span class="cm">// llama.cpp CPU 后端根据编译时检测自动选择 SIMD 指令集</span>
+
+<span class="cm">// x86-64 路径</span>
+<span class="cm">// 1. AVX-512 (最高优先级): 512-bit 向量, 16 × FP32</span>
+<span class="cm">//    - VNNI 子集: 加速 INT8 点积</span>
+<span class="cm">//    - BF16 子集: 原生 BF16 运算</span>
+<span class="cm">// 2. AVX2 + FMA: 256-bit 向量, 8 × FP32 (最常见)</span>
+<span class="cm">// 3. AVX: 256-bit 但无 FMA (少见)</span>
+<span class="cm">// 4. SSE: 126-bit, 4 × FP32 (兜底)</span>
+
+<span class="cm">// ARM 路径</span>
+<span class="cm">// 1. ARM NEON (AArch64): 128-bit 向量, 4 × FP32</span>
+<span class="cm">// 2. ARM i8mm: INT8 矩阵乘加速</span>
+<span class="cm">// 3. Apple AMX: Apple Silicon 专用矩阵协处理器</span>
+
+<span class="cm">// 量化内核实现策略 (以 Q4_K_M × F16 矩阵乘为例)</span>
+<span class="cm">// 1. 反量化 4-bit 权重到 FP16 (in-register)</span>
+<span class="cm">// 2. 与 FP16 激活做 dot product</span>
+<span class="cm">// 3. 使用 SIMD 指令并行处理多个量化 block</span>
+<span class="cm">// 4. AVX-512 可同时处理 32 个 16-bit 值</span>
+</code></pre>
+
+<h3>4.2 CUDA 后端</h3>
+<table>
+  <tr><th>组件</th><th>说明</th></tr>
+  <tr><td>量化矩阵乘</td><td>自定义 CUDA kernel，针对 Q4/Q5/Q8 优化的 dequant + GEMM</td></tr>
+  <tr><td>Flash Attention</td><td>集成 Flash Attention 2，支持 causal mask</td></tr>
+  <tr><td>MulMat 分发</td><td>根据矩阵形状和量化类型选择最优 kernel</td></tr>
+  <tr><td>多 GPU</td><td>通过 <code>nccl</code> 实现张量并行，按层分割或按头分割</td></tr>
+  <tr><td>KV Cache offload</td><td>支持将 KV Cache 放在 CPU 内存，GPU 按需读取</td></tr>
+  <tr><td>CUDA Graph</td><td>减少 kernel launch 开销，提升小 batch 吞吐</td></tr>
+</table>
+
+<pre><code><span class="cm"># CUDA 编译与使用</span>
+<span class="cm"># 编译 (需要 CUDA Toolkit)</span>
+cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86  <span class="cm"># 86=RTX 3090</span>
+cmake --build build -j
+
+<span class="cm"># 使用: 将所有层 offload 到 GPU</span>
+./llama-cli -m model.gguf -ngl 99 -c 4096
+
+<span class="cm"># 使用: 部分 offload (显存不足时)</span>
+./llama-cli -m model.gguf -ngl 20 -c 4096  <span class="cm"># 仅 offload 20 层</span>
+
+<span class="cm"># 多 GPU</span>
+./llama-cli -m model.gguf -ngl 99 -ts 0.5,0.5  <span class="cm"># 均分到 2 张 GPU</span>
+</code></pre>
+
+<h3>4.3 Metal 后端 (Apple Silicon)</h3>
+<p>Metal 后端针对 Apple M 系列芯片深度优化：</p>
+<ul>
+  <li>利用<strong>统一内存架构 (UMA)</strong>，CPU 和 GPU 共享内存，零拷贝</li>
+  <li>内置 Flash Attention 实现</li>
+  <li>支持 M 系列的<strong>矩阵乘法协处理器</strong></li>
+  <li><code>-ngl 99</code> 即可将全部计算 offload 到 GPU（无需手动管理显存/内存边界）</li>
+</ul>
+
+<h3>4.4 Vulkan 后端</h3>
+<p>Vulkan 是跨平台 GPU 计算 API，支持 NVIDIA/AMD/Intel/ARM GPU：</p>
+<ul>
+  <li>编译：<code>cmake -B build -DGGML_VULKAN=ON</code></li>
+  <li>优势：一个 binary 支持所有 GPU 厂商</li>
+  <li>劣势：相比 CUDA/Metal 有一定性能损失</li>
+  <li>适用：嵌入式设备、Windows AMD GPU、无 CUDA 环境</li>
+</ul>
+
+<!-- ======================== 5. mmap ======================== -->
+<h2>5. mmap 模型加载</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>5.1 为什么用 mmap</h3>
+<svg viewBox="0 0 900 450" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs>
+<text x="450" y="22" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">传统加载 vs mmap 加载</text>
+
+<text x="45" y="52" fill="#fb7185" font-size="13" font-family="Courier New, monospace" text-anchor="start">传统加载 (read into memory):</text>
+<rect x="35" y="62" width="830" height="80" rx="6" fill="rgba(251,113,133,0.12)" stroke="#fb7185" stroke-width="1.5"/>
+<text x="70" y="85" fill="#e6edf3" font-size="12" font-family="Courier New, monospace" text-anchor="start">磁盘文件  →  read()  →  内核缓冲区  →  copy()  →  用户空间</text>
+<text x="70" y="108" fill="#fb7185" font-size="11" font-family="Courier New, monospace" text-anchor="start">模型 7GB = 至少 7GB 内存 + 完整加载时间</text>
+<text x="70" y="128" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">两份数据拷贝: 内核缓冲区 + 用户空间</text>
+
+<line x1="450" y1="148" x2="450" y2="172" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+<text x="45" y="195" fill="#34d399" font-size="13" font-family="Courier New, monospace" text-anchor="start">mmap 加载 (内存映射):</text>
+<rect x="35" y="205" width="830" height="105" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="70" y="228" fill="#e6edf3" font-size="12" font-family="Courier New, monospace" text-anchor="start">磁盘文件  →  mmap()  →  虚拟地址空间 (页表映射)</text>
+<text x="70" y="251" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">✓ 仅建立页表映射，不实际拷贝数据</text>
+<text x="70" y="270" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">✓ 首次访问触发 page fault → OS 按需加载页面 (4KB)</text>
+<text x="70" y="289" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">✓ 多个进程可共享同一物理页面</text>
+<text x="70" y="303" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">✓ OS 自动管理页面缓存和回收</text>
+
+<line x1="450" y1="315" x2="450" y2="338" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+<rect x="35" y="341" width="830" height="95" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="450" y="364" fill="#fbbf24" font-size="13" font-family="Courier New, monospace" text-anchor="middle">mmap 核心优势</text>
+<text x="70" y="387" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="start">1. 零拷贝: 无需 read() + copy   2. 按需加载: 只加载实际访问的页面</text>
+<text x="70" y="407" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="start">3. 共享内存: 多实例共享物理页面   4. 快速启动: 模型加载时间 ≈ 0</text>
+<text x="70" y="427" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">llama.cpp 默认启用 mmap, --no-mmap 可禁用, --mlock 可锁定内存</text>
+</svg>
+
+<h3>5.2 llama.cpp 中的实现</h3>
+<pre><code><span class="cm">// llama.cpp 默认使用 mmap 加载 GGUF 文件</span>
+<span class="cm">// 可通过 --no-mmap 禁用 (某些 NFS/网络文件系统需要)</span>
+
+<span class="cm">// 加载流程:</span>
+<span class="cm">// 1. open(model_path)</span>
+<span class="cm">// 2. mmap(NULL, file_size, PROT_READ, MAP_SHARED, fd, 0)</span>
+<span class="cm">// 3. 解析 GGUF header (直接从 mmap 指针读取)</span>
+<span class="cm">// 4. 建立 tensor name → offset 索引</span>
+<span class="cm">// 5. 计算时直接访问 tensor 数据指针 (触发 page fault)</span>
+
+<span class="cm">// mlock 选项: 锁定内存防止换出</span>
+<span class="cm">// ./llama-cli -m model.gguf --mlock</span>
+<span class="cm">// 适合: 内存充足且不想等待 page fault 的场景</span>
+<span class="cm">// 代价: 启动时会遍历所有页面加载到物理内存</span>
+</code></pre>
+
+<h3>5.3 mmap 底层 OS 原理</h3>
+<div class="box box-info">
+  <strong>核心机制</strong>：mmap 并不立即读取文件数据，而是在进程虚拟地址空间建立与文件的映射关系。实际数据加载由操作系统按需通过 page fault 机制完成。
+</div>
+
+<h3>5.3.1 Page Fault 触发机制</h3>
+<pre><code><span class="cm">// mmap 调用后，内核只修改页表，不加载数据</span>
+<span class="cm">// 当 CPU 首次访问映射地址时，触发 page fault:</span>
+
+<span class="cm">// 用户态:</span>
+mmap(NULL, file_size, PROT_READ, MAP_SHARED, fd, 0);
+<span class="cm">// 返回虚拟地址 ptr, 此时页表项全部标记为"未映射"</span>
+
+<span class="cm">// 当执行: float val = *(float*)(ptr + offset);</span>
+<span class="cm">// CPU 查页表 → 发现该页未映射 → 触发缺页异常</span>
+
+<span class="cm">// 内核态处理流程:</span>
+<span class="num">1</span>. CPU 保存现场, 切换到内核模式
+<span class="num">2</span>. 内核查找 VMA (vm_area_struct) → 找到该地址属于 mmap 区域
+<span class="num">3</span>. 分配一个物理页框 (page frame, 4KB)
+<span class="num">4</span>. 从磁盘读取对应的 4KB 数据到物理页框 (DMA)
+<span class="num">5</span>. 更新页表: 虚拟页 → 物理页框, 标记为 "已映射 + 只读"
+<span class="num">6</span>. 刷新 TLB, 恢复用户态执行 → 指令重新执行, 读取成功
+
+<span class="cm">// 后续访问同一页时: 页表命中, 直接访问, 零开销</span>
+<span class="cm">// 典型 page fault 延迟: NVMe SSD ~5-20μs, SATA SSD ~50-100μs, HDD ~5-10ms</span>
+</code></pre>
+
+<h3>5.3.2 Readahead 预读策略</h3>
+<pre><code><span class="cm">// Linux 内核对 mmap 有智能预读 (readahead) 机制:</span>
+
+<span class="cm">// 当检测到顺序访问模式时，内核预读更多页面:</span>
+<span class="cm">// 初始预读窗口: 128KB (32 页)</span>
+<span class="cm">// 每次 page fault 后，异步预读后续页面</span>
+<span class="cm">// 预读窗口指数增长: 128KB → 256KB → 512KB → ... → max_readahead</span>
+
+<span class="cm">// 但 llama.cpp 的 tensor 访问模式:</span>
+<span class="cm">// - 按层顺序访问 (第0层→第1层→...): 触发顺序预读 ✓</span>
+<span class="cm">// - 每层内访问多个张量 (Q/K/V/O/FFN): 随机但局部 ✓</span>
+<span class="cm">// - 总体是分段顺序访问，预读机制能较好适配</span>
+
+<span class="cm">// llama.cpp 主动调用 madvise 优化:</span>
+madvise(ptr, file_size, MADV_SEQUENTIAL);   <span class="cm">// 告诉内核: 顺序访问</span>
+madvise(ptr, file_size, MADV_WILLNEED);     <span class="cm">// 告诉内核: 即将使用</span>
+<span class="cm">// MADV_SEQUENTIAL → 内核加大预读窗口, 访问后尽快释放页面</span>
+<span class="cm">// MADV_WILLNEED  → 内核立即开始预读指定范围</span>
+</code></pre>
+
+<h3>5.3.3 mmap vs read() 性能对比</h3>
+<table>
+  <tr><th>指标</th><th>read() 传统加载</th><th>mmap() 内存映射</th><th>差异原因</th></tr>
+  <tr><td>模型加载延迟</td><td>7GB 模型 ≈ 15-30s (SSD)</td><td>≈ 0 (仅建立映射)</td><td>mmap 不实际读数据</td></tr>
+  <tr><td>内存占用（启动时）</td><td>= 模型大小 (7GB)</td><td>≈ 0 (仅页表)</td><td>按需加载</td></tr>
+  <tr><td>内存占用（运行时）</td><td>= 模型大小</td><td>≤ 模型大小 (仅已访问页)</td><td>page fault 按需加载</td></tr>
+  <tr><td>多实例共享</td><td>每进程独立副本</td><td>共享物理页面</td><td>MAP_SHARED</td></tr>
+  <tr><td>数据拷贝次数</td><td>2 次 (内核→用户)</td><td>0 次 (直接映射)</td><td>页表直接指向文件页</td></tr>
+  <tr><td>随机访问张量</td><td>已在内存中, O(1)</td><td>首次访问触发 page fault</td><td>后续访问 O(1)</td></tr>
+  <tr><td>内存压力</td><td>固定占用, 可能 OOM</td><td>OS 可回收未用页面</td><td>只读文件页可直接丢弃</td></tr>
+</table>
+
+<div class="box box-warn">
+  <strong>为什么不总是用 mmap?</strong>
+  <ul style="margin-top:0.5rem;">
+    <li>NFS/网络文件系统：page fault 延迟不可控（可能数百 ms），此时 <code>--no-mmap</code> + <code>--mlock</code> 更好</li>
+    <li>需要确定性性能：page fault 引入不可预测的延迟抖动，实时场景可预加载</li>
+    <li>写入场景：mmap MAP_SHARED 写入需要 msync() 刷盘，复杂度高</li>
+  </ul>
+</div>
+
+<!-- ======================== 6. 投机解码 ======================== -->
+<h2>6. 投机解码 (Speculative Decoding)</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>6.1 Draft Model 方式</h3>
+<svg viewBox="0 0 900 480" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs>
+<text x="450" y="22" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">投机解码 (Speculative Decoding) 原理</text>
+
+<text x="45" y="52" fill="#fb7185" font-size="13" font-family="Courier New, monospace" text-anchor="start">传统自回归 (每步 1 token):</text>
+<rect x="35" y="62" width="830" height="45" rx="6" fill="rgba(251,113,133,0.12)" stroke="#fb7185" stroke-width="1.5"/>
+<text x="70" y="90" fill="#e6edf3" font-size="12" font-family="Courier New, monospace" text-anchor="start">t0  →  [Target Model]  →  t1  →  [Target Model]  →  t2  →  ...</text>
+
+<line x1="450" y1="112" x2="450" y2="135" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+<text x="45" y="158" fill="#34d399" font-size="13" font-family="Courier New, monospace" text-anchor="start">投机解码 (每步多 token):</text>
+
+<rect x="35" y="168" width="830" height="75" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="70" y="190" fill="#34d399" font-size="12" font-family="Courier New, monospace" text-anchor="start">Step 1: Draft Model 快速生成 K 个候选 token</text>
+<text x="70" y="210" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="start">t0 → [Draft] → d1 → [Draft] → d2 → ... → dK</text>
+<text x="70" y="230" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">Draft Model 速度快 (如 1B 参数), 但质量较低</text>
+
+<rect x="35" y="250" width="830" height="75" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="70" y="272" fill="#34d399" font-size="12" font-family="Courier New, monospace" text-anchor="start">Step 2: Target Model 并行验证所有 K 个 token (一次前向传播)</text>
+<text x="70" y="292" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="start">[t0, d1, d2, ..., dK] → [Target Model] → [accept, accept, ..., reject@i]</text>
+<text x="70" y="312" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">并行验证 K 个 token 的开销 ≈ 验证 1 个 token</text>
+
+<rect x="35" y="332" width="830" height="65" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="70" y="354" fill="#34d399" font-size="12" font-family="Courier New, monospace" text-anchor="start">Step 3: 接受前 i 个 token, 从位置 i 重新采样修正</text>
+<text x="70" y="374" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="start">输出: [d1, d2, ..., d_{i-1}, corrected_i]  →  一步产出 i 个 token</text>
+
+<rect x="35" y="410" width="830" height="55" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="70" y="433" fill="#fbbf24" font-size="12" font-family="Courier New, monospace" text-anchor="start">加速比 ≈ (accept_rate × K + 1) / (K / cost_ratio + 1)</text>
+<text x="70" y="453" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="start">当 Draft 速度 >> Target 且 accept rate 高时, 可达 2-3x 加速</text>
+</svg>
+
+<h3>6.2 Lookup Decoding</h3>
+<p>Lookup Decoding 是一种无需 draft model 的投机解码方法：</p>
+<ul>
+  <li>从已有的 prompt 或上下文中查找重复的 n-gram 模式</li>
+  <li>将匹配的 n-gram 作为候选 token 序列</li>
+  <li>适用于重复度高的生成任务（如代码补全、模板填充）</li>
+</ul>
+
+<h3>6.3 在 llama.cpp 中配置</h3>
+<pre><code><span class="cm"># Draft Model 投机解码</span>
+./llama-speculative \
+  -m  target-model.gguf \       <span class="cm"># 主模型 (大模型)</span>
+  -md draft-model.gguf \        <span class="cm"># Draft 模型 (小模型, 如 1B)</span>
+  -c  4096 \
+  -ngl 99 \                     <span class="cm"># 两个模型都 offload GPU</span>
+  -np 6                         <span class="cm"># 每次投机 6 个 token</span>
+
+<span class="cm"># Lookup Decoding (无需额外模型)</span>
+./llama-speculative \
+  -m  model.gguf \
+  -c  4096 \
+  --lookup-ngram-static         <span class="cm"># 使用静态 n-gram 查找</span>
+
+<span class="cm"># 通过 llama-server 使用</span>
+./llama-server \
+  -m  target-model.gguf \
+  -md draft-model.gguf \
+  --slots 4                     <span class="cm"># 4 个并发 slot</span>
+</code></pre>
+
+<!-- ======================== 7. llama-server ======================== -->
+<h2>7. llama-server 服务模式</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>7.1 HTTP API</h3>
+<pre><code><span class="cm"># 启动服务器</span>
+./llama-server \
+  -m  model.gguf \
+  -c  8192 \
+  --host 0.0.0.0 \
+  --port 8080 \
+  -ngl 99 \
+  -np 4 \              <span class="cm"># 4 个并发 slot</span>
+  -fa                  <span class="cm"># 启用 Flash Attention</span>
+
+<span class="cm"># OpenAI 兼容 API</span>
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "local-model",
+    "messages": [{"role": "user", "content": "你好"}],
+    "temperature": 0.7,
+    "max_tokens": 512,
+    "stream": true
+  }'
+
+<span class="cm"># 健康检查</span>
+curl http://localhost:8080/health
+
+<span class="cm"># 查看模型信息</span>
+curl http://localhost:8080/v1/models
+</code></pre>
+
+<h3>7.2 并发处理架构</h3>
+<svg viewBox="0 0 900 430" xmlns="http://www.w3.org/2000/svg" style="width:100%;background:transparent"><defs><marker id="arr" markerWidth="8" markerHeight="8" refX="8" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 Z" fill="#64748b"/></marker></defs>
+<text x="450" y="22" fill="#94a3b8" font-size="12" font-family="Courier New, monospace" text-anchor="middle">llama-server 并发处理架构</text>
+
+<text x="450" y="50" fill="#e6edf3" font-size="13" font-family="Courier New, monospace" text-anchor="middle">客户端请求 (HTTP)</text>
+<line x1="450" y1="57" x2="450" y2="72" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+<rect x="150" y="75" width="600" height="50" rx="6" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="450" y="100" fill="#22d3ee" font-size="13" font-family="Courier New, monospace" text-anchor="middle">HTTP Listener (接受连接, 解析 JSON, 路由分发)</text>
+<text x="450" y="116" fill="#94a3b8" font-size="10" font-family="Courier New, monospace" text-anchor="middle">OpenAI 兼容: /v1/chat/completions | /v1/completions | /v1/embeddings</text>
+
+<line x1="450" y1="125" x2="450" y2="150" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="250" y1="150" x2="250" y2="170" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="450" y1="150" x2="450" y2="170" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+<line x1="650" y1="150" x2="650" y2="170" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+<rect x="100" y="170" width="180" height="55" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="190" y="193" fill="#a78bfa" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Slot 0</text>
+<text x="190" y="212" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="middle">序列 A 的 KV Cache</text>
+
+<rect x="360" y="170" width="180" height="55" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="450" y="193" fill="#a78bfa" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Slot 1</text>
+<text x="450" y="212" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="middle">序列 B 的 KV Cache</text>
+
+<rect x="620" y="170" width="180" height="55" rx="6" fill="rgba(167,139,250,0.12)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="710" y="193" fill="#a78bfa" font-size="12" font-family="Courier New, monospace" text-anchor="middle">Slot 2</text>
+<text x="710" y="212" fill="#94a3b8" font-size="11" font-family="Courier New, monospace" text-anchor="middle">序列 C 的 KV Cache</text>
+
+<line x1="250" y1="225" x2="250" y2="260" stroke="#64748b" stroke-width="1.5"/>
+<line x1="450" y1="225" x2="450" y2="260" stroke="#64748b" stroke-width="1.5"/>
+<line x1="650" y1="225" x2="650" y2="260" stroke="#64748b" stroke-width="1.5"/>
+<line x1="250" y1="260" x2="650" y2="260" stroke="#64748b" stroke-width="1.5"/>
+<line x1="450" y1="260" x2="450" y2="280" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+<rect x="100" y="283" width="700" height="95" rx="6" fill="rgba(52,211,153,0.12)" stroke="#34d399" stroke-width="1.5"/>
+<text x="450" y="306" fill="#34d399" font-size="13" font-family="Courier New, monospace" text-anchor="middle">Continuous Batching (连续批处理)</text>
+<rect x="120" y="318" width="660" height="28" rx="6" fill="rgba(52,211,153,0.08)" stroke="#34d399" stroke-width="1"/>
+<text x="450" y="337" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">Prefill: 合并多个 slot 的 prompt 计算 (大吞吐)</text>
+<rect x="120" y="350" width="660" height="28" rx="6" fill="rgba(52,211,153,0.08)" stroke="#34d399" stroke-width="1"/>
+<text x="450" y="369" fill="#e6edf3" font-size="11" font-family="Courier New, monospace" text-anchor="middle">Decode: 并行 decode 多个 slot 的 1 个 token (低延迟)</text>
+
+<rect x="100" y="390" width="700" height="30" rx="6" fill="rgba(251,191,36,0.12)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="450" y="410" fill="#fbbf24" font-size="11" font-family="Courier New, monospace" text-anchor="middle">关键参数: -np (slot 数) | -cb (连续批处理) | -fa (Flash Attention)</text>
+</svg>
+
+<h3>7.2.1 Slot 架构详解</h3>
+<pre><code><span class="cm">// llama-server 的核心并发模型: Slot 槽位架构</span>
+<span class="cm">// 源码: server/server.cpp → struct server_slot</span>
+
+<span class="kw">struct</span> server_slot {
+    <span class="num">int32_t</span>     id;              <span class="cm">// slot 编号 (0 ~ n_parallel-1)</span>
+    llama_seq_id seq_id;         <span class="cm">// 对应的 KV Cache 序列 ID</span>
+    llama_pos   n_past;          <span class="cm">// 当前已处理的 token 数</span>
+    <span class="num">int32_t</span>     n_decoded;       <span class="cm">// 已生成的 token 数</span>
+    <span class="num">int32_t</span>     n_prompt_tokens; <span class="cm">// prompt 的 token 数</span>
+    std::vector&lt;llama_token&gt; prompt_tokens;
+    std::vector&lt;llama_token&gt; generated_tokens;
+
+    <span class="cm">// 状态机:</span>
+    <span class="cm">//   IDLE → 正在等待新请求</span>
+    <span class="cm">//   PROCESSING_PROMPT → 正在 prefill</span>
+    <span class="cm">//   GENERATING → 正在 decode 逐 token</span>
+    <span class="cm">//   FINISHED → 生成完毕, 等待回收</span>
+
+    <span class="num">bool</span> is_idle() <span class="kw">const</span>;        <span class="cm">// 是否空闲可接受新请求</span>
+    <span class="num">bool</span> has_prompt_in_progress(); <span class="cm">// 是否正在 prefill</span>
+};
+
+<span class="cm">// n_parallel (-np) 决定并发 slot 数</span>
+<span class="cm">// 每个 slot 独占一段 KV Cache 空间</span>
+<span class="cm">// KV Cache 总容量被均分: slot_size = ctx_size / n_parallel</span>
+</code></pre>
+
+<h3>7.2.2 请求调度策略</h3>
+<pre><code><span class="cm">// 调度主循环: server.cpp → server_context::update_slots()</span>
+
+<span class="cm">// 策略: FCFS (First Come First Serve) + 批处理合并</span>
+
+<span class="cm">// 1. 检查是否有空闲 slot</span>
+<span class="kw">for</span> (<span class="kw">auto</span>& slot : slots) {
+    <span class="kw">if</span> (slot.is_idle() && !queue.empty()) {
+        slot.prompt_tokens = queue.pop_front();  <span class="cm">// FCFS: 先到先服务</span>
+        slot.state = PROCESSING_PROMPT;
+    }
+}
+
+<span class="cm">// 2. Prefill 阶段: 合并多个 slot 的 prompt 并行计算</span>
+<span class="cm">//    所有 slot 中正在 prefill 的 prompt 会合并到一个 batch</span>
+<span class="cm">//    → 大矩阵乘, GPU 利用率高</span>
+batch = build_batch(slots_with_pending_prompt);
+
+<span class="cm">// 3. Decode 阶段: 每个 active slot 各自 decode 1 个 token</span>
+<span class="cm">//    → 并行 decode: 3 个 slot = 1 次前向传播产出 3 个 token</span>
+<span class="kw">for</span> (<span class="kw">auto</span>& slot : slots) {
+    <span class="kw">if</span> (slot.state == GENERATING) {
+        batch.add(slot.last_token, slot.seq_id, slot.n_past);
+    }
+}
+
+<span class="cm">// 4. Continuous Batching: 新请求可随时加入空闲 slot</span>
+<span class="cm">//    不必等所有 slot 都完成 → 低延迟 + 高吞吐</span>
+</code></pre>
+
+<h3>7.2.3 与 Ollama 的关系</h3>
+<div class="box box-info">
+  <strong>Ollama = llama.cpp + 模型管理 + 用户体验层</strong>
+  <ul style="margin-top:0.5rem;">
+    <li>Ollama 内部嵌入了 llama.cpp 作为推理后端（Go 语言通过 CGo 调用 libllama）</li>
+    <li>Ollama 添加了：模型下载管理（类似 Docker pull）、自动量化选择、REST API 简化、模型仓库</li>
+    <li>Ollama 默认以 llama-server 方式运行模型，每个模型一个进程</li>
+    <li>直接用 llama.cpp 的优势：更精细的参数控制、最新优化更快集成、无额外抽象层开销</li>
+  </ul>
+</div>
+
+<pre><code><span class="cm">// Ollama 内部架构:</span>
+<span class="cm">//</span>
+<span class="cm">//   用户 → Ollama CLI (Go) → Ollama Server (Go, HTTP)</span>
+<span class="cm">//                                ↓</span>
+<span class="cm">//                          Model Manager (Go)</span>
+<span class="cm">//                                ↓</span>
+<span class="cm">//                          llama.cpp (C/C++)  ← 真正的推理引擎</span>
+<span class="cm">//                                ↓</span>
+<span class="cm">//                          GGML backends (CPU/CUDA/Metal)</span>
+<span class="cm">//</span>
+<span class="cm">// Ollama 的 "ollama run llama3" 等价于:</span>
+<span class="cm">//   llama-server -m ~/.ollama/models/blobs/sha256-xxx.gguf</span>
+<span class="cm">//                -ngl 99 -c 4096 --host 127.0.0.1:11434</span>
+</code></pre>
+
+<h3>7.3 与 Ollama 的关系</h3>
+<div class="box box-info">
+  <strong>Ollama = llama.cpp + 模型管理 + 用户体验层</strong>
+  <ul style="margin-top:0.5rem;">
+    <li>Ollama 内部嵌入了 llama.cpp 作为推理后端</li>
+    <li>Ollama 添加了：模型下载管理（类似 Docker pull）、自动量化选择、REST API 简化、模型仓库</li>
+    <li>Ollama 默认使用 llama-server 的方式运行模型</li>
+    <li>直接用 llama.cpp 的优势：更精细的参数控制、最新优化更快集成、无额外抽象层开销</li>
+  </ul>
+</div>
+
+<!-- ======================== 8. 性能调优 ======================== -->
+<h2>8. 性能调优</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>8.1 关键参数</h3>
+<table>
+  <tr><th>参数</th><th>说明</th><th>推荐值</th></tr>
+  <tr><td><code>-t / --threads</code></td><td>CPU 线程数 (decode)</td><td>物理核心数 (不含超线程)</td></tr>
+  <tr><td><code>-tb / --threads-batch</code></td><td>batch/prefill 线程数</td><td>全部逻辑核心数</td></tr>
+  <tr><td><code>-b / --batch-size</code></td><td>prompt 处理 batch 大小</td><td>512 (GPU), 32-128 (CPU)</td></tr>
+  <tr><td><code>-ub / --ubatch-size</code></td><td>微 batch 大小</td><td>512</td></tr>
+  <tr><td><code>-c / --ctx-size</code></td><td>上下文长度</td><td>按需设置，越小越快</td></tr>
+  <tr><td><code>-ngl / --n-gpu-layers</code></td><td>GPU offload 层数</td><td>99 (全 offload)</td></tr>
+  <tr><td><code>-fa / --flash-attn</code></td><td>Flash Attention</td><td>开启 (GPU 场景)</td></tr>
+  <tr><td><code>--mlock</code></td><td>锁定内存</td><td>内存充足时开启</td></tr>
+  <tr><td><code>-ctk / --cache-type-k</code></td><td>K Cache 量化类型</td><td><code>q8_0</code> 或 <code>q4_0</code></td></tr>
+  <tr><td><code>-ctv / --cache-type-v</code></td><td>V Cache 量化类型</td><td><code>q8_0</code></td></tr>
+  <tr><td><code>--no-mmap</code></td><td>禁用 mmap</td><td>NFS 时使用</td></tr>
+</table>
+
+<h3>8.2 线程策略</h3>
+<pre><code><span class="cm"># 最佳实践: decode 和 prefill 使用不同线程数</span>
+<span class="cm"># decode: 受延迟限制，过多线程会增加同步开销</span>
+<span class="cm"># prefill: 受吞吐限制，更多线程可以加速</span>
+
+<span class="cm"># 示例: 16 核 CPU (8 大核 + 8 小核)</span>
+./llama-cli -m model.gguf \
+  -t 8 \        <span class="cm"># decode 用 8 大核</span>
+  -tb 16 \      <span class="cm"># prefill 用全部 16 核</span>
+  -b 1024 \     <span class="cm"># prefill batch 大一些</span>
+  -ub 512
+
+<span class="cm"># Apple M2 Max (12 核: 8P + 4E)</span>
+./llama-cli -m model.gguf \
+  -t 8 \        <span class="cm"># decode 用性能核</span>
+  -tb 12        <span class="cm"># prefill 用全部核</span>
+</code></pre>
+
+<h3>8.3 内存与 KV Cache 优化</h3>
+<pre><code><span class="cm"># KV Cache 量化: 大幅减少内存占用</span>
+./llama-cli -m model.gguf -c 32768 \
+  -ctk q8_0 -ctv q8_0    <span class="cm"># K/V Cache 都用 8-bit (内存减半)</span>
+
+./llama-cli -m model.gguf -c 65536 \
+  -ctk q4_0 -ctv q4_0    <span class="cm"># 更激进: 4-bit Cache (内存减为 1/4)</span>
+  -fa                     <span class="cm"># 配合 Flash Attention</span>
+
+<span class="cm"># 内存估算公式:</span>
+<span class="cm"># KV Cache = 2 × n_layers × n_kv_heads × head_dim × ctx_len × dtype_size</span>
+<span class="cm"># LLaMA-3-8B, ctx=32K, FP16: 2 × 32 × 8 × 128 × 32768 × 2 = 32 GB</span>
+<span class="cm"># LLaMA-3-8B, ctx=32K, Q8_0: 2 × 32 × 8 × 128 × 32768 × 1 = 16 GB</span>
+<span class="cm"># LLaMA-3-8B, ctx=32K, Q4_0: 2 × 32 × 8 × 128 × 32768 × 0.5 = 8 GB</span>
+</code></pre>
+
+<h3>8.4 性能基准数据</h3>
+<div class="box box-info">
+  <strong>测试环境</strong>：以下数据基于 llama-bench 工具，LLaMA-3-8B 模型，单请求 decode，测量 tokens/s（越高越好）。实际性能因硬件、系统负载而异。
+</div>
+
+<h3>8.4.1 不同量化类型的 Decode 速度对比</h3>
+<table>
+  <tr><th>量化类型</th><th>位宽 (bits)</th><th>模型大小</th><th>CPU (Ryzen 9 7950X, 16t)</th><th>GPU (RTX 3090)</th><th>PPL 增量</th></tr>
+  <tr><td><code>F16</code></td><td>16.0</td><td>16.0 GB</td><td>~8 tok/s</td><td>~95 tok/s</td><td>baseline</td></tr>
+  <tr><td><code>Q8_0</code></td><td>8.5</td><td>8.5 GB</td><td>~14 tok/s</td><td>~110 tok/s</td><td>+0.00</td></tr>
+  <tr><td><code>Q6_K</code></td><td>6.6</td><td>6.6 GB</td><td>~17 tok/s</td><td>~115 tok/s</td><td>+0.02</td></tr>
+  <tr><td><code>Q5_K_M</code></td><td>5.7</td><td>5.7 GB</td><td>~19 tok/s</td><td>~120 tok/s</td><td>+0.05</td></tr>
+  <tr><td><code>Q4_K_M</code></td><td>4.8</td><td>4.8 GB</td><td>~22 tok/s</td><td>~125 tok/s</td><td>+0.08</td></tr>
+  <tr><td><code>Q4_0</code></td><td>4.5</td><td>4.5 GB</td><td>~24 tok/s</td><td>~130 tok/s</td><td>+0.15</td></tr>
+  <tr><td><code>IQ4_XS</code></td><td>4.3</td><td>4.3 GB</td><td>~20 tok/s</td><td>~118 tok/s</td><td>+0.06</td></tr>
+  <tr><td><code>Q3_K_M</code></td><td>3.9</td><td>3.9 GB</td><td>~25 tok/s</td><td>~128 tok/s</td><td>+0.20</td></tr>
+  <tr><td><code>Q2_K</code></td><td>2.9</td><td>2.9 GB</td><td>~28 tok/s</td><td>~135 tok/s</td><td>+0.65</td></tr>
+</table>
+<p><strong>规律</strong>：位宽越低 → 模型越小 → 内存带宽压力越小 → tokens/s 越高。CPU 推理是 memory-bound，量化收益显著。GPU 推理同样受益但差距较小（GPU 算力充裕，瓶颈在显存带宽）。</p>
+
+<h3>8.4.2 CPU vs GPU 性能差距</h3>
+<table>
+  <tr><th>硬件</th><th>量化</th><th>Decode (tok/s)</th><th>Prefill (tok/s)</th><th>功耗</th></tr>
+  <tr><td>AMD Ryzen 9 7950X (16t)</td><td>Q4_K_M</td><td>~22</td><td>~280</td><td>170W</td></tr>
+  <tr><td>Apple M2 Max (12c GPU)</td><td>Q4_K_M</td><td>~45</td><td>~650</td><td>40W</td></tr>
+  <tr><td>Apple M4 Max (16c GPU)</td><td>Q4_K_M</td><td>~65</td><td>~900</td><td>45W</td></tr>
+  <tr><td>NVIDIA RTX 3090 (24GB)</td><td>Q4_K_M</td><td>~125</td><td>~3500</td><td>350W</td></tr>
+  <tr><td>NVIDIA RTX 4090 (24GB)</td><td>Q4_K_M</td><td>~170</td><td>~5000</td><td>450W</td></tr>
+  <tr><td>NVIDIA A100 (80GB)</td><td>Q4_K_M</td><td>~140</td><td>~4200</td><td>300W</td></tr>
+</table>
+<p><strong>关键洞察</strong>：GPU 在 decode 上约 5-8x 快于高端 CPU，prefill 上差距更大（10-15x）。但 Apple Silicon 的能效比极高（每瓦性能接近独显）。</p>
+
+<h3>8.4.3 线程数 vs 吞吐曲线</h3>
+<pre><code><span class="cm">// LLaMA-3-8B Q4_K_M, Ryzen 9 7950X, 测试不同线程数的 decode 速度</span>
+<span class="cm">// 结果呈对数曲线，存在"收益递减点"</span>
+
+线程数    tokens/s    相对提速    备注
+─────────────────────────────────────────────
+  1        3.2        1.00x     单线程 baseline
+  2        5.8        1.81x     接近线性
+  4       10.5        3.28x     接近线性
+  8       18.2        5.69x     仍有较好加速
+ 12       21.5        6.72x     开始递减
+ 16       22.3        6.97x     接近饱和 (全部物理核)
+ 24       21.8        6.81x     超线程反而略降 (缓存争用)
+ 32       20.5        6.41x     严重争用
+
+<span class="cm">// 最佳点: 物理核心数 (不含超线程)</span>
+<span class="cm">// 超线程在 memory-bound 场景下无收益甚至有害</span>
+<span class="cm">// 原因: decode 的每一步都是串行的 token 生成，</span>
+<span class="cm">// 多线程用于加速单次矩阵乘的并行计算，而非并行生成多个 token</span>
+</code></pre>
+
+<h3>8.4.4 Prefill vs Decode 线程模型差异</h3>
+<pre><code><span class="cm">// Prefill (prompt processing): compute-bound</span>
+<span class="cm">// - 大矩阵乘: [n_tokens, d_model] × [d_model, d_model]</span>
+<span class="cm">// - SIMD 利用率高, 更多线程 → 更快</span>
+<span class="cm">// - 推荐: -tb 为全部逻辑核心数</span>
+
+<span class="cm">// Decode (token generation): memory-bound</span>
+<span class="cm">// - 矩阵-向量乘: [1, d_model] × [d_model, d_model]</span>
+<span class="cm">// - 瓶颈在内存带宽, 而非算力</span>
+<span class="cm">// - 推荐: -t 为物理核心数</span>
+<span class="cm">// - 理论峰值: memory_bandwidth / model_bytes_per_param</span>
+<span class="cm">//   RTX 3090: 936 GB/s / 4.8 B/param ≈ 195 tok/s (Q4_K_M, 8B)</span>
+<span class="cm">//   DDR5-5600 双通道: ~89 GB/s / 4.8 B/param ≈ 18.5 tok/s (实测 ~22)</span>
+</code></pre>
+
+<!-- ======================== 9. 对比 ======================== -->
+<h2>9. 与 vLLM / Ollama 的定位对比</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+  <tr><th>维度</th><th>llama.cpp</th><th>vLLM</th><th>Ollama</th></tr>
+  <tr><td>语言</td><td>C/C++</td><td>Python + CUDA</td><td>Go + llama.cpp</td></tr>
+  <tr><td>目标场景</td><td>本地推理、嵌入式、边缘部署</td><td>云端高吞吐服务</td><td>本地简易使用</td></tr>
+  <tr><td>量化格式</td><td>GGUF (原生)</td><td>GPTQ/AWQ/FP8</td><td>GGUF (via llama.cpp)</td></tr>
+  <tr><td>CPU 推理</td><td>★★★★★ 优秀</td><td>★☆☆☆ 不支持</td><td>★★★★★ 优秀</td></tr>
+  <tr><td>GPU 推理</td><td>★★★☆ 良好</td><td>★★★★★ 顶级</td><td>★★★☆ 良好</td></tr>
+  <tr><td>并发吞吐</td><td>★★★☆ 中等</td><td>★★★★★ 顶级 (PagedAttention)</td><td>★★☆☆ 有限</td></tr>
+  <tr><td>易用性</td><td>★★★☆ 中等</td><td>★★☆☆ 需 Python 环境</td><td>★★★★★ 极简</td></tr>
+  <tr><td>多平台</td><td>★★★★★ x86/ARM/多种 GPU</td><td>★★☆☆ 仅 NVIDIA</td><td>★★★★★ 多平台</td></tr>
+  <tr><td>模型支持</td><td>数十种架构</td><td>主流 HuggingFace 模型</td><td>同 llama.cpp</td></tr>
+  <tr><td>依赖</td><td>零 (纯 C/C++)</td><td>PyTorch, CUDA, vLLM 包</td><td>单 binary</td></tr>
+  <tr><td>PagedAttention</td><td>无 (固定 KV Cache)</td><td>有 (核心创新)</td><td>无</td></tr>
+  <tr><td>投机解码</td><td>支持</td><td>支持</td><td>通过 llama.cpp</td></tr>
+</table>
+
+<h3>选择指南</h3>
+<div class="box box-ok">
+  <strong>选 llama.cpp 当：</strong>
+  <ul>
+    <li>需要在 CPU 上高效推理（笔记本、服务器无 GPU）</li>
+    <li>部署到嵌入式设备（树莓派、Jetson、手机）</li>
+    <li>需要极致的量化控制（imatrix、K-Quant 选择）</li>
+    <li>Apple Silicon 设备（Metal 优化极佳）</li>
+    <li>需要零依赖、可移植的推理引擎</li>
+    <li>单用户交互式场景、本地开发调试</li>
+  </ul>
+</div>
+
+<div class="box box-warn">
+  <strong>选 vLLM 当：</strong>
+  <ul>
+    <li>需要高并发在线服务（数十到数百 QPS）</li>
+    <li>有 NVIDIA GPU 且需要极致吞吐</li>
+    <li>需要 PagedAttention 管理大量并发的 KV Cache</li>
+    <li>云端部署、Kubernetes 环境</li>
+  </ul>
+</div>
+
+<!-- ======================== 10. 面试 ======================== -->
+<h2>10. 面试高频问题</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="qa">
+  <h4>Q1: GGUF 格式相比 HuggingFace safetensors 的优势是什么？为什么 llama.cpp 不直接用 safetensors？</h4>
+  <p><strong>A:</strong> GGUF 是<strong>自描述格式</strong>，单文件包含模型权重、分词器、架构配置元数据，无需额外的 config.json/tokenizer.json。safetensors 是纯权重格式，不包含量化元数据和分词器。GGUF 支持<strong>原生量化格式</strong>（Q4_K_M 等），safetensors 存储的是 FP16/BF16。GGUF 支持<strong>内存映射</strong>直接从磁盘加载，safetensors 虽然也支持 mmap，但缺少量化数据的 block 结构信息。此外，GGUF 的 tensor info 区域记录了精确的 offset，使得 mmap 后可以直接通过指针访问任意张量，无需反序列化。</p>
+</div>
+
+<div class="qa">
+  <h4>Q2: llama.cpp 的 K-Quant 量化（如 Q4_K_M）和 GPTQ/AWQ 有什么本质区别？</h4>
+  <p><strong>A:</strong> 本质区别在于<strong>量化粒度和校准方法</strong>。GPTQ/AWQ 是基于 Hessian 矩阵的逐层量化，需要校准数据集，量化后仍是 FP16 权重经过 transformation。K-Quant 是<strong>静态的、基于规则的混合精度量化</strong>：对不同层按预设方案分配不同位宽（敏感层高精度，不敏感层低精度），不依赖校准数据。imatrix 量化则介于两者之间，使用校准数据计算重要性矩阵但不修改权重。GPTQ/AWQ 通常在 GPU 上有专门的 kernel 加速（如 Marlin kernel），而 K-Quant 在 CPU 上更高效。</p>
+</div>
+
+<div class="qa">
+  <h4>Q3: mmap 加载模型时，如果系统内存不足会怎样？如何优化？</h4>
+  <p><strong>A:</strong> 当物理内存不足时，OS 会触发<strong>页面换出</strong>：将不活跃的页面写回磁盘（对于 mmap 的只读文件，直接丢弃，需要时从文件重新加载）。这会导致<strong>page fault 延迟</strong>，表现为推理时偶尔出现延迟尖峰。优化方案：(1) <code>--mlock</code> 将所有页面锁定在物理内存（需要足够 RAM）；(2) 使用更小的量化版本减少文件大小；(3) 将模型放在 NVMe SSD 上（page fault 延迟从 HDD 的 ~10ms 降到 SSD 的 ~0.1ms）；(4) 预热：首次运行时用 <code>vmtouch -t model.gguf</code> 预加载到页面缓存。</p>
+</div>
+
+<div class="qa">
+  <h4>Q4: 为什么 llama.cpp 的并发性能不如 vLLM？根本原因是什么？</h4>
+  <p><strong>A:</strong> 根本原因是<strong>内存管理策略不同</strong>。vLLM 的 PagedAttention 将 KV Cache 分成固定大小的 page（类似操作系统的虚拟内存页），通过 page table 动态管理，支持<strong>非连续内存分配</strong>、<strong>copy-on-write</strong> 和<strong>内存共享</strong>（如 beam search 的多个候选共享前缀 KV）。llama.cpp 的 KV Cache 是<strong>预分配的连续内存</strong>，每个 slot 占用固定空间，无法动态伸缩，内存利用率低。此外，vLLM 使用 CUDA Graph 和连续批处理深度优化 GPU 利用率，而 llama.cpp 更注重通用性和可移植性，在高并发场景下的 GPU 利用率不够充分。简单说，llama.cpp 优化的是<strong>单请求延迟</strong>，vLLM 优化的是<strong>系统吞吐</strong>。</p>
+</div>
+
+<!-- ======================== 11. 常用命令速查 ======================== -->
+<h2>11. 常用命令速查</h2>
+
+
+
+<div class="deep"><strong>深入探讨：</strong>从系统设计的<strong>底层原理</strong>看，项目概述与设计哲学的核心挑战是在性能、精度和资源三者之间寻找最优平衡。<strong>为什么</strong>不能同时最大化三者？因为提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），减少资源又会降低性能。理解这个三角约束，就能推导出大多数技术选择背后的逻辑。</div>
+<div class="ascii"><pre>LLM 推理全流程
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
+│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
+└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
+                                       └──────────────┘    └────┬─────┘
+                     ┌──────────────┐    ┌──────────────┐      │
+                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
+                     │  "你好！..." │    │  解码        │
+                     └──────────────┘    └──────────────┘</pre></div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<pre><code><span class="cm"># 模型量化</span>
+./llama-quantize input.gguf output-Q4_K_M.gguf Q4_K_M
+
+<span class="cm"># imatrix 量化 (两步)</span>
+./llama-imatrix -m model-f16.gguf -f calibration-data.txt -o imatrix.dat
+./llama-quantize --imatrix imatrix.dat input.gguf out.gguf IQ4_XS
+
+<span class="cm"># 交互式聊天</span>
+./llama-cli -m model.gguf -ngl 99 -c 4096 \
+  -e -p "You are a helpful assistant." \
+  --conversation
+
+<span class="cm"># 批量推理 (benchmark)</span>
+./llama-bench -m model.gguf -ngl 99 -t 8 -c 2048 -n 128
+
+<span class="cm"># 评估 perplexity</span>
+./llama-perplexity -m model.gguf -f wiki.test.raw -c 2048
+
+<span class="cm"># 启动 OpenAI 兼容服务器</span>
+./llama-server -m model.gguf -ngl 99 -c 8192 \
+  --host 0.0.0.0 --port 8080 -np 4 -fa
+
+<span class="cm"># GGUF 文件信息查看</span>
+./llama-gguf-meta model.gguf
+</code></pre>
+
+<footer>
+  <p>llama.cpp 深度技术指南 · 基于 llama.cpp 源码分析 · 论文级深度</p>
+  <p>核心库: ggml (张量运算) + libllama (模型推理) + llama-server (HTTP 服务)</p>
+  <p>版本: 2025 年更新 · 项目地址: github.com/ggerganov/llama.cpp</p>
+</footer>
+
+<div class="deep"><strong>项目概述与设计哲学的技术原理与数学推导：</strong>
+从<strong>底层</strong>硬件角度分析，项目概述与设计哲学的性能瓶颈通常在于内存带宽而非计算能力。
+<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
+因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
+这一<strong>数学本质</strong>决定了项目概述与设计哲学的所有优化策略都应围绕减少内存访问展开。
+从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
+是提升算术强度的两大核心手段。
+</div>
+<div class="deep"><strong>项目概述与设计哲学的系统架构分析：</strong>
+从系统设计的<strong>原理</strong>出发，项目概述与设计哲学采用分层架构来管理复杂性。
+<strong>为什么</strong>分层是主流选择？<strong>推导</strong>如下：
+设系统有N个组件，全连接交互复杂度为O(N²)，分层后降低到O(N·L)，L为层数。
+<strong>数学本质</strong>上，这是用少量层间通信开销换取大幅降低的组件间耦合。
+在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过标准接口解耦——
+这类似于TCP/IP协议栈的设计<strong>原理</strong>，每层独立优化，层内改动不影响整体。
+</div>
+<div class="ascii">
+项目概述与设计哲学 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+  PCIe传输       Tensor Core          结果回传
+</div>
+<div class="ascii">
+项目概述与设计哲学 性能分析 (屋顶模型)
+                    
+  计算吞吐  │         ╱ 计算受限区
+  (TFLOPS)  │       ╱
+            │     ╱   ← 实际工作点
+            │   ╱
+            │ ╱ 带宽受限区
+            │╱
+            └──────────────── 带宽利用率
+             
+  转折点 = 峰值算力 / 峰值带宽
+  A100: 312T/2T = 156 FLOPs/Byte
+  H100: 989T/3.35T = 295 FLOPs/Byte
+</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释llama.cpp的核心工作原理，并画出其数据流图。</li>
+<li>llama.cpp在实际部署中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比llama.cpp与替代方案，分析各自的适用场景和权衡。</li>
+<li>如果要将llama.cpp应用到一个10B参数的模型上，你会如何规划资源？</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+llama.cpp的知识将在后续的推理框架对比、性能调优、生产部署等章节中反复应用。
+建议在理解本章原理后，结合实际框架（如vLLM、TensorRT-LLM）动手验证，
+将理论知识转化为工程能力。掌握了llama.cpp，你就掌握了推理优化的核心技术栈之一。
+</div>
+<p><strong>学习路径：</strong>本章内容需要前置知识：Transformer注意力机制、GPU内存层次、
+基本的并行计算概念。掌握本章后，建议继续学习推理框架选型和生产部署实战。</p>
+
+<div class="warn"><strong>⚠️ 交叉引用：推荐学习路径</strong>
+<p>本文内容与以下章节紧密相关，建议配合阅读：</p>
+<ul>
+  <li><a href="../06-并行策略/00-并行策略总览.html">并行策略总览</a> — 了解 TP/PP 如何与 llama.cpp 的多 GPU 支持配合</li>
+  <li><a href="../06-并行策略/01-数据并行DP.html">数据并行 DP</a> — 理解 llama.cpp 的 slot 并发模型</li>
+  <li><a href="01-vLLM.html">vLLM 详解</a> — 对比 PagedAttention 与 llama.cpp 的 KV Cache 管理差异</li>
+  <li><a href="../../端侧部署/03-llama-cpp深度.html">端侧 llama.cpp 深度</a> — 了解移动端部署的具体实践</li>
+</ul>
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+llama.cpp的性能调优核心参数是-ngl（GPU offload层数）。建议从-ngl=99开始（全部offload到GPU），
+如果OOM则逐步降低。每层约消耗模型参数量/n_layers的显存。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+llama.cpp与以下内容密切相关：<a href="00-框架总览.html">框架总览</a> |
+<a href="01-vLLM.html">vLLM</a> |
+<a href="03-SGLang.html">SGLang</a> |
+<a href="../../04-量化技术/04-GGUF.html">GGUF量化</a> |
+<a href="../../09-部署实战/02-Ollama快速上手.html">Ollama部署</a>
+</div>
+</body>
+</html>

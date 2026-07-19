@@ -1,0 +1,583 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>3D并行与混合并行 - 分布式训练系统</title><style>
+*{margin:0;padding:0;box-sizing:border-box}body{background:#0f1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;line-height:1.8;padding:20px;max-width:1000px;margin:0 auto}h1{color:#58a6ff;font-size:1.8em;margin:20px 0 10px;border-bottom:2px solid #30363d;padding-bottom:10px}h2{color:#79c0ff;font-size:1.4em;margin:25px 0 10px}h3{color:#d2a8ff;font-size:1.2em;margin:20px 0 8px}p{margin:10px 0}.nav{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:25px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}.nav a{color:#58a6ff;text-decoration:none;font-size:0.9em}.nav a:hover{text-decoration:underline}pre{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;overflow-x:auto;margin:15px 0;font-size:0.9em;line-height:1.6}code{background:#161b22;padding:2px 6px;border-radius:4px;font-size:0.9em;color:#e6edf3}pre code{background:none;padding:0}table{border-collapse:collapse;width:100%;margin:15px 0}th,td{border:1px solid #30363d;padding:10px 12px;text-align:left}th{background:#161b22;color:#58a6ff}tr:nth-child(even){background:#161b22}.highlight{background:#1a2332;border-left:4px solid #58a6ff;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.formula{background:#1a1a2e;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;text-align:center;font-family:'Courier New',monospace;color:#e6edf3}.ascii-art{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto}.svg-diagram{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;text-align:center}.svg-diagram svg{max-width:100%;height:auto}ul,ol{margin:10px 0 10px 25px}li{margin:5px 0}.warning{background:#2d1b00;border-left:4px solid #d29922;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.tip{background:#0d2818;border-left:4px solid #3fb950;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.footer{margin-top:40px;padding-top:20px;border-top:1px solid #30363d;font-size:0.85em;color:#8b949e}.ref{margin-top:30px;padding:16px;background:#161b22;border-radius:8px;border:1px solid #30363d}.ref h2{margin-top:0}.ref a{color:#58a6ff}</style></head><body><div class="nav"><a href="04-Megatron-LM核心原理.html">⬅ Megatron-LM核心原理</a><a href="index.html">📖 目录</a><a href="06-PyTorch-FSDP2完全指南.html">PyTorch-FSDP2完全指南 ➡</a></div><h1>05 3D 并行与混合并行</h1>
+
+<h2>什么是 3D 并行？</h2>
+<p>3D 并行 = <strong>TP（张量并行）</strong> + <strong>PP（流水线并行）</strong> + <strong>DP（数据并行）</strong>，三者组合使用以充分利用大规模 GPU 集群。</p>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 700 340" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="350" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">3D 并行拓扑示例（128 GPU = TP8 × PP4 × DP4）</text>
+  <!-- DP headers -->
+  <text x="350" y="50" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="bold">DP 维度（数据并行）</text>
+  <rect x="160" y="60" width="120" height="26" rx="4" fill="rgba(251,191,36,0.15)" stroke="#fbbf24" stroke-width="1.2"/>
+  <text x="220" y="78" text-anchor="middle" fill="#fbbf24" font-size="10">DP=0</text>
+  <rect x="290" y="60" width="120" height="26" rx="4" fill="rgba(251,191,36,0.15)" stroke="#fbbf24" stroke-width="1.2"/>
+  <text x="350" y="78" text-anchor="middle" fill="#fbbf24" font-size="10">DP=1</text>
+  <rect x="420" y="60" width="120" height="26" rx="4" fill="rgba(251,191,36,0.15)" stroke="#fbbf24" stroke-width="1.2"/>
+  <text x="480" y="78" text-anchor="middle" fill="#fbbf24" font-size="10">DP=2</text>
+  <rect x="550" y="60" width="120" height="26" rx="4" fill="rgba(251,191,36,0.15)" stroke="#fbbf24" stroke-width="1.2"/>
+  <text x="610" y="78" text-anchor="middle" fill="#fbbf24" font-size="10">DP=3</text>
+  <!-- PP label -->
+  <text x="55" y="155" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="bold" transform="rotate(-90,55,155)">PP 维度（流水线）</text>
+  <!-- PP rows -->
+  <!-- PP=0 -->
+  <rect x="80" y="96" width="70" height="42" rx="4" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="115" y="115" text-anchor="middle" fill="#a78bfa" font-size="9">PP=0</text>
+  <rect x="160" y="96" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="220" y="113" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="220" y="127" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <rect x="290" y="96" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="350" y="113" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="350" y="127" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <rect x="420" y="96" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="480" y="113" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="480" y="127" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <rect x="550" y="96" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="610" y="113" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="610" y="127" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <!-- PP=1 -->
+  <rect x="80" y="148" width="70" height="42" rx="4" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="115" y="167" text-anchor="middle" fill="#a78bfa" font-size="9">PP=1</text>
+  <rect x="160" y="148" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="220" y="165" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="220" y="179" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <rect x="290" y="148" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="350" y="165" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="350" y="179" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <rect x="420" y="148" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="480" y="165" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="480" y="179" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <rect x="550" y="148" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="610" y="165" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="610" y="179" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <!-- PP=2 -->
+  <rect x="80" y="200" width="70" height="42" rx="4" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="115" y="219" text-anchor="middle" fill="#a78bfa" font-size="9">PP=2</text>
+  <rect x="160" y="200" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="220" y="217" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="220" y="231" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <rect x="290" y="200" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="350" y="217" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="350" y="231" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <rect x="420" y="200" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="480" y="217" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="480" y="231" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <rect x="550" y="200" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="610" y="217" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="610" y="231" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <!-- PP=3 -->
+  <rect x="80" y="252" width="70" height="42" rx="4" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="115" y="271" text-anchor="middle" fill="#a78bfa" font-size="9">PP=3</text>
+  <rect x="160" y="252" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="220" y="269" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="220" y="283" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <rect x="290" y="252" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="350" y="269" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="350" y="283" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <rect x="420" y="252" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="480" y="269" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="480" y="283" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <rect x="550" y="252" width="120" height="42" rx="4" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="610" y="269" text-anchor="middle" fill="#22d3ee" font-size="9">TP0-7</text>
+  <text x="610" y="283" text-anchor="middle" fill="#7ee7fc" font-size="7">1机 NVLink</text>
+  <!-- PP arrows -->
+  <line x1="115" y1="138" x2="115" y2="148" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,2"/>
+  <polygon points="115,148 112,144 118,144" fill="#a78bfa"/>
+  <line x1="115" y1="190" x2="115" y2="200" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,2"/>
+  <polygon points="115,200 112,196 118,196" fill="#a78bfa"/>
+  <line x1="115" y1="242" x2="115" y2="252" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,2"/>
+  <polygon points="115,252 112,248 118,248" fill="#a78bfa"/>
+  <!-- Legend -->
+  <text x="100" y="318" fill="#22d3ee" font-size="9">● TP 维度：节点内 8 卡 NVLink (900 GB/s)</text>
+  <text x="100" y="332" fill="#a78bfa" font-size="9">● PP 维度：跨节点，只传激活值</text>
+  <text x="400" y="318" fill="#fbbf24" font-size="9">● DP 维度：跨节点，梯度同步</text>
+</svg>
+</div>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>3D 并行的核心约束：G = TP × PP × DP。经验法则——TP ≤ 8（节点内 NVLink 域），PP ≥ 1（跨节点只传激活值），DP = G/(TP×PP) 填满剩余。7B 模型用 TP=1,PP=1,DP=8 纯数据并行即可；70B 用 TP=8,PP=2,DP=4；405B 用 TP=8,PP=16,DP=8。先在 8 GPU 上验证 TP=8 的通信正确性。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>3D 并行的常见坑：① TP 跨节点会导致通信量剧增（AllGather/ReduceScatter 走 IB 带宽），所以 TP 必须限制在节点内 NVLink 域；② PP 的 microbatch 数过少会导致流水线 bubble 率 >50%，一般设 microbatch ≥ 4×PP_stages；③ DP 和 TP 的 GPU 拓扑不匹配会导致 AllReduce 走 PCIe 而非 NVLink，MFU 直接腰斩。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>3D 并行的深层逻辑：每种并行维度对应一类通信模式——TP 用 AllReduce/ReduceScatter 交换激活值（高频、小数据量），PP 用点对点通信传递微批次激活（中频、中数据量），DP 用 AllReduce 同步梯度（低频、大数据量）。理解这个通信层次有助于分析瓶颈：如果 TP 跨节点，高频小消息的延迟会主导训练时间。</div>
+<h2>如何决定 TP/PP/DP 的比例？</h2>
+
+<div class="highlight">
+<p><strong>经验法则</strong>：</p>
+<ul>
+<li><strong>TP</strong> ≤ 节点内 GPU 数（8）— 需要最高带宽，必须在 NVLink 域内</li>
+<li><strong>PP</strong> ≥ 1 — 跨节点部署，带宽要求低（只传激活值）</li>
+<li><strong>DP</strong> = 总 GPU / (TP × PP) — 填满剩余维度</li>
+</ul>
+</div>
+
+<table>
+<tr><th>模型大小</th><th>GPU数</th><th>推荐配置</th><th>理由</th></tr>
+<tr><td>7B</td><td>8</td><td>TP=1, PP=1, DP=8</td><td>单卡能放下，纯数据并行</td></tr>
+<tr><td>70B</td><td>64</td><td>TP=8, PP=2, DP=4</td><td>TP 切满节点内，PP 跨节点</td></tr>
+<tr><td>405B</td><td>1024</td><td>TP=8, PP=16, DP=8</td><td>深层流水线，大量数据并行</td></tr>
+</table>
+
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>TP/PP/DP 比例选择的常见坑：① TP 维度必须是 2 的幂且 ≤ 节点内 GPU 数（通常 8），否则 Megatron-LM 的列/行切分无法对齐；② PP 维度增加会线性增加 bubble 时间，除非用 1F1B 交错调度；③ DP 维度减小意味着每步有效 batch 变小，可能需要调整学习率。建议先用小规模（8 GPU）验证 TP=8 的通信正确性，再逐步扩展。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>TP/PP/DP 比例的核心权衡：TP 降低单 GPU 显存但增加通信（AllReduce 频率高），PP 降低通信量但增加 bubble 时间，DP 简单但梯度同步数据量大。Llama 3 405B 选择 TP=8,PP=16,DP=128 的原因是：TP=8 充分利用节点内 NVLink 带宽，PP=16 将模型层分布到 16 个 pipeline stage，DP=128 用数据并行填满剩余 GPU。PP 的 1F1B 交错调度将 bubble 率从 25% 降到 ~5%。</div>
+<h2>Expert Parallelism（EP）用于 MoE</h2>
+<p>MoE 模型额外需要一个并行维度：把不同专家分配到不同 GPU。</p>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 650 310" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="325" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">MoE 的 4D 并行：TP + PP + DP + EP</text>
+  <!-- Outer box -->
+  <rect x="30" y="36" width="590" height="230" rx="10" fill="rgba(30,30,50,0.5)" stroke="#30363d" stroke-width="1.5"/>
+  <!-- Token routing -->
+  <rect x="230" y="50" width="190" height="32" rx="6" fill="rgba(251,191,36,0.15)" stroke="#fbbf24" stroke-width="1.2"/>
+  <text x="325" y="70" text-anchor="middle" fill="#fbbf24" font-size="10">Token 路由决策（Router）</text>
+  <!-- Arrow down -->
+  <line x1="325" y1="82" x2="325" y2="100" stroke="#58a6ff" stroke-width="1.5"/>
+  <polygon points="325,100 321,95 329,95" fill="#58a6ff"/>
+  <!-- Experts row -->
+  <rect x="80" y="105" width="90" height="40" rx="6" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="125" y="122" text-anchor="middle" fill="#22d3ee" font-size="9">E0</text>
+  <text x="125" y="136" text-anchor="middle" fill="#7ee7fc" font-size="7">GPU0</text>
+  <rect x="190" y="105" width="90" height="40" rx="6" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="235" y="122" text-anchor="middle" fill="#22d3ee" font-size="9">E1</text>
+  <text x="235" y="136" text-anchor="middle" fill="#7ee7fc" font-size="7">GPU1</text>
+  <rect x="300" y="105" width="90" height="40" rx="6" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="345" y="122" text-anchor="middle" fill="#22d3ee" font-size="9">E2</text>
+  <text x="345" y="136" text-anchor="middle" fill="#7ee7fc" font-size="7">GPU2</text>
+  <rect x="410" y="105" width="90" height="40" rx="6" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="455" y="122" text-anchor="middle" fill="#22d3ee" font-size="9">E3</text>
+  <text x="455" y="136" text-anchor="middle" fill="#7ee7fc" font-size="7">GPU3</text>
+  <rect x="520" y="105" width="90" height="40" rx="6" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="565" y="122" text-anchor="middle" fill="#22d3ee" font-size="9">E4</text>
+  <text x="565" y="136" text-anchor="middle" fill="#7ee7fc" font-size="7">GPU4</text>
+  <!-- Router arrows to experts -->
+  <line x1="270" y1="82" x2="125" y2="105" stroke="#fbbf24" stroke-width="1" opacity="0.6"/>
+  <line x1="295" y1="82" x2="235" y2="105" stroke="#fbbf24" stroke-width="1" opacity="0.6"/>
+  <line x1="325" y1="82" x2="345" y2="105" stroke="#fbbf24" stroke-width="1" opacity="0.6"/>
+  <line x1="355" y1="82" x2="455" y2="105" stroke="#fbbf24" stroke-width="1" opacity="0.6"/>
+  <line x1="380" y1="82" x2="565" y2="105" stroke="#fbbf24" stroke-width="1" opacity="0.6"/>
+  <!-- All-to-All box -->
+  <rect x="170" y="165" width="310" height="32" rx="6" fill="rgba(52,211,153,0.15)" stroke="#34d399" stroke-width="1.2"/>
+  <text x="325" y="185" text-anchor="middle" fill="#34d399" font-size="10">All-to-All 通信</text>
+  <!-- Merge arrows -->
+  <line x1="125" y1="145" x2="235" y2="165" stroke="#34d399" stroke-width="1" opacity="0.5"/>
+  <line x1="235" y1="145" x2="270" y2="165" stroke="#34d399" stroke-width="1" opacity="0.5"/>
+  <line x1="345" y1="145" x2="325" y2="165" stroke="#34d399" stroke-width="1" opacity="0.5"/>
+  <line x1="455" y1="145" x2="380" y2="165" stroke="#34d399" stroke-width="1" opacity="0.5"/>
+  <line x1="565" y1="145" x2="420" y2="165" stroke="#34d399" stroke-width="1" opacity="0.5"/>
+  <!-- Output -->
+  <line x1="325" y1="197" x2="325" y2="215" stroke="#58a6ff" stroke-width="1.5"/>
+  <polygon points="325,215 321,210 329,210" fill="#58a6ff"/>
+  <rect x="230" y="218" width="190" height="30" rx="6" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="325" y="237" text-anchor="middle" fill="#a78bfa" font-size="10">输出合并（Combine）</text>
+  <!-- Note -->
+  <text x="325" y="282" text-anchor="middle" fill="#8b949e" font-size="9">通信模式：All-to-All（而非 AllReduce） · 每个 token 只需和少量专家通信</text>
+</svg>
+</div>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>EP 的通信模式是 AlltoAll（非 AllReduce），每个 token 通过 Router 选中 top-k 专家后，通过 AlltoAll 发送到对应专家所在 GPU。EP 的通信量 = 2×(N-1)/N × tokens × hidden_dim。监控重点：专家负载均衡度（理想情况各专家处理相近数量的 token）和 AlltoAll 延迟占总训练时间的比例。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>EP 的常见坑：① 专家负载不均衡会导致部分 GPU 成为瓶颈，需要用辅助损失（auxiliary loss）或容量因子（capacity factor）约束；② AlltoAll 通信的延迟与专家数和 GPU 数的乘积相关，EP 维度不宜超过 64；③ EP 与 TP 共享节点内通信，两者同时使用时 NVLink 带宽会被瓜分。建议先用 EP=1（纯 DP）做 baseline，再逐步增加 EP 维度观察 MFU 变化。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>EP 的深层设计考量：MoE 的稀疏激活（每次只激活 top-k 个专家）本质上是一种动态计算分配——给"简单"token 分配更少的计算。EP 的 AlltoAll 通信模式与 AllReduce 有本质区别：AllReduce 的通信量与数据大小成正比且带宽最优，而 AlltoAll 的延迟与 GPU 数成正比。这意味着 EP 的 scaling 上限比 DP 低，实际中 EP 维度通常不超过节点数。</div>
+<h2>Llama 3 405B 训练案例分析</h2>
+
+<div class="highlight">
+<p><strong>Llama 3 405B</strong> 的训练配置（Meta，2024）：</p>
+<ul>
+<li>硬件：16,384 张 H100 80GB</li>
+<li>并行策略：TP=8, PP=16, DP=128</li>
+<li>序列长度：8192 tokens</li>
+<li>全局 batch size：约 16M tokens</li>
+<li>训练时间：54 天</li>
+<li>MFU（Model FLOPs Utilization）：约 38-41%</li>
+</ul>
+</div>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 650 340" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="325" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">Llama 3 405B 的并行拓扑</text>
+  <text x="325" y="40" text-anchor="middle" fill="#8b949e" font-size="10">16384 GPU = TP=8 × PP=16 × DP=128</text>
+  <!-- One DP rank box -->
+  <rect x="60" y="56" width="530" height="230" rx="10" fill="rgba(251,191,36,0.06)" stroke="#fbbf24" stroke-width="1.2" stroke-dasharray="6,3"/>
+  <text x="325" y="76" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="bold">一个 DP rank（128 GPU = 16 机）</text>
+  <!-- Inner PP stages box -->
+  <rect x="100" y="88" width="450" height="170" rx="8" fill="rgba(167,139,250,0.06)" stroke="#a78bfa" stroke-width="1.2"/>
+  <!-- PP Stages -->
+  <rect x="120" y="100" width="200" height="28" rx="5" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="220" y="118" text-anchor="middle" fill="#22d3ee" font-size="9">PP Stage 0：8 GPU（1机）TP=8</text>
+  <rect x="120" y="136" width="200" height="28" rx="5" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="220" y="154" text-anchor="middle" fill="#22d3ee" font-size="9">PP Stage 1：8 GPU（1机）TP=8</text>
+  <text x="220" y="182" text-anchor="middle" fill="#58a6ff" font-size="12">⋯</text>
+  <rect x="120" y="194" width="200" height="28" rx="5" fill="rgba(34,211,238,0.12)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="220" y="212" text-anchor="middle" fill="#22d3ee" font-size="9">PP Stage 15：8 GPU（1机）TP=8</text>
+  <!-- PP arrows -->
+  <line x1="220" y1="128" x2="220" y2="136" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,2"/>
+  <polygon points="220,136 217,132 223,132" fill="#a78bfa"/>
+  <line x1="220" y1="164" x2="220" y2="194" stroke="#a78bfa" stroke-width="1" stroke-dasharray="3,2"/>
+  <polygon points="220,194 217,190 223,190" fill="#a78bfa"/>
+  <!-- IB transport label -->
+  <rect x="360" y="120" width="170" height="100" rx="8" fill="rgba(251,191,36,0.1)" stroke="#fbbf24" stroke-width="1" stroke-dasharray="4,2"/>
+  <text x="445" y="155" text-anchor="middle" fill="#fbbf24" font-size="9">激活值通过</text>
+  <text x="445" y="172" text-anchor="middle" fill="#fbbf24" font-size="9">InfiniBand 传输</text>
+  <!-- IB arrows -->
+  <line x1="320" y1="114" x2="358" y2="140" stroke="#fbbf24" stroke-width="1" opacity="0.6"/>
+  <line x1="320" y1="150" x2="358" y2="160" stroke="#fbbf24" stroke-width="1" opacity="0.6"/>
+  <line x1="320" y1="208" x2="358" y2="190" stroke="#fbbf24" stroke-width="1" opacity="0.6"/>
+  <!-- DP x128 -->
+  <text x="325" y="300" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="bold">× 128 个 DP rank（跨节点 AllReduce 梯度）</text>
+  <!-- DP replication arrows -->
+  <line x1="200" y1="290" x2="200" y2="286" stroke="#fbbf24" stroke-width="1.5"/>
+  <polygon points="200,286 197,290 203,290" fill="#fbbf24"/>
+  <line x1="450" y1="290" x2="450" y2="286" stroke="#fbbf24" stroke-width="1.5"/>
+  <polygon points="450,286 447,290 453,290" fill="#fbbf24"/>
+  <!-- Legend -->
+  <text x="100" y="328" fill="#22d3ee" font-size="9">● GPU (cyan) = TP group</text>
+  <text x="280" y="328" fill="#a78bfa" font-size="9">● PP stage (violet)</text>
+  <text x="430" y="328" fill="#fbbf24" font-size="9">● DP / IB (amber)</text>
+</svg>
+</div>
+
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>Llama 3 405B 训练的工程细节：① 16384 张 H100 上 MFU=38-41%，低于理论峰值的主因是 PP bubble 和通信开销；② 54 天训练中 400+ 次中断，checkpoint 间隔约 3 小时（≈10 分钟训练量）；③ 训练初期频繁调参，后期固定配置后故障率下降。复现时先用小规模验证 loss 曲线一致性，再扩展到大规模。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>Llama 3 的 3D 并行配置揭示了一个工程哲学：在超大规模训练中，稳定性比极致性能更重要。405B 模型选择 TP=8,PP=16,DP=128 而非更激进的 TP=16，是因为 TP 跨节点的通信可靠性远低于节点内 NVLink。PP=16 虽然 bubble 率更高，但 1F1B 调度将其控制在 ~5%，且 PP 的点对点通信比 TP 的 AllReduce 更容易容错。</div>
+<h2>通信量分析</h2>
+
+<div class="formula">
+每个 Transformer 层的通信量：<br><br>
+TP 通信：2 × 2 × h × s × b = 4hsb （前向+反向各 2 次 AllReduce）<br>
+PP 通信：h × s × b（传输激活值，单向）<br>
+DP 通信：2Ψ/DP（AllReduce 梯度，Ψ=参数量）<br><br>
+TP 通信量最大，但 NVLink 带宽 900 GB/s 足够<br>
+PP 通信量最小，可用较低带宽的 InfiniBand<br>
+DP 通信量中等，可与其他计算重叠
+</div>
+
+<div class="tip">
+<p><strong>关键洞察</strong>：TP 放节点内（NVLink），PP 和 DP 跨节点（InfiniBand），这是 3D 并行的基本设计原则。</p>
+</div>
+
+<div class="ref">
+<div class="warn"><strong>⚠️ 注意事项：</strong>通信量分析的常见误判：① 理论通信量（2D(N-1)/N）假设带宽完全饱和，实际受 IB 网络拥塞和 NCCL 算法开销影响，实测通常只有理论值的 70-85%；② 节点内 NVLink 通信（900 GB/s）和跨节点 IB 通信（400 Gb/s）的量纲不同（B vs b），换算后差距约 18 倍；③ 通信量分析必须结合 profiler 实测，不能只看理论公式。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>通信量分析的核心洞察：3D 并行的总通信量 = TP 通信（AllReduce 频率 × 激活大小）+ PP 通信（P2P 频率 × 微批次激活）+ DP 通信（AllReduce 频率 × 梯度大小）。当 TP=8,PP=16,DP=128 时，DP 通信量通常占总通信的 60-70%（因为梯度同步数据量最大），所以 DP 维度应优先放在 IB 带宽充足的维度上。</div>
+<h2>📚 参考资料</h2><ul>
+<li>Narayanan et al., "Efficient Large-Scale Language Model Training on GPU Clusters", SC 2021</li>
+<li>Llama 3 Technical Report, Meta, 2024</li>
+<li>Zhou et al., "Expert Parallelism: Optimizing Large Language Model Inference", 2024</li>
+</ul></div>
+
+<div class="tip"><strong>💡 实用技巧：</strong>三篇必读论文：Narayanan et al. SC 2021（Megatron-LM 3D 并行的通信分析和交错调度），Llama 3 Technical Report（405B 在 16384 GPU 上的实际训练配置和 MFU=38-41% 的工程细节），Zhou et al. 2024（EP 在 MoE 推理中的优化）。建议用 TP=8,PP=2,DP=2 在 32 GPU 上复现论文中的 3D 并行配置。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>参考资料的使用建议：Narayanan et al. SC 2021 的交错调度论文中 bubble 率公式 (P-1)/(M+P-1) 是理论下界，实际受 CUDA kernel launch 延迟影响会更高。Llama 3 报告的 MFU=38-41% 是在特定硬件配置（H100+NVLink+IB）下的结果，不同硬件环境的 MFU 可能差异 ±15%。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>3D 并行的发展脉络：Megatron-LM v1（2019）只有 TP，v2（2021）加入 PP，v3（2022）加入 DP+EP。这个演进反映了 GPU 集群规模的扩大——当 GPU 从 8 扩展到 16384 时，单维度并行无法充分利用硬件，必须组合多种并行策略。未来趋势是 EP（Expert Parallelism）在 MoE 模型中与 3D 并行融合，形成 4D 甚至 5D 并行。</div>
+
+<h2>3D 并行的数学建模与性能分析</h2>
+
+
+<h3>并行度约束条件</h3>
+<p>设总 GPU 数为 G，张量并行度为 t，流水线并行度为 p，数据并行度为 d，则必须满足约束条件：</p>
+<div class="formula">
+G = t × p × d
+</div>
+
+
+<h3>通信量分析</h3>
+<p>三种并行策略的通信模式和通信量差异显著：</p>
+<table>
+<tr><th>并行策略</th><th>通信类型</th><th>通信量 (per step)</th><th>通信频率</th><th>带宽需求</th></tr>
+<tr><td>张量并行 (TP)</td><td>AllReduce</td><td>2 × b × s × h × (t-1)/t</td><td>每层 2 次</td><td>极高 (NVLink)</td></tr>
+<tr><td>流水线并行 (PP)</td><td>P2P Send/Recv</td><td>b × s × h</td><td>每 micro-batch</td><td>中等 (IB)</td></tr>
+<tr><td>数据并行 (DP)</td><td>AllReduce</td><td>2 × M × (d-1)/d</td><td>每步 1 次</td><td>中等 (IB)</td></tr>
+</table>
+
+
+<h3>最优并行度搜索策略</h3>
+
+<ul>
+<li><strong>规则1</strong>：TP 度尽量等于单机 GPU 数（如 8），利用 NVLink 高带宽</li>
+<li><strong>规则2</strong>：PP 度根据模型深度和 micro-batch 数决定，气泡率 < 10%</li>
+<li><strong>规则3</strong>：DP 度自动由 G / (TP × PP) 确定</li>
+<li><strong>规则4</strong>：如果 DP 度太小导致 batch 过小，考虑降低 PP 增大 DP</li>
+</ul>
+
+<table>
+<tr><th>模型规模</th><th>GPU 数</th><th>推荐 TP</th><th>推荐 PP</th><th>推荐 DP</th><th>全局 Batch</th></tr>
+<tr><td>7B</td><td>32</td><td>8</td><td>1</td><td>4</td><td>1024-2048</td></tr>
+<tr><td>13B</td><td>64</td><td>8</td><td>2</td><td>4</td><td>1024-2048</td></tr>
+<tr><td>70B</td><td>256</td><td>8</td><td>4</td><td>8</td><td>2048-4096</td></tr>
+<tr><td>175B</td><td>512</td><td>8</td><td>8</td><td>8</td><td>2048-8192</td></tr>
+</table>
+
+<table>
+<tr><th>混合并行方案</th><th>通信拓扑</th><th>气泡率</th><th>显存效率</th><th>适用场景</th></tr>
+<tr><td>TP+DP</td><td>机内TP + 跨机DP</td><td>0%</td><td>中等</td><td>中小模型、快速迭代</td></tr>
+<tr><td>TP+PP+DP</td><td>3D并行</td><td>5-15%</td><td>较好</td><td>大模型标准方案</td></tr>
+<tr><td>TP+PP+DP+SP</td><td>3D+序列并行</td><td>5-15%</td><td>优秀</td><td>长序列训练</td></tr>
+<tr><td>TP+PP+DP+CP</td><td>3D+上下文并行</td><td>5-15%</td><td>优秀</td><td>超长上下文</td></tr>
+<tr><td>EP+DP</td><td>专家并行+数据并行</td><td>0%</td><td>取决于路由</td><td>MoE 模型</td></tr>
+</table>
+
+<div class="ascii-art">
+3D 并行在 64 GPU 集群上的映射（TP=8, PP=4, DP=2）：
+
+服务器 0（8 GPU）:               服务器 1（8 GPU）:
+┌─────────────────────────┐    ┌─────────────────────────┐
+│ GPU0-7: PP Stage 0      │    │ GPU0-7: PP Stage 2      │
+│ TP Group = [GPU0..GPU7]  │    │ TP Group = [GPU0..GPU7]  │
+│ DP Rank 0               │    │ DP Rank 0               │
+└─────────────────────────┘    └─────────────────────────┘
+服务器 2（8 GPU）:               服务器 3（8 GPU）:
+┌─────────────────────────┐    ┌─────────────────────────┐
+│ GPU0-7: PP Stage 1      │    │ GPU0-7: PP Stage 3      │
+│ TP Group = [GPU0..GPU7]  │    │ TP Group = [GPU0..GPU7]  │
+│ DP Rank 0               │    │ DP Rank 0               │
+└─────────────────────────┘    └─────────────────────────┘
+服务器 4-7: 同上，DP Rank 1（数据并行副本）
+
+通信模式：
+  TP 通信：机内 NVLink (AllReduce)     → 最高优先级带宽
+  PP 通信：跨机 IB (P2P Send/Recv)     → 低延迟要求
+  DP 通信：跨机 IB (AllReduce)          → 可与计算重叠
+</div>
+
+<div class="ascii-art">
+流水线并行 Interleaved Schedule（交错调度）：
+
+传统 1F1B:
+GPU0: [F0][F1][B0][F2][B1][B2]
+GPU1: [  ][F0][F1][B0][F2][B1]
+GPU2: [  ][  ][F0][F1][B0][F2]
+GPU3: [  ][  ][  ][F0][F1][B0]
+气泡 ≈ (p-1)/(m+p-1)
+
+交错调度（每 GPU 负责 2 个不相邻 Stage）:
+GPU0: [F0a][F2a][B0a][F0b][F2b][B0b][B2a][B2b]
+GPU1: [  ][F0a][F2a][B0a][F0b][F2b][B0b][B2a]
+...
+气泡 ≈ (p-1)/(v×m+p-1)，v=2 时气泡减半
+代价：通信量翻倍（每个 micro-batch 需跨更多 Stage）
+</div>
+
+<h3>练习与思考</h3>
+<div class="tip"><strong>向前串联：</strong>
+什么是 3D 并行？的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<pre><code class="language-python"># 什么是 3D 并行？ 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="ascii">
+什么是 3D 并行？ 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+</div>
+<div class="tip"><strong>相关章节：</strong>
+什么是 3D 并行？与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+什么是 3D 并行？与以下内容密切相关：<a href="02-ZeRO系列演进.html">02-ZeRO系列演进</a> | <a href="03-DeepSpeed架构深度剖析.html">03-DeepSpeed架构深度剖析</a> | <a href="04-Megatron-LM核心原理.html">04-Megatron-LM核心原理</a>。建议结合学习。
+</div>
+<div class="ascii">
+什么是 3D 并行？ 性能分析 (屋顶模型)
+  计算吞吐  │         ╱ 计算受限区
+  (TFLOPS)  │       ╱
+            │     ╱   ← 实际工作点
+            │   ╱
+            │ ╱ 带宽受限区
+            │╱
+            └──────────────── 带宽利用率
+  转折点 = 峰值算力 / 峰值带宽
+</div>
+<pre><code class="language-python"># 什么是 3D 并行？ - 性能基准测试
+import torch, time
+def benchmark(model, x, n=100):
+    for _ in range(10): model(x)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(n): model(x)
+    torch.cuda.synchronize()
+    print(f"Latency: {(time.perf_counter()-t0)/n*1000:.2f}ms")
+</code></pre>
+<div class="exercise"><strong>📝 练习题：</strong>
+<ol>
+<li>请用自己的话解释3D并行的核心原理，并画出数据流向图。</li>
+<li>在给定的2-GPU环境下，配置并运行一个3D并行的最小可行示例，记录性能数据。</li>
+<li>对比分析3D并行与其他替代方案的优劣势，撰写500字的技术报告。</li>
+</ol>
+</div>
+
+<h2>📚 学习路径与建议</h2>
+<p>建议按照以下顺序系统学习分布式训练技术：</p>
+<ol>
+<li><strong>基础理论</strong>：理解集合通信原语和并行计算的基本概念</li>
+<li><strong>核心技术</strong>：掌握 ZeRO 系列、张量并行、流水线并行等关键技术</li>
+<li><strong>框架实践</strong>：深入学习 DeepSpeed、Megatron-LM、FSDP2 等主流框架</li>
+<li><strong>高级主题</strong>：研究容错训练、弹性训练、混合精度优化等进阶内容</li>
+<li><strong>工程实战</strong>：完成完整的3D并行训练项目，积累生产级经验</li>
+</ol>
+<p>推荐阅读顺序：<a href="04-Megatron-LM核心原理.html">上一章</a> → 本章 → <a href="06-PyTorch-FSDP2完全指南.html">下一章</a></p>
+
+<div class="highlight">
+<strong>🚀 继续学习：</strong>掌握本章内容后，建议继续深入学习<a href="06-PyTorch-FSDP2完全指南.html">下一章</a>，将理论知识转化为实践能力。
+在实际项目中，3D并行通常需要与其他章节的技术结合使用，才能发挥最大训练效率。
+下一步请学习下一章的详细内容，了解更高级的优化策略和工程实践。
+</div>
+
+
+<h2>3D 并行的数学建模与性能分析</h2>
+<p>3D 并行是将张量并行（TP）、流水线并行（PP）和数据并行（DP）组合使用的策略。正确配置三种并行度需要理解它们之间的数学关系和性能影响。</p>
+
+<h3>并行度约束条件</h3>
+<p>设总 GPU 数为 G，张量并行度为 t，流水线并行度为 p，数据并行度为 d，则必须满足约束条件：</p>
+<div class="formula">
+G = t × p × d
+</div>
+<p>其中 t 通常取值为 1、2、4、8（受限于单机 GPU 数量），p 取决于模型层数和流水线粒度，d 由总 GPU 数和前两者决定。例如，使用 64 个 GPU（8 机 × 8 卡），常见配置为 TP=8, PP=4, DP=2。</p>
+
+<h3>通信量分析</h3>
+<p>三种并行策略的通信模式和通信量差异显著：</p>
+<table>
+<tr><th>并行策略</th><th>通信类型</th><th>通信量 (per step)</th><th>通信频率</th><th>带宽需求</th></tr>
+<tr><td>张量并行 (TP)</td><td>AllReduce</td><td>2 × b × s × h × (t-1)/t</td><td>每层 2 次</td><td>极高 (NVLink)</td></tr>
+<tr><td>流水线并行 (PP)</td><td>P2P Send/Recv</td><td>b × s × h</td><td>每 micro-batch</td><td>中等 (IB)</td></tr>
+<tr><td>数据并行 (DP)</td><td>AllReduce</td><td>2 × M × (d-1)/d</td><td>每步 1 次</td><td>中等 (IB)</td></tr>
+</table>
+<p>其中 b=batch size, s=sequence length, h=hidden size, t=TP度, d=DP度, M=模型参数量。</p>
+
+<h3>最优并行度搜索策略</h3>
+<p>给定总 GPU 数 G 和模型规模，如何确定最优的 (t, p, d) 组合？这是一个多目标优化问题。实践中通常遵循以下启发式规则：</p>
+<ul>
+<li><strong>规则1</strong>：TP 度尽量等于单机 GPU 数（如 8），利用 NVLink 高带宽</li>
+<li><strong>规则2</strong>：PP 度根据模型深度和 micro-batch 数决定，气泡率 < 10%</li>
+<li><strong>规则3</strong>：DP 度自动由 G / (TP × PP) 确定</li>
+<li><strong>规则4</strong>：如果 DP 度太小导致 batch 过小，考虑降低 PP 增大 DP</li>
+</ul>
+
+<table>
+<tr><th>模型规模</th><th>GPU 数</th><th>推荐 TP</th><th>推荐 PP</th><th>推荐 DP</th><th>全局 Batch</th></tr>
+<tr><td>7B</td><td>32</td><td>8</td><td>1</td><td>4</td><td>1024-2048</td></tr>
+<tr><td>13B</td><td>64</td><td>8</td><td>2</td><td>4</td><td>1024-2048</td></tr>
+<tr><td>70B</td><td>256</td><td>8</td><td>4</td><td>8</td><td>2048-4096</td></tr>
+<tr><td>175B</td><td>512</td><td>8</td><td>8</td><td>8</td><td>2048-8192</td></tr>
+</table>
+
+<table>
+<tr><th>混合并行方案</th><th>通信拓扑</th><th>气泡率</th><th>显存效率</th><th>适用场景</th></tr>
+<tr><td>TP+DP</td><td>机内TP + 跨机DP</td><td>0%</td><td>中等</td><td>中小模型、快速迭代</td></tr>
+<tr><td>TP+PP+DP</td><td>3D并行</td><td>5-15%</td><td>较好</td><td>大模型标准方案</td></tr>
+<tr><td>TP+PP+DP+SP</td><td>3D+序列并行</td><td>5-15%</td><td>优秀</td><td>长序列训练</td></tr>
+<tr><td>TP+PP+DP+CP</td><td>3D+上下文并行</td><td>5-15%</td><td>优秀</td><td>超长上下文</td></tr>
+<tr><td>EP+DP</td><td>专家并行+数据并行</td><td>0%</td><td>取决于路由</td><td>MoE 模型</td></tr>
+</table>
+
+<div class="ascii-art">
+3D 并行在 64 GPU 集群上的映射（TP=8, PP=4, DP=2）：
+
+服务器 0（8 GPU）:               服务器 1（8 GPU）:
+┌─────────────────────────┐    ┌─────────────────────────┐
+│ GPU0-7: PP Stage 0      │    │ GPU0-7: PP Stage 2      │
+│ TP Group = [GPU0..GPU7]  │    │ TP Group = [GPU0..GPU7]  │
+│ DP Rank 0               │    │ DP Rank 0               │
+└─────────────────────────┘    └─────────────────────────┘
+服务器 2（8 GPU）:               服务器 3（8 GPU）:
+┌─────────────────────────┐    ┌─────────────────────────┐
+│ GPU0-7: PP Stage 1      │    │ GPU0-7: PP Stage 3      │
+│ TP Group = [GPU0..GPU7]  │    │ TP Group = [GPU0..GPU7]  │
+│ DP Rank 0               │    │ DP Rank 0               │
+└─────────────────────────┘    └─────────────────────────┘
+服务器 4-7: 同上，DP Rank 1（数据并行副本）
+
+通信模式：
+  TP 通信：机内 NVLink (AllReduce)     → 最高优先级带宽
+  PP 通信：跨机 IB (P2P Send/Recv)     → 低延迟要求
+  DP 通信：跨机 IB (AllReduce)          → 可与计算重叠
+</div>
+
+<div class="ascii-art">
+流水线并行 Interleaved Schedule（交错调度）：
+
+传统 1F1B:
+GPU0: [F0][F1][B0][F2][B1][B2]
+GPU1: [  ][F0][F1][B0][F2][B1]
+GPU2: [  ][  ][F0][F1][B0][F2]
+GPU3: [  ][  ][  ][F0][F1][B0]
+气泡 ≈ (p-1)/(m+p-1)
+
+交错调度（每 GPU 负责 2 个不相邻 Stage）:
+GPU0: [F0a][F2a][B0a][F0b][F2b][B0b][B2a][B2b]
+GPU1: [  ][F0a][F2a][B0a][F0b][F2b][B0b][B2a]
+...
+气泡 ≈ (p-1)/(v×m+p-1)，v=2 时气泡减半
+代价：通信量翻倍（每个 micro-batch 需跨更多 Stage）
+</div>
+
+<h3>练习与思考</h3>
+<div class="exercise"><strong>📝 练习题：</strong>
+<ol>
+<li>请用自己的话解释3D并行的核心原理，并画出数据流向图。</li>
+<li>在给定的2-GPU环境下，配置并运行一个3D并行的最小可行示例，记录性能数据。</li>
+<li>对比分析3D并行与其他替代方案的优劣势，撰写500字的技术报告。</li>
+</ol>
+</div>
+
+<h2>📚 学习路径与建议</h2>
+<p>建议按照以下顺序系统学习分布式训练技术：</p>
+<ol>
+<li><strong>基础理论</strong>：理解集合通信原语和并行计算的基本概念</li>
+<li><strong>核心技术</strong>：掌握 ZeRO 系列、张量并行、流水线并行等关键技术</li>
+<li><strong>框架实践</strong>：深入学习 DeepSpeed、Megatron-LM、FSDP2 等主流框架</li>
+<li><strong>高级主题</strong>：研究容错训练、弹性训练、混合精度优化等进阶内容</li>
+<li><strong>工程实战</strong>：完成完整的3D并行训练项目，积累生产级经验</li>
+</ol>
+<p>推荐阅读顺序：<a href="04-Megatron-LM核心原理.html">上一章</a> → 本章 → <a href="06-PyTorch-FSDP2完全指南.html">下一章</a></p>
+
+<div class="highlight">
+<strong>🚀 继续学习：</strong>掌握本章内容后，建议继续深入学习<a href="06-PyTorch-FSDP2完全指南.html">下一章</a>，将理论知识转化为实践能力。
+在实际项目中，3D并行通常需要与其他章节的技术结合使用，才能发挥最大训练效率。
+下一步请学习下一章的详细内容，了解更高级的优化策略和工程实践。
+</div>
+
+
+<h3>混合并行的工程实践经验</h3>
+<p>在实际的大模型训练项目中，3D并行的配置并非一次就能调好，需要经过多轮迭代优化。以下是来自工业界的宝贵实践经验。</p>
+<p>首先，在集群规划阶段，需要充分评估网络拓扑。NVLink 和 InfiniBand 的带宽差异巨大（900 GB/s vs 50 GB/s），因此张量并行必须限制在单机内。其次，流水线并行的 micro-batch 数量需要根据显存大小和序列长度动态调整，通常需要进行多组实验找到最优配置。数据并行的梯度累积步数也需要精心设计，以平衡训练稳定性和吞吐量。</p>
+<p>此外，混合并行中的通信重叠策略对性能有显著影响。在前向传播中，可以将 AllGather 通信与当前层的计算重叠；在反向传播中，ReduceScatter 可以与梯度计算并行执行。这种重叠技术通常能带来 10-30% 的性能提升。</p>
+
+<h3>并行度配置的实战经验总结</h3>
+<p>在大规模集群上进行3D并行训练时，张量并行度应尽量设置为单机GPU数量（通常为8），以充分利用NVLink的高带宽优势。流水线并行度的选择需要平衡气泡率和通信开销，一般建议micro-batch数量为流水线深度的4到8倍。数据并行度则由总GPU数自动确定。</p>
+<pre><code># Megatron-LM 3D并行配置示例
+# 64 GPU: TP=8, PP=4, DP=2
+python pretrain_gpt.py \
+    --tensor-model-parallel-size 8 \
+    --pipeline-model-parallel-size 4 \
+    --num-layers 32 \
+    --micro-batch-size 1 \
+    --global-batch-size 1024 \
+    --sequence-parallel \
+    --use-flash-attn
+</code></pre>
+<div class="footer">分布式训练系统深度指南 © 2026</div></body></html>

@@ -1,0 +1,1453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Module 02: KV Cache内存模型与开销分析</title>
+<style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --bg-card: #1c2333;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-orange: #d29922;
+    --accent-red: #f85149;
+    --accent-purple: #bc8cff;
+    --accent-cyan: #39d2c0;
+    --accent-pink: #f778ba;
+    --border-color: #30363d;
+    --glow-blue: rgba(88,166,255,0.15);
+    --glow-green: rgba(63,185,80,0.15);
+    --glow-orange: rgba(210,153,34,0.15);
+    --glow-red: rgba(248,81,73,0.15);
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    overflow-x: hidden;
+}
+.container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+h1 { font-size: 2.2rem; text-align: center; margin-bottom: 0.5rem; background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.subtitle { text-align: center; color: var(--text-secondary); margin-bottom: 2rem; font-size: 1.05rem; }
+h2 { font-size: 1.5rem; color: var(--accent-blue); margin: 2.5rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border-color); }
+h3 { font-size: 1.2rem; color: var(--accent-cyan); margin: 1.5rem 0 0.8rem; }
+h4 { font-size: 1.05rem; color: var(--accent-orange); margin: 1.2rem 0 0.6rem; }
+.card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 1.5rem;
+    margin: 1rem 0;
+}
+.card-blue { border-left: 4px solid var(--accent-blue); }
+.card-green { border-left: 4px solid var(--accent-green); }
+.card-orange { border-left: 4px solid var(--accent-orange); }
+.card-red { border-left: 4px solid var(--accent-red); }
+.card-purple { border-left: 4px solid var(--accent-purple); }
+.card-cyan { border-left: 4px solid var(--accent-cyan); }
+analogy {
+    display: block;
+    background: rgba(57,210,192,0.08);
+    border: 1px dashed rgba(57,210,192,0.3);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 0.8rem 0;
+    color: var(--accent-cyan);
+    font-style: italic;
+}
+.formula-box {
+    background: rgba(88,166,255,0.08);
+    border: 1px solid rgba(88,166,255,0.25);
+    border-radius: 8px;
+    padding: 1rem 1.5rem;
+    margin: 1rem 0;
+    font-family: 'Courier New', monospace;
+    font-size: 1.1rem;
+    text-align: center;
+    color: var(--accent-blue);
+}
+.tag {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin: 2px;
+}
+.tag-blue { background: rgba(88,166,255,0.15); color: var(--accent-blue); }
+.tag-green { background: rgba(63,185,80,0.15); color: var(--accent-green); }
+.tag-orange { background: rgba(210,153,34,0.15); color: var(--accent-orange); }
+.tag-red { background: rgba(248,81,73,0.15); color: var(--accent-red); }
+.tag-purple { background: rgba(188,140,255,0.15); color: var(--accent-purple); }
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.9rem;
+}
+th, td {
+    padding: 0.6rem 0.8rem;
+    border: 1px solid var(--border-color);
+    text-align: center;
+}
+th {
+    background: var(--bg-tertiary);
+    color: var(--accent-blue);
+    font-weight: 600;
+}
+td { background: var(--bg-secondary); }
+tr:hover td { background: rgba(88,166,255,0.05); }
+.highlight-red { color: var(--accent-red); font-weight: 700; }
+.highlight-orange { color: var(--accent-orange); font-weight: 700; }
+.highlight-green { color: var(--accent-green); font-weight: 700; }
+.highlight-blue { color: var(--accent-blue); font-weight: 700; }
+.highlight-purple { color: var(--accent-purple); font-weight: 700; }
+
+svg.diagram {
+    width: 100%;
+    max-width: 900px;
+    margin: 1rem auto;
+    display: block;
+}
+.code-block {
+    background: #0d1117;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 1rem 1.2rem;
+    margin: 0.8rem 0;
+    font-family: 'Courier New', monospace;
+    font-size: 0.88rem;
+    overflow-x: auto;
+    color: var(--text-primary);
+    line-height: 1.5;
+}
+.code-block .comment { color: var(--text-muted); }
+.code-block .keyword { color: var(--accent-red); }
+.code-block .string { color: var(--accent-green); }
+.code-block .number { color: var(--accent-orange); }
+.code-block .type { color: var(--accent-cyan); }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; }
+@media (max-width: 768px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+.toc {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 1.5rem 2rem;
+    margin: 1.5rem 0;
+}
+.toc a { color: var(--accent-blue); text-decoration: none; }
+.toc a:hover { text-decoration: underline; }
+.toc ol { padding-left: 1.5rem; }
+.toc li { margin: 0.3rem 0; color: var(--text-secondary); }
+.progress-bar {
+    background: var(--bg-tertiary);
+    border-radius: 6px;
+    height: 22px;
+    overflow: hidden;
+    margin: 0.3rem 0;
+}
+.progress-fill {
+    height: 100%;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #fff;
+    transition: width 0.5s;
+}
+.comparison-box {
+    display: flex;
+    gap: 1rem;
+    margin: 1rem 0;
+}
+.vs-card {
+    flex: 1;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 1rem;
+    text-align: center;
+}
+.vs-card h4 { margin: 0 0 0.5rem; }
+.vs-divider {
+    display: flex;
+    align-items: center;
+    font-size: 1.5rem;
+    font-weight: bold;
+    color: var(--accent-orange);
+}
+.key-metric {
+    font-size: 2rem;
+    font-weight: 800;
+    text-align: center;
+    margin: 0.5rem 0;
+}
+.key-metric-label {
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+}
+.arrow { color: var(--accent-orange); font-weight: bold; }
+.note {
+    background: rgba(210,153,34,0.08);
+    border-left: 3px solid var(--accent-orange);
+    padding: 0.8rem 1rem;
+    margin: 0.8rem 0;
+    font-size: 0.92rem;
+    color: var(--text-secondary);
+}
+.warning {
+    background: rgba(248,81,73,0.08);
+    border-left: 3px solid var(--accent-red);
+    padding: 0.8rem 1rem;
+    margin: 0.8rem 0;
+    font-size: 0.92rem;
+}
+footer {
+    text-align: center;
+    padding: 2rem 0 1rem;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    border-top: 1px solid var(--border-color);
+    margin-top: 3rem;
+}
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<nav class="nav-bar">
+  <a href="00-index.html">← 目录</a>
+  <span style="opacity:0.4">|</span>
+  <a href="01-KV-Cache基础原理与数学本质.html">← KV Cache基础原理</a>
+  <span class="title">模块02: KV Cache内存模型</span>
+  <a href="03-PagedAttention与块管理.html">PagedAttention与块管理 →</a>
+  <a href="00-index.html">目录 →</a>
+</nav>
+<div class="container">
+
+<h1>Module 02: KV Cache 内存模型与开销分析</h1>
+<p class="subtitle">从内存布局到开销计算 — 彻底理解 KV Cache 为什么是推理系统的核心瓶颈</p>
+
+<nav class="toc">
+<strong style="color:var(--accent-blue)">📑 目录</strong>
+<ol>
+<li><a href="#sec1">KV Cache 内存布局</a></li>
+<li><a href="#sec2">内存开销精确计算</a></li>
+<li><a href="#sec3">内存碎片化问题</a></li>
+<li><a href="#sec4">连续内存分配 vs 分页</a></li>
+<li><a href="#sec5">KV Cache 与 GPU HBM</a></li>
+<li><a href="#sec6">Batch Size 与 KV Cache 的权衡</a></li>
+<li><a href="#sec7">Sequence Length 增长的挑战</a></li>
+</ol>
+</nav>
+
+<!-- ========== Section 1 ========== -->
+<h2 id="sec1">1. KV Cache 内存布局</h2>
+
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>KV Cache就像图书馆书架上每本书的索引卡片。卡片记录了书的特征（Key）和摘要（Value），帮你快速找到内容，而不用重读整本书。</div>
+<div class="warn"><strong>常见误区：</strong>新手容易把KV Cache和模型权重内存搞混，误以为模型加载后内存占用就固定了，忽略了随序列增长而线性增加的Cache内存。</div>
+<div class="deep"><strong>深入探讨：</strong>以FP16精度为例，一个KV Cache元素占2字节。对于一个Llama-7B模型（层数L=32，注意力头数H=32，每头维度D_k=128），单个token的KV Cache大小为 2 * 2 * L * H * D_k * 2字节 = 2 * 2 * 32 * 32 * 128 * 2 = 1,048,576 字节（约1MB）。</div>
+<div class="ascii"><pre>  输入: The cat sat on
+  [层1 K1, V1] [层1 K2, V2] [层1 K3, V3] ...
+  [层2 K1, V1] [层2 K2, V2] [层2 K3, V3] ...
+     ...          ...           ...
+  (每个token在每一层都有独立的K和V向量)</pre></div>
+<table><tr><th>内存组成部分</th><th>特点</th><th>生命周期</th></tr><tr><td>模型权重 (Weights)</td><td>加载后固定不变</td><td>贯穿整个服务期</td></tr><tr><td>KV Cache</td><td>随输入序列线性增长</td><td>单次请求/会话内</td></tr><tr><td>激活内存 (Activations)</td><td>计算中间结果，峰值高</td><td>单次前向计算内</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<analogy>🔍 通俗类比：KV Cache 就像一本巨大的笔记本。每一层 Transformer 都有自己的一页纸记录 Key 和 Value。整本笔记本的厚度取决于你写了多少页（序列长度），以及每页有多宽（head 数量 × 每个 head 的维度）。</analogy>
+
+<h3>1.1 Tensor Shape 详解</h3>
+
+<div class="card card-blue">
+<h4>标准 KV Cache Tensor 形状</h4>
+<div class="formula-box">
+KV Cache Shape = [num_layers, 2, num_kv_heads, max_seq_len, head_dim]
+</div>
+<p style="color:var(--text-secondary);margin-top:0.8rem">其中：</p>
+<table>
+<tr><th>变量</th><th>含义</th><th>LLaMA-2-7B 示例</th></tr>
+<tr><td><code>num_layers</code></td><td>Transformer 层数</td><td>32</td></tr>
+<tr><td><code>2</code></td><td>Key + Value 两个张量</td><td>2</td></tr>
+<tr><td><code>num_kv_heads</code></td><td>KV Head 数量（GQA 时 &lt; Q heads）</td><td>32</td></tr>
+<tr><td><code>max_seq_len</code></td><td>最大序列长度</td><td>4096</td></tr>
+<tr><td><code>head_dim</code></td><td>每个 Head 的维度</td><td>128</td></tr>
+</table>
+</div>
+
+<div class="card card-green">
+<h4>GQA (Grouped Query Attention) 的影响</h4>
+<p>GQA 通过共享 KV Heads 来减少 KV Cache 大小：</p>
+<table>
+<tr><th>模型</th><th>Q Heads</th><th>KV Heads</th><th>压缩比</th></tr>
+<tr><td>LLaMA-2-7B (MHA)</td><td>32</td><td>32</td><td>1x</td></tr>
+<tr><td>LLaMA-2-70B (GQA)</td><td>64</td><td>8</td><td><span class="highlight-green">8x</span></td></tr>
+<tr><td>Mistral-7B (GQA)</td><td>32</td><td>8</td><td><span class="highlight-green">4x</span></td></tr>
+<tr><td>DeepSeek-V3 (MLA)</td><td>128</td><td>—</td><td><span class="highlight-green">~20x+</span></td></tr>
+</table>
+</div>
+
+<h3>1.2 内存布局：Contiguous vs Paged</h3>
+
+<div class="grid-2">
+<div class="card card-blue">
+<h4>🔹 连续布局 (Contiguous)</h4>
+<svg class="diagram" viewBox="0 0 500 260" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<linearGradient id="g1" x1="0" y1="0" x2="1" y2="0">
+<stop offset="0%" stop-color="#58a6ff" stop-opacity="0.7"/>
+<stop offset="100%" stop-color="#58a6ff" stop-opacity="0.3"/>
+</linearGradient>
+<linearGradient id="g2" x1="0" y1="0" x2="1" y2="0">
+<stop offset="0%" stop-color="#3fb950" stop-opacity="0.7"/>
+<stop offset="100%" stop-color="#3fb950" stop-opacity="0.3"/>
+</linearGradient>
+</defs>
+<rect x="20" y="20" width="460" height="30" rx="4" fill="url(#g1)" stroke="#58a6ff"/>
+<text x="250" y="40" fill="#fff" font-size="12" text-anchor="middle">Layer 0: K Cache [seq_len, head_dim]</text>
+<rect x="20" y="55" width="460" height="30" rx="4" fill="url(#g2)" stroke="#3fb950"/>
+<text x="250" y="75" fill="#fff" font-size="12" text-anchor="middle">Layer 0: V Cache [seq_len, head_dim]</text>
+<rect x="20" y="95" width="460" height="2" fill="transparent"/>
+<text x="250" y="110" fill="#8b949e" font-size="11" text-anchor="middle">↓ 连续排列</text>
+<rect x="20" y="120" width="460" height="30" rx="4" fill="url(#g1)" stroke="#58a6ff"/>
+<text x="250" y="140" fill="#fff" font-size="12" text-anchor="middle">Layer 1: K Cache [seq_len, head_dim]</text>
+<rect x="20" y="155" width="460" height="30" rx="4" fill="url(#g2)" stroke="#3fb950"/>
+<text x="250" y="175" fill="#fff" font-size="12" text-anchor="middle">Layer 1: V Cache [seq_len, head_dim]</text>
+<text x="250" y="210" fill="#8b949e" font-size="11" text-anchor="middle">... Layer 2 ~ Layer L-1 ...</text>
+<rect x="20" y="225" width="460" height="25" rx="4" fill="rgba(248,81,73,0.2)" stroke="#f85149" stroke-dasharray="5,3"/>
+<text x="250" y="243" fill="#f85149" font-size="11" text-anchor="middle">预分配的未使用空间 (内部碎片)</text>
+</svg>
+<p style="color:var(--text-secondary);font-size:0.9rem">所有 KV 数据分配在一块连续内存中。优点：实现简单，DMA 传输友好。缺点：无法动态扩展，大量内部碎片。</p>
+</div>
+<div class="card card-purple">
+<h4>🔹 分页布局 (Paged)</h4>
+<svg class="diagram" viewBox="0 0 500 260" xmlns="http://www.w3.org/2000/svg">
+<!-- Page table -->
+<rect x="10" y="10" width="120" height="240" rx="6" fill="rgba(188,140,255,0.08)" stroke="#bc8cff"/>
+<text x="70" y="30" fill="#bc8cff" font-size="11" text-anchor="middle" font-weight="600">Page Table</text>
+<rect x="20" y="40" width="100" height="22" rx="3" fill="rgba(188,140,255,0.15)" stroke="#bc8cff"/>
+<text x="70" y="55" fill="#e6edf3" font-size="10" text-anchor="middle">Slot 0 → Block 3</text>
+<rect x="20" y="68" width="100" height="22" rx="3" fill="rgba(188,140,255,0.15)" stroke="#bc8cff"/>
+<text x="70" y="83" fill="#e6edf3" font-size="10" text-anchor="middle">Slot 1 → Block 7</text>
+<rect x="20" y="96" width="100" height="22" rx="3" fill="rgba(188,140,255,0.15)" stroke="#bc8cff"/>
+<text x="70" y="111" fill="#e6edf3" font-size="10" text-anchor="middle">Slot 2 → Block 1</text>
+<rect x="20" y="124" width="100" height="22" rx="3" fill="rgba(188,140,255,0.15)" stroke="#bc8cff"/>
+<text x="70" y="139" fill="#e6edf3" font-size="10" text-anchor="middle">Slot 3 → Block 5</text>
+<!-- Physical blocks -->
+<rect x="170" y="10" width="320" height="240" rx="6" fill="rgba(88,166,255,0.05)" stroke="#30363d"/>
+<text x="330" y="30" fill="#58a6ff" font-size="11" text-anchor="middle" font-weight="600">Physical Blocks (GPU HBM)</text>
+<rect x="180" y="40" width="60" height="35" rx="4" fill="rgba(63,185,80,0.2)" stroke="#3fb950"/>
+<text x="210" y="62" fill="#3fb950" font-size="9" text-anchor="middle">B0</text>
+<rect x="248" y="40" width="60" height="35" rx="4" fill="rgba(88,166,255,0.2)" stroke="#58a6ff"/>
+<text x="278" y="62" fill="#58a6ff" font-size="9" text-anchor="middle">B1 ✓</text>
+<rect x="316" y="40" width="60" height="35" rx="4" fill="rgba(63,185,80,0.2)" stroke="#3fb950"/>
+<text x="346" y="62" fill="#3fb950" font-size="9" text-anchor="middle">B2</text>
+<rect x="384" y="40" width="60" height="35" rx="4" fill="rgba(88,166,255,0.2)" stroke="#58a6ff"/>
+<text x="414" y="62" fill="#58a6ff" font-size="9" text-anchor="middle">B3 ✓</text>
+<rect x="180" y="85" width="60" height="35" rx="4" fill="rgba(63,185,80,0.2)" stroke="#3fb950"/>
+<text x="210" y="107" fill="#3fb950" font-size="9" text-anchor="middle">B4</text>
+<rect x="248" y="85" width="60" height="35" rx="4" fill="rgba(88,166,255,0.2)" stroke="#58a6ff"/>
+<text x="278" y="107" fill="#58a6ff" font-size="9" text-anchor="middle">B5 ✓</text>
+<rect x="316" y="85" width="60" height="35" rx="4" fill="rgba(63,185,80,0.2)" stroke="#3fb950"/>
+<text x="346" y="107" fill="#3fb950" font-size="9" text-anchor="middle">B6</text>
+<rect x="384" y="85" width="60" height="35" rx="4" fill="rgba(88,166,255,0.2)" stroke="#58a6ff"/>
+<text x="414" y="107" fill="#58a6ff" font-size="9" text-anchor="middle">B7 ✓</text>
+<text x="330" y="145" fill="#8b949e" font-size="10" text-anchor="middle">✓ = 已使用  (空心 = 空闲可复用)</text>
+<!-- Arrows -->
+<line x1="120" y1="51" x2="175" y2="57" stroke="#bc8cff" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+<line x1="120" y1="79" x2="175" y2="107" stroke="#bc8cff" stroke-width="1.5"/>
+<line x1="120" y1="107" x2="175" y2="57" stroke="#bc8cff" stroke-width="1.5"/>
+<line x1="120" y1="135" x2="175" y2="107" stroke="#bc8cff" stroke-width="1.5"/>
+<text x="330" y="175" fill="#3fb950" font-size="10" text-anchor="middle">不同请求的块可共享! (copy-on-write)</text>
+<text x="330" y="195" fill="#8b949e" font-size="10" text-anchor="middle">按需分配，释放后立即可被其他请求复用</text>
+<text x="330" y="215" fill="#d29922" font-size="10" text-anchor="middle">碎片率 &lt; 1 block_size (通常 16 tokens)</text>
+</svg>
+</div>
+</div>
+
+<h3>1.3 内存对齐与 Padding</h3>
+
+<div class="card card-orange">
+<h4>内存对齐考量</h4>
+<table>
+<tr><th>对齐因素</th><th>要求</th><th>影响</th></tr>
+<tr><td>GPU Warp 对齐</td><td>128 字节对齐</td><td>每个 head 维度 128 恰好 1 warp (FP16)</td></tr>
+<tr><td>Tensor Core 对齐</td><td>16 字节对齐</td><td>FP16 下 8 元素对齐</td></tr>
+<tr><td>Cache Line</td><td>128 字节 (GPU)</td><td>head_dim=128 时一个 head 一条 cache line</td></tr>
+<tr><td>Vector Load</td><td>128-bit / 256-bit</td><td>一次加载 8/16 个 FP16 值</td></tr>
+</table>
+
+<div class="note">
+<strong>💡 设计启示：</strong>head_dim 通常选择 64, 128, 256 这些 2 的幂次方，不仅是为了计算方便，更是为了内存对齐。LLaMA 选择 head_dim=128 恰好与 GPU cache line 对齐。
+</div>
+</div>
+
+<h3>1.4 Stride 与内存访问模式</h3>
+
+<div class="code-block">
+<span class="comment">// KV Cache tensor 的 stride 定义</span>
+<span class="comment">// Shape: [num_layers, 2, num_kv_heads, seq_len, head_dim]</span>
+<span class="comment">//</span>
+<span class="comment">// Row-major stride (C-order):</span>
+<span class="keyword">stride</span> = [
+    2 * num_kv_heads * max_seq_len * head_dim,   <span class="comment">// layer stride</span>
+    num_kv_heads * max_seq_len * head_dim,        <span class="comment">// K/V stride</span>
+    max_seq_len * head_dim,                       <span class="comment">// head stride</span>
+    head_dim,                                     <span class="comment">// seq stride (最内层)</span>
+    1                                             <span class="comment">// dim stride</span>
+]
+<span class="comment">// 注意：seq 维度和 dim 维度是连续的</span>
+<span class="comment">// 但遍历 seq 时 stride=head_dim，间隔较小</span>
+<span class="comment">// 而遍历 layer 时 stride 极大，cache miss 严重</span>
+</div>
+
+<!-- ========== Section 2 ========== -->
+<h2 id="sec2">2. 内存开销精确计算</h2>
+
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>计算KV Cache内存，就像计算超市购物车的总重量。你需要知道每件商品（token）的重量（K和V向量大小），再乘以购物车里的商品总数（序列长度）。</div>
+<div class="warn"><strong>常见误区：</strong>计算时最容易遗漏的是“精度”和“批量（Batch Size）”这两个乘数。使用FP16和INT8，或同时处理多个请求，内存开销会相差数倍。</div>
+<div class="deep"><strong>深入探讨：</strong>单序列KV Cache内存公式：`Memory = 2 * num_layers * num_kv_heads * head_dim * seq_len * bytes_per_element`。例如，Mistral-7B (L=32, H_kv=8, D=128)，FP16下，处理2048个token需：2 * 32 * 8 * 128 * 2048 * 2 bytes ≈ 1.07 GB。若batch_size=8，则总开销约8.56 GB。</div>
+<div class="ascii"><pre>  公式: M = 2 * L * H_kv * D * S * P
+  M: 总内存
+  L: 层数          H_kv: KV头数
+  D: 每头维度      S: 序列长度
+  P: 每元素字节数 (FP16=2, INT8=1)</pre></div>
+<table><tr><th>模型 (7B级别)</th><th>KV头数(H_kv)</th><th>FP16, seq=2048 单序列内存</th></tr><tr><td>Llama-2-7B</td><td>32</td><td>约1.07 GB</td></tr><tr><td>Mistral-7B</td><td>8 (GQA)</td><td>约0.27 GB</td></tr><tr><td>Qwen-7B</td><td>32</td><td>约1.07 GB</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<analogy>🔍 通俗类比：计算 KV Cache 就像计算一栋大楼的总建筑面积 = 楼层数 × 每层面积。KV Cache 总大小 = 层数 × 2(K+V) × Head数 × 序列长度 × 每个Head维度 × 数据精度。</analogy>
+
+<h3>2.1 核心公式</h3>
+
+<div class="formula-box" style="font-size:1.2rem">
+KV Cache Memory = 2 × L × n<sub>kv</sub> × s × d × b × p
+</div>
+
+<div class="card card-blue">
+<table>
+<tr><th>符号</th><th>含义</th><th>单位</th></tr>
+<tr><td><strong>2</strong></td><td>Key + Value 两个缓存</td><td>—</td></tr>
+<tr><td><strong>L</strong></td><td>Transformer 层数 (num_layers)</td><td>—</td></tr>
+<tr><td><strong>n<sub>kv</sub></strong></td><td>KV Head 数量 (MHA=Q heads, GQA &lt; Q heads)</td><td>—</td></tr>
+<tr><td><strong>s</strong></td><td>当前序列长度 (seq_len)</td><td>tokens</td></tr>
+<tr><td><strong>d</strong></td><td>每个 Head 的维度 (head_dim)</td><td>—</td></tr>
+<tr><td><strong>b</strong></td><td>批次大小 (batch_size)</td><td>—</td></tr>
+<tr><td><strong>p</strong></td><td>每个元素的字节数 (FP16=2, FP8=1, INT4=0.5)</td><td>bytes</td></tr>
+</table>
+</div>
+
+<h3>2.2 主流模型参数对比</h3>
+
+<div class="card card-green">
+<table>
+<tr>
+<th>模型</th><th>L</th><th>n<sub>kv</sub></th><th>d</th><th>类型</th>
+<th>参数量</th><th>模型权重<br/>(FP16)</th><th>KV/token<br/>(FP16)</th>
+</tr>
+<tr>
+<td><strong>LLaMA-2-7B</strong></td><td>32</td><td>32</td><td>128</td><td>MHA</td>
+<td>7B</td><td>14 GB</td><td><span class="highlight-orange">0.5 MB</span></td>
+</tr>
+<tr>
+<td><strong>LLaMA-2-13B</strong></td><td>40</td><td>40</td><td>128</td><td>MHA</td>
+<td>13B</td><td>26 GB</td><td><span class="highlight-orange">0.78 MB</span></td>
+</tr>
+<tr>
+<td><strong>LLaMA-2-70B</strong></td><td>80</td><td>8</td><td>128</td><td>GQA</td>
+<td>70B</td><td>140 GB</td><td><span class="highlight-green">0.3125 MB</span></td>
+</tr>
+<tr>
+<td><strong>Mistral-7B</strong></td><td>32</td><td>8</td><td>128</td><td>GQA</td>
+<td>7.3B</td><td>14.6 GB</td><td><span class="highlight-green">0.125 MB</span></td>
+</tr>
+<tr>
+<td><strong>Qwen-72B</strong></td><td>80</td><td>8</td><td>128</td><td>GQA</td>
+<td>72B</td><td>144 GB</td><td><span class="highlight-green">0.3125 MB</span></td>
+</tr>
+<tr>
+<td><strong>DeepSeek-V3</strong></td><td>61</td><td>—</td><td>512*</td><td>MLA</td>
+<td>671B</td><td>~671 GB</td><td><span class="highlight-blue">~0.075 MB</span></td>
+</tr>
+</table>
+<p style="color:var(--text-muted);font-size:0.85rem">* DeepSeek-V3 使用 MLA (Multi-head Latent Attention)，KV Cache 压缩为低秩表示，实际 per-token 开销极小。d=512 为压缩后的 latent 维度。</p>
+</div>
+
+<h3>2.3 不同序列长度下的 KV Cache 大小 (单请求, FP16)</h3>
+
+<div class="card card-red">
+<table>
+<tr>
+<th>模型</th><th>4K</th><th>8K</th><th>32K</th><th>128K</th><th>1M</th>
+</tr>
+<tr>
+<td><strong>LLaMA-2-7B</strong>
+<br/><span style="color:var(--text-muted);font-size:0.8rem">模型: 14 GB</span></td>
+<td>2 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">14%</span></td>
+<td>4 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">29%</span></td>
+<td class="highlight-orange">16 GB<br/><span style="font-size:0.8rem">114%</span></td>
+<td class="highlight-red">64 GB<br/><span style="font-size:0.8rem">457%</span></td>
+<td class="highlight-red">500 GB<br/><span style="font-size:0.8rem">3571%</span></td>
+</tr>
+<tr>
+<td><strong>LLaMA-2-13B</strong>
+<br/><span style="color:var(--text-muted);font-size:0.8rem">模型: 26 GB</span></td>
+<td>3.1 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">12%</span></td>
+<td>6.3 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">24%</span></td>
+<td class="highlight-orange">25 GB<br/><span style="font-size:0.8rem">96%</span></td>
+<td class="highlight-red">100 GB<br/><span style="font-size:0.8rem">385%</span></td>
+<td class="highlight-red">781 GB<br/><span style="font-size:0.8rem">3004%</span></td>
+</tr>
+<tr>
+<td><strong>LLaMA-2-70B</strong>
+<br/><span style="color:var(--text-muted);font-size:0.8rem">模型: 140 GB</span></td>
+<td>1 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">0.7%</span></td>
+<td>2 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">1.4%</span></td>
+<td>2.5 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">1.8%</span></td>
+<td>10 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">7.1%</span></td>
+<td>40 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">29%</span></td>
+<td class="highlight-orange">320 GB<br/><span style="font-size:0.8rem">229%</span></td>
+</tr>
+<tr>
+<td><strong>Mistral-7B</strong>
+<br/><span style="color:var(--text-muted);font-size:0.8rem">模型: 14.6 GB</span></td>
+<td>0.5 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">3.4%</span></td>
+<td>1 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">6.8%</span></td>
+<td>4 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">27%</span></td>
+<td>16 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">110%</span></td>
+<td class="highlight-orange">125 GB<br/><span style="font-size:0.8rem">856%</span></td>
+</tr>
+<tr>
+<td><strong>Qwen-72B</strong>
+<br/><span style="color:var(--text-muted);font-size:0.8rem">模型: 144 GB</span></td>
+<td>1 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">0.7%</span></td>
+<td>2 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">1.4%</span></td>
+<td>2.5 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">1.7%</span></td>
+<td>10 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">6.9%</span></td>
+<td>40 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">28%</span></td>
+<td class="highlight-orange">320 GB<br/><span style="font-size:0.8rem">222%</span></td>
+</tr>
+<tr>
+<td><strong>DeepSeek-V3</strong>
+<br/><span style="color:var(--text-muted);font-size:0.8rem">模型: ~671 GB (MoE)</span></td>
+<td>0.3 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">0.04%</span></td>
+<td>0.6 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">0.09%</span></td>
+<td>2.3 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">0.3%</span></td>
+<td>9.2 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">1.4%</span></td>
+<td>71.5 GB<br/><span style="color:var(--text-muted);font-size:0.8rem">10.7%</span></td>
+</tr>
+</table>
+<p style="color:var(--text-muted);font-size:0.85rem">百分比 = KV Cache 大小 / 模型权重大小。红色标注表示 KV Cache <strong>超过模型权重</strong>的场景。</p>
+</div>
+
+<h3>2.4 KV Cache vs 模型权重对比 (可视化)</h3>
+
+<div class="card card-purple">
+<p style="margin-bottom:1rem"><strong>LLaMA-2-7B at seq_len=128K (单请求, FP16):</strong></p>
+<p style="color:var(--text-secondary);font-size:0.9rem">模型权重: 14 GB</p>
+<div class="progress-bar"><div class="progress-fill" style="width:18%;background:linear-gradient(90deg,var(--accent-blue),var(--accent-purple));">14 GB</div></div>
+<p style="color:var(--text-secondary);font-size:0.9rem;margin-top:0.5rem">KV Cache: 64 GB</p>
+<div class="progress-bar"><div class="progress-fill" style="width:82%;background:linear-gradient(90deg,var(--accent-red),var(--accent-orange));">64 GB</div></div>
+
+<p style="margin-top:1.5rem;margin-bottom:1rem"><strong>LLaMA-2-70B at seq_len=128K (单请求, FP16):</strong></p>
+<p style="color:var(--text-secondary);font-size:0.9rem">模型权重: 140 GB</p>
+<div class="progress-bar"><div class="progress-fill" style="width:81%;background:linear-gradient(90deg,var(--accent-blue),var(--accent-purple));">140 GB</div></div>
+<p style="color:var(--text-secondary);font-size:0.9rem;margin-top:0.5rem">KV Cache: 40 GB</p>
+<div class="progress-bar"><div class="progress-fill" style="width:22%;background:linear-gradient(90deg,var(--accent-red),var(--accent-orange));">40 GB</div></div>
+
+<div class="warning" style="margin-top:1rem">
+<strong>⚠️ 关键发现：</strong>小模型（7B）在长序列场景下，KV Cache 可以轻松超过模型权重大小！这就是为什么 KV Cache 优化是推理系统的核心问题。
+</div>
+</div>
+
+<h3>2.5 计算示例</h3>
+
+<div class="code-block">
+<span class="comment"># 精确计算 LLaMA-2-7B 在 seq_len=32768 时的 KV Cache 大小</span>
+
+<span class="keyword">num_layers</span> = <span class="number">32</span>
+<span class="keyword">num_kv_heads</span> = <span class="number">32</span>       <span class="comment"># MHA，与 Q heads 相同</span>
+<span class="keyword">head_dim</span> = <span class="number">128</span>
+<span class="keyword">seq_len</span> = <span class="number">32768</span>          <span class="comment"># 32K context</span>
+<span class="keyword">batch_size</span> = <span class="number">1</span>
+<span class="keyword">bytes_per_element</span> = <span class="number">2</span>    <span class="comment"># FP16</span>
+
+<span class="comment"># 计算</span>
+total_elements = <span class="number">2</span> * num_layers * num_kv_heads * seq_len * head_dim * batch_size
+               = <span class="number">2</span> * <span class="number">32</span> * <span class="number">32</span> * <span class="number">32768</span> * <span class="number">128</span> * <span class="number">1</span>
+               = <span class="number">8,589,934,592</span>  <span class="comment"># 85.9 亿个元素</span>
+
+total_bytes = total_elements * bytes_per_element
+            = <span class="number">8,589,934,592</span> * <span class="number">2</span>
+            = <span class="number">17,179,869,184</span> bytes
+            = <span class="number">16 GB</span>  <span class="comment"># ← 单个请求就占 16 GB!</span>
+
+<span class="comment"># 每 token 的 KV Cache 开销</span>
+per_token = <span class="number">2</span> * num_layers * num_kv_heads * head_dim * bytes_per_element
+          = <span class="number">2</span> * <span class="number">32</span> * <span class="number">32</span> * <span class="number">128</span> * <span class="number">2</span>
+          = <span class="number">524,288</span> bytes = <span class="number">0.5 MB / token</span>
+</div>
+
+<!-- ========== Section 3 ========== -->
+<h2 id="sec3">3. 内存碎片化问题</h2>
+
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>内存碎片化就像一个抽屉里塞满了大小不一的乐高积木。虽然总剩余空间够放一个新积木，但没有一块连续的合适空间，导致无法使用。</div>
+<div class="warn"><strong>常见误区：</strong>最大的误区是认为“还有剩余内存就能用”。在动态插入、删除请求的在线服务中，不解决碎片化，即使报告显示有30%空闲内存，新请求也可能因无法分配连续空间而失败。</div>
+<div class="deep"><strong>深入探讨：</strong>碎片化会导致严重的“内存利用率虚高”问题。实际可用内存远低于`free`命令报告的值。在长序列场景下，由于KV Cache块大小固定（如PagedAttention中的块），序列结束时释放的内存可能无法被新序列的头部（因大小不匹配）完全利用，导致外部碎片。</div>
+<div class="ascii"><pre>  请求A结束，释放 5个块
+  [已用][空闲][已用][空闲][已用][空闲][已用][空闲][已用]
+       ____5个空闲块____/
+  新请求B需要3个连续块 -> 失败！因为空闲块不连续。</pre></div>
+<table><tr><th>碎片类型</th><th>成因</th><th>解决策略</th></tr><tr><td>外部碎片</td><td>不同大小的内存块频繁分配/释放</td><td>内存池、分页(Paging)</td></tr><tr><td>内部碎片</td><td>分配单元大于实际需求</td><td>精细粒度的块分配</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<analogy>🔍 通俗类比：碎片化就像搬家时箱子大小不合适。你要装 17 个苹果，但只有 20 个装的箱子——3 个位子空着浪费了（内部碎片）。或者散落在房间各处的空箱子很难凑成一大块使用（外部碎片）。</analogy>
+
+<h3>3.1 两种碎片类型</h3>
+
+<div class="grid-2">
+<div class="card card-red">
+<h4>🔴 内部碎片 (Internal Fragmentation)</h4>
+<p>分配了但未使用的内存。</p>
+<svg class="diagram" viewBox="0 0 400 120" xmlns="http://www.w3.org/2000/svg">
+<rect x="10" y="15" width="280" height="40" rx="4" fill="rgba(88,166,255,0.3)" stroke="#58a6ff"/>
+<text x="150" y="40" fill="#e6edf3" font-size="11" text-anchor="middle">已使用: seq_len=150 tokens</text>
+<rect x="295" y="15" width="95" height="40" rx="4" fill="rgba(248,81,73,0.2)" stroke="#f85149" stroke-dasharray="4,3"/>
+<text x="342" y="40" fill="#f85149" font-size="10" text-anchor="middle">浪费: 50 slots</text>
+<text x="200" y="80" fill="#8b949e" font-size="11" text-anchor="middle">预分配 max_seq_len=200 的空间</text>
+<text x="200" y="100" fill="#d29922" font-size="11" text-anchor="middle">碎片率 = (200-150)/200 = 25%</text>
+</svg>
+<p style="font-size:0.9rem;color:var(--text-secondary);margin-top:0.5rem">
+<strong>场景：</strong>为每个请求预分配 max_seq_len 大小的内存。<br/>
+<strong>浪费：</strong>平均每个请求浪费 max_seq_len/2 个 token 的空间。<br/>
+<strong>量化：</strong>碎片率 ≈ (max_len - avg_len) / max_len
+</p>
+</div>
+<div class="card card-orange">
+<h4>🟠 外部碎片 (External Fragmentation)</h4>
+<p>空闲内存散布在各处，无法利用。</p>
+<svg class="diagram" viewBox="0 0 400 120" xmlns="http://www.w3.org/2000/svg">
+<rect x="10" y="15" width="80" height="40" rx="4" fill="rgba(88,166,255,0.3)" stroke="#58a6ff"/>
+<text x="50" y="40" fill="#e6edf3" font-size="9" text-anchor="middle">Req A</text>
+<rect x="95" y="15" width="40" height="40" rx="4" fill="rgba(248,81,73,0.15)" stroke="#f85149" stroke-dasharray="3,2"/>
+<text x="115" y="40" fill="#f85149" font-size="8" text-anchor="middle">空</text>
+<rect x="140" y="15" width="100" height="40" rx="4" fill="rgba(63,185,80,0.3)" stroke="#3fb950"/>
+<text x="190" y="40" fill="#e6edf3" font-size="9" text-anchor="middle">Req B</text>
+<rect x="245" y="15" width="60" height="40" rx="4" fill="rgba(248,81,73,0.15)" stroke="#f85149" stroke-dasharray="3,2"/>
+<text x="275" y="40" fill="#f85149" font-size="8" text-anchor="middle">空</text>
+<rect x="310" y="15" width="80" height="40" rx="4" fill="rgba(188,140,255,0.3)" stroke="#bc8cff"/>
+<text x="350" y="40" fill="#e6edf3" font-size="9" text-anchor="middle">Req C</text>
+<text x="200" y="80" fill="#d29922" font-size="11" text-anchor="middle">总空闲: 100 slots → 但分散在两处!</text>
+<text x="200" y="100" fill="#f85149" font-size="11" text-anchor="middle">新请求需要连续 80 slots → 分配失败!</text>
+</svg>
+<p style="font-size:0.9rem;color:var(--text-secondary);margin-top:0.5rem">
+<strong>场景：</strong>请求完成释放后留下的零散空间。<br/>
+<strong>后果：</strong>总空闲足够但无法分配给新请求。<br/>
+<strong>量化：</strong>实际可用 ≈ Σ(max_free_block) &lt;&lt; total_free
+</p>
+</div>
+</div>
+
+<h3>3.2 各框架碎片化处理策略</h3>
+
+<div class="card card-cyan">
+<table>
+<tr><th>框架</th><th>策略</th><th>内部碎片</th><th>外部碎片</th><th>适用场景</th></tr>
+<tr>
+<td><strong>HuggingFace<br/>Transformers</strong></td>
+<td>预分配 max_len</td>
+<td class="highlight-red">高</td>
+<td class="highlight-green">无</td>
+<td>简单推理，单请求</td>
+</tr>
+<tr>
+<td><strong>vLLM<br/>(PagedAttention)</strong></td>
+<td>分页 + 按需分配</td>
+<td class="highlight-green">极低</td>
+<td class="highlight-green">极低</td>
+<td>高并发服务</td>
+</tr>
+<tr>
+<td><strong>TensorRT-LLM</strong></td>
+<td>预分配 + padding</td>
+<td class="highlight-orange">中</td>
+<td class="highlight-green">低</td>
+<td>低延迟优化</td>
+</tr>
+<tr>
+<td><strong>SGLang</strong></td>
+<td>RadixAttention<br/>+ 前缀树</td>
+<td class="highlight-green">低</td>
+<td class="highlight-green">低</td>
+<td>多轮对话，前缀共享</td>
+</tr>
+<tr>
+<td><strong>DeepSpeed<br/>FastGen</strong></td>
+<td>Dynamic SplitFuse</td>
+<td class="highlight-orange">中</td>
+<td class="highlight-green">低</td>
+<td>混合长短请求</td>
+</tr>
+</table>
+</div>
+
+<!-- ========== Section 4 ========== -->
+<h2 id="sec4">4. 连续内存分配 vs 分页</h2>
+
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>连续分配像买一整排连号的电影票；分页像在图书馆借书，你可以从不同书架（物理内存块）拿书，但用“借书卡”（页表）记录每本书在哪，对你来说它们是连贯的。</div>
+<div class="warn"><strong>常见误区：</strong>误以为分页会带来巨大性能开销。实际上，像vLLM的PagedAttention，通过优化页表查找和预取，其开销远低于因内存碎片导致的计算中断或批处理大小缩减的损失。</div>
+<div class="deep"><strong>深入探讨：</strong>PagedAttention借鉴操作系统虚拟内存思想。它将KV Cache划分为固定大小的“块”（Block），例如16个token一块。序列的KV Cache逻辑上连续，但物理上可能分散在GPU内存的不同块中。通过一个“块表”记录映射关系。这实现了接近100%的内存利用率，支持更大的batch size。</div>
+<div class="ascii"><pre>  连续分配: [A0, A1, A2, A3, A4] -> 必须连续存放
+  分页(PagedAttention):
+    序列A: 逻辑 [0, 1, 2, 3, 4]
+            物理块 [P3, P7, P1, P0, P2] (通过块表映射)</pre></div>
+<table><tr><th>特性</th><th>连续内存分配</th><th>分页 (PagedAttention)</th></tr><tr><td>内存利用率</td><td>低，易碎片</td><td>极高 (>95%)</td></tr><tr><td>分配灵活性</td><td>需要大块连续空间</td><td>只需小块空间</td></tr><tr><td>实现复杂度</td><td>简单</td><td>较复杂，需页表管理</td></tr><tr><td>典型应用</td><td>早期推理框架</td><td>vLLM, TensorRT-LLM</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<analogy>🔍 通俗类比：连续分配像图书馆里每个读者独占一整排书架——即使只放一本书也得占整排。分页像储物柜系统——每个读者按需使用小格子，用完就归还，其他人可立刻使用。</analogy>
+
+<h3>4.1 连续分配的致命缺陷</h3>
+
+<div class="card card-red">
+<p><strong>假设场景：</strong>GPU 总内存 80 GB (A100)，模型权重占 14 GB，可用 KV Cache 内存 66 GB</p>
+
+<table>
+<tr><th>请求</th><th>序列长度</th><th>KV Cache</th><th>状态</th></tr>
+<tr><td>Request A</td><td>4K</td><td>2 GB</td><td class="highlight-green">✓ 运行中</td></tr>
+<tr><td>Request B</td><td>8K</td><td>4 GB</td><td class="highlight-green">✓ 运行中</td></tr>
+<tr><td>Request C (已完成)</td><td>16K</td><td>8 GB</td><td class="highlight-red">✗ 已释放，留下空洞</td></tr>
+<tr><td>Request D</td><td>12K</td><td>6 GB</td><td class="highlight-orange">⚠ 空闲 60 GB 但碎片化</td></tr>
+</table>
+
+<p style="color:var(--text-red);margin-top:0.8rem">连续分配下：新请求即使总空闲空间足够，也可能因为找不到连续的大块内存而分配失败！</p>
+</div>
+
+<h3>4.2 PagedAttention 原理</h3>
+
+<div class="card card-green">
+<h4>PagedAttention 核心机制</h4>
+<svg class="diagram" viewBox="0 0 800 320" xmlns="http://www.w3.org/2000/svg">
+<!-- Title -->
+<text x="400" y="20" fill="#58a6ff" font-size="13" text-anchor="middle" font-weight="600">PagedAttention: KV Cache 分页管理</text>
+<!-- Logical blocks -->
+<rect x="20" y="40" width="220" height="220" rx="6" fill="rgba(188,140,255,0.05)" stroke="#30363d"/>
+<text x="130" y="60" fill="#bc8cff" font-size="12" text-anchor="middle" font-weight="600">逻辑块 (Logical Blocks)</text>
+<rect x="35" y="70" width="190" height="28" rx="4" fill="rgba(188,140,255,0.12)" stroke="#bc8cff"/>
+<text x="130" y="89" fill="#e6edf3" font-size="11" text-anchor="middle">Logical Block 0 (tokens 0-15)</text>
+<rect x="35" y="105" width="190" height="28" rx="4" fill="rgba(188,140,255,0.12)" stroke="#bc8cff"/>
+<text x="130" y="124" fill="#e6edf3" font-size="11" text-anchor="middle">Logical Block 1 (tokens 16-31)</text>
+<rect x="35" y="140" width="190" height="28" rx="4" fill="rgba(188,140,255,0.12)" stroke="#bc8cff"/>
+<text x="130" y="159" fill="#e6edf3" font-size="11" text-anchor="middle">Logical Block 2 (tokens 32-47)</text>
+<rect x="35" y="175" width="190" height="28" rx="4" fill="rgba(188,140,255,0.12)" stroke="#bc8cff"/>
+<text x="130" y="194" fill="#e6edf3" font-size="11" text-anchor="middle">Logical Block 3 (tokens 48-63)</text>
+<rect x="35" y="210" width="190" height="28" rx="4" fill="rgba(188,140,255,0.08)" stroke="#bc8cff" stroke-dasharray="4,3"/>
+<text x="130" y="229" fill="#6e7681" font-size="10" text-anchor="middle">... 可按需增长 ...</text>
+<!-- Block Table -->
+<rect x="290" y="40" width="160" height="220" rx="6" fill="rgba(210,153,34,0.05)" stroke="#30363d"/>
+<text x="370" y="60" fill="#d29922" font-size="12" text-anchor="middle" font-weight="600">Block Table</text>
+<rect x="305" y="70" width="130" height="28" rx="4" fill="rgba(210,153,34,0.12)" stroke="#d29922"/>
+<text x="370" y="89" fill="#e6edf3" font-size="10" text-anchor="middle">L0 → Physical #7</text>
+<rect x="305" y="105" width="130" height="28" rx="4" fill="rgba(210,153,34,0.12)" stroke="#d29922"/>
+<text x="370" y="124" fill="#e6edf3" font-size="10" text-anchor="middle">L1 → Physical #2</text>
+<rect x="305" y="140" width="130" height="28" rx="4" fill="rgba(210,153,34,0.12)" stroke="#d29922"/>
+<text x="370" y="159" fill="#e6edf3" font-size="10" text-anchor="middle">L2 → Physical #11</text>
+<rect x="305" y="175" width="130" height="28" rx="4" fill="rgba(210,153,34,0.12)" stroke="#d29922"/>
+<text x="370" y="194" fill="#e6edf3" font-size="10" text-anchor="middle">L3 → Physical #4</text>
+<!-- Physical memory -->
+<rect x="520" y="40" width="260" height="220" rx="6" fill="rgba(63,185,80,0.05)" stroke="#30363d"/>
+<text x="650" y="60" fill="#3fb950" font-size="12" text-anchor="middle" font-weight="600">Physical Blocks (GPU HBM)</text>
+<rect x="530" y="70" width="55" height="28" rx="3" fill="rgba(100,100,100,0.2)" stroke="#555"/>
+<text x="558" y="89" fill="#6e7681" font-size="9" text-anchor="middle">#0</text>
+<rect x="590" y="70" width="55" height="28" rx="3" fill="rgba(63,185,80,0.2)" stroke="#3fb950"/>
+<text x="618" y="89" fill="#3fb950" font-size="9" text-anchor="middle">#1 ✦</text>
+<rect x="650" y="70" width="55" height="28" rx="3" fill="rgba(88,166,255,0.2)" stroke="#58a6ff"/>
+<text x="678" y="89" fill="#58a6ff" font-size="9" text-anchor="middle">#2 ✦</text>
+<rect x="710" y="70" width="55" height="28" rx="3" fill="rgba(100,100,100,0.2)" stroke="#555"/>
+<text x="738" y="89" fill="#6e7681" font-size="9" text-anchor="middle">#3</text>
+<rect x="530" y="105" width="55" height="28" rx="3" fill="rgba(248,81,73,0.2)" stroke="#f85149"/>
+<text x="558" y="124" fill="#f85149" font-size="9" text-anchor="middle">#4 ✦</text>
+<rect x="590" y="105" width="55" height="28" rx="3" fill="rgba(100,100,100,0.2)" stroke="#555"/>
+<text x="618" y="124" fill="#6e7681" font-size="9" text-anchor="middle">#5</text>
+<rect x="650" y="105" width="55" height="28" rx="3" fill="rgba(100,100,100,0.2)" stroke="#555"/>
+<text x="678" y="124" fill="#6e7681" font-size="9" text-anchor="middle">#6</text>
+<rect x="710" y="105" width="55" height="28" rx="3" fill="rgba(188,140,255,0.2)" stroke="#bc8cff"/>
+<text x="738" y="124" fill="#bc8cff" font-size="9" text-anchor="middle">#7 ✦</text>
+<rect x="530" y="140" width="55" height="28" rx="3" fill="rgba(100,100,100,0.2)" stroke="#555"/>
+<text x="558" y="159" fill="#6e7681" font-size="9" text-anchor="middle">#8</text>
+<rect x="590" y="140" width="55" height="28" rx="3" fill="rgba(100,100,100,0.2)" stroke="#555"/>
+<text x="618" y="159" fill="#6e7681" font-size="9" text-anchor="middle">#9</text>
+<rect x="650" y="140" width="55" height="28" rx="3" fill="rgba(100,100,100,0.2)" stroke="#555"/>
+<text x="678" y="159" fill="#6e7681" font-size="9" text-anchor="middle">#10</text>
+<rect x="710" y="140" width="55" height="28" rx="3" fill="rgba(210,153,34,0.2)" stroke="#d29922"/>
+<text x="738" y="159" fill="#d29922" font-size="9" text-anchor="middle">#11 ✦</text>
+<text x="650" y="200" fill="#8b949e" font-size="10" text-anchor="middle">✦ = 已分配给某请求</text>
+<text x="650" y="218" fill="#8b949e" font-size="10" text-anchor="middle">空心 = 可立即被分配</text>
+<!-- Arrows from block table to physical -->
+<line x1="435" y1="84" x2="525" y2="89" stroke="#d29922" stroke-width="1.5" opacity="0.6"/>
+<line x1="435" y1="119" x2="525" y2="89" stroke="#d29922" stroke-width="1.5" opacity="0.6"/>
+<line x1="435" y1="154" x2="525" y2="159" stroke="#d29922" stroke-width="1.5" opacity="0.6"/>
+<line x1="435" y1="189" x2="525" y2="124" stroke="#d29922" stroke-width="1.5" opacity="0.6"/>
+</svg>
+
+<h4>内存效率对比</h4>
+<table>
+<tr><th>指标</th><th>连续分配</th><th>PagedAttention</th><th>优势</th></tr>
+<tr>
+<td>内部碎片</td>
+<td class="highlight-red">avg = max_seq/2 tokens</td>
+<td class="highlight-green">avg = block_size/2 tokens</td>
+<td class="highlight-green">~32x 减少</td>
+</tr>
+<tr>
+<td>外部碎片</td>
+<td class="highlight-red">严重</td>
+<td class="highlight-green">几乎为零</td>
+<td class="highlight-green">消除</td>
+</tr>
+<tr>
+<td>内存利用率</td>
+<td class="highlight-red">20~60%</td>
+<td class="highlight-green">&gt; 95%</td>
+<td class="highlight-green">1.5~4x</td>
+</tr>
+<tr>
+<td>Copy-on-Write</td>
+<td>不支持</td>
+<td class="highlight-green">支持</td>
+<td>beam search 共享</td>
+</tr>
+<tr>
+<td>实现复杂度</td>
+<td class="highlight-green">简单</td>
+<td class="highlight-orange">较复杂</td>
+<td>—</td></tr>
+<tr>
+<td>额外开销</td>
+<td class="highlight-green">无</td>
+<td class="highlight-orange">Block Table (~0.2%)</td>
+<td>—</td></tr>
+</table>
+</div>
+
+<h3>4.3 内存利用率数学证明</h3>
+
+<div class="card card-blue">
+<p><strong>定理：</strong>PagedAttention 的内部碎片上界为 <span class="highlight-blue">1 个 block</span>。</p>
+
+<div class="formula-box">
+碎片上界 = block_size × 2 × L × n<sub>kv</sub> × d × p
+</div>
+
+<p style="margin-top:0.8rem"><strong>证明：</strong></p>
+<div class="code-block">
+<span class="comment">设 block_size = B (tokens per block), 总序列长度 = s</span>
+<span class="comment">已分配的完整 block 数 = ⌊s/B⌋</span>
+<span class="comment">最后一个 block 可能使用的 token 数 = s mod B</span>
+<span class="comment"></span>
+<span class="comment">未使用的空间 = B - (s mod B)    [当 s mod B ≠ 0]</span>
+<span class="comment">最大浪费 = B - 1 tokens</span>
+<span class="comment"></span>
+<span class="comment">以 B=16, s=100 为例:</span>
+<span class="keyword">s/B</span> = 100/16 = <span class="number">6.25</span>
+<span class="keyword">完整 blocks</span> = <span class="number">6</span> (使用 96 tokens)
+<span class="keyword">最后一个 block</span> = 使用 <span class="number">4</span>/16 tokens → 浪费 <span class="number">12</span> tokens
+<span class="keyword">碎片率</span> = 12/100 = <span class="number">12%</span>
+<span class="comment"></span>
+<span class="comment">随着 s 增大，碎片率 → block_size/(2s) → 0</span>
+<span class="comment">连续分配的碎片率 → 不收敛，始终 ≈ max_len/2</span>
+</div>
+</div>
+
+<!-- ========== Section 5 ========== -->
+<h2 id="sec5">5. KV Cache 与 GPU HBM</h2>
+
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>GPU的HBM（高带宽内存）是KV Cache的“豪华公寓”，速度快但租金（成本/容量）极其昂贵。我们的目标就是用最少的公寓面积（HBM），装下最多的服务请求（KV Cache）。</div>
+<div class="warn"><strong>常见误区：</strong>最容易犯的错是只关注GPU计算核心（SM）的数量，而忽略了HBM容量和带宽。在大模型长序列推理中，瓶颈往往是内存容量，导致无法启动更多请求，而非计算速度。</div>
+<div class="deep"><strong>深入探讨：</strong>以NVIDIA A100 80GB为例，模型参数(假设FP16，14GB) + KV Cache (长序列场景下可达30-50GB) 将迅速耗尽HBM。KV Cache的访问模式是“读多写少”（预填充后主要是读），因此对HBM带宽要求极高。优化内存布局以利用HBM的高带宽是关键。</div>
+<div class="ascii"><pre>  GPU HBM (80GB)
+  [========== 模型权重 (14GB) ==========]
+  [======= KV Cache (正在消耗...) =======]
+  [== 其他内存 (激活、系统等) ==]
+  [   空闲空间 (迅速减少)   ]</pre></div>
+<table><tr><th>GPU型号</th><th>HBM容量</th><th>带宽</th><th>典型7B模型最大并发估算</th></tr><tr><td>A100 40GB</td><td>40 GB</td><td>1.5 TB/s</td><td>约5-10并发</td></tr><tr><td>A100 80GB</td><td>80 GB</td><td>2.0 TB/s</td><td>约15-30并发</td></tr><tr><td>H100 80GB</td><td>80 GB</td><td>3.35 TB/s</td><td>约20-40并发 (计算受限)</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<analogy>🔍 通俗类比：GPU 的 HBM（高带宽内存）就像 CPU 的 L1/L2 缓存——容量有限但速度极快。KV Cache 就像不断膨胀的行李，行李舱（HBM）满了就得往货仓（CPU DRAM）转移，而每次转移（PCIe）都很慢。</analogy>
+
+<h3>5.1 GPU 内存规格</h3>
+
+<div class="card card-blue">
+<table>
+<tr>
+<th>GPU</th><th>HBM 容量</th><th>HBM 带宽</th><th>互联</th><th>典型用途</th>
+</tr>
+<tr>
+<td><strong>A100 40GB</strong></td><td>40 GB</td><td>1.6 TB/s</td><td>NVLink 600 GB/s</td><td>7B~13B 推理</td>
+</tr>
+<tr>
+<td><strong>A100 80GB</strong></td><td>80 GB</td><td>2.0 TB/s</td><td>NVLink 600 GB/s</td><td>70B 分片推理</td>
+</tr>
+<tr>
+<td><strong>H100 80GB</strong></td><td>80 GB</td><td>3.35 TB/s</td><td>NVLink 900 GB/s</td><td>70B~110B</td>
+</tr>
+<tr>
+<td><strong>H200</strong></td><td>141 GB</td><td>4.8 TB/s</td><td>NVLink 900 GB/s</td><td>大模型推理</td>
+</tr>
+<tr>
+<td><strong>L40S</strong></td><td>48 GB</td><td>864 GB/s</td><td>PCIe Gen4</td><td>中小模型推理</td>
+</tr>
+<tr>
+<td><strong>RTX 4090</strong></td><td>24 GB</td><td>1.0 TB/s</td><td>PCIe Gen4</td><td>开发/小模型</td>
+</tr>
+</table>
+</div>
+
+<h3>5.2 单 GPU KV Cache 容量计算</h3>
+
+<div class="card card-green">
+<p><strong>可用 KV Cache 内存 = GPU 总内存 - 模型权重 - 激活值 - CUDA 开销 - 框架开销</strong></p>
+
+<table>
+<tr>
+<th>模型</th><th>GPU</th><th>模型权重<br/>(FP16)</th><th>其他开销</th>
+<th>可用于<br/>KV Cache</th><th>Max Seq<br/>(b=1)</th><th>Max Batch<br/>(seq=4K)</th>
+</tr>
+<tr>
+<td>LLaMA-2-7B</td><td>A100-80G</td><td>14 GB</td><td>~6 GB</td>
+<td class="highlight-green">60 GB</td>
+<td class="highlight-blue">120K</td>
+<td class="highlight-blue">30</td>
+</tr>
+<tr>
+<td>LLaMA-2-7B</td><td>A100-40G</td><td>14 GB</td><td>~4 GB</td>
+<td class="highlight-green">22 GB</td>
+<td>44K</td>
+<td>11</td>
+</tr>
+<tr>
+<td>Mistral-7B</td><td>A100-80G</td><td>14.6 GB</td><td>~6 GB</td>
+<td class="highlight-green">59 GB</td>
+<td class="highlight-blue">472K</td>
+<td class="highlight-blue">118</td>
+</tr>
+<tr>
+<td>LLaMA-2-70B</td><td>4×A100-80G</td><td>140 GB</td><td>~20 GB</td>
+<td class="highlight-orange">200 GB</td>
+<td>800K</td>
+<td>200</td>
+</tr>
+<tr>
+<td>Qwen-72B</td><td>4×H100-80G</td><td>144 GB</td><td>~20 GB</td>
+<td class="highlight-orange">196 GB</td>
+<td>784K</td>
+<td>196</td>
+</tr>
+</table>
+
+<div class="note">
+<strong>💡 说明：</strong>Mistral-7B 使用 GQA (8 KV heads) 而非 MHA (32 KV heads)，KV Cache 压缩 4 倍。这就是 Mistral 在相同硬件上能支持更多并发请求的关键原因。
+</div>
+</div>
+
+<h3>5.3 KV Cache 溢出到 CPU/DRAM</h3>
+
+<div class="card card-red">
+<h4>当 HBM 不够用时：CPU Offloading</h4>
+
+<svg class="diagram" viewBox="0 0 700 160" xmlns="http://www.w3.org/2000/svg">
+<rect x="10" y="20" width="200" height="120" rx="8" fill="rgba(88,166,255,0.1)" stroke="#58a6ff"/>
+<text x="110" y="45" fill="#58a6ff" font-size="12" text-anchor="middle" font-weight="600">GPU HBM</text>
+<text x="110" y="65" fill="#e6edf3" font-size="11" text-anchor="middle">模型权重: 14 GB</text>
+<text x="110" y="85" fill="#3fb950" font-size="11" text-anchor="middle">活跃 KV: 20 GB</text>
+<text x="110" y="105" fill="#d29922" font-size="11" text-anchor="middle">剩余: 6 GB</text>
+<text x="110" y="125" fill="#8b949e" font-size="10" text-anchor="middle">总: 40 GB</text>
+<!-- Arrow -->
+<line x1="215" y1="80" x2="335" y2="80" stroke="#f85149" stroke-width="2"/>
+<polygon points="330,75 340,80 330,85" fill="#f85149"/>
+<text x="275" y="70" fill="#f85149" font-size="10" text-anchor="middle">PCIe Gen4</text>
+<text x="275" y="100" fill="#f85149" font-size="10" text-anchor="middle">~32 GB/s</text>
+<!-- CPU -->
+<rect x="340" y="20" width="200" height="120" rx="8" fill="rgba(210,153,34,0.1)" stroke="#d29922"/>
+<text x="440" y="45" fill="#d29922" font-size="12" text-anchor="middle" font-weight="600">CPU DRAM</text>
+<text x="440" y="70" fill="#e6edf3" font-size="11" text-anchor="middle">Swap 区域</text>
+<text x="440" y="90" fill="#f85149" font-size="11" text-anchor="middle">冷 KV Cache</text>
+<text x="440" y="110" fill="#8b949e" font-size="10" text-anchor="middle">延迟: 微秒级 (vs ns)</text>
+<text x="440" y="130" fill="#8b949e" font-size="10" text-anchor="middle">容量: 256GB~2TB</text>
+</svg>
+
+<table>
+<tr><th>传输方式</th><th>带宽</th><th>传输 1 GB 耗时</th><th>影响</th></tr>
+<tr><td>PCIe Gen4 x16</td><td>~32 GB/s</td><td>~31 ms</td><td class="highlight-red">严重延迟</td></tr>
+<tr><td>PCIe Gen5 x16</td><td>~64 GB/s</td><td>~16 ms</td><td class="highlight-orange">明显延迟</td></tr>
+<tr><td>NVLink (A100)</td><td>600 GB/s</td><td>~1.7 ms</td><td class="highlight-orange">可接受</td></tr>
+<tr><td>NVLink (H100)</td><td>900 GB/s</td><td>~1.1 ms</td><td class="highlight-green">较优</td></tr>
+<tr><td>HBM 带宽</td><td>2000~4800 GB/s</td><td>0.2~0.5 ms</td><td class="highlight-green">理想</td></tr>
+</table>
+
+<div class="warning">
+<strong>⚠️ Offloading 代价：</strong>将 KV Cache swap 到 CPU 会导致每个 token 的推理延迟增加数十毫秒。在高 QPS 场景下，这可能导致 10x 以上的吞吐量下降。因此，<strong>尽量让 KV Cache 留在 GPU HBM 中</strong>是第一优先级。
+</div>
+</div>
+
+<!-- ========== Section 6 ========== -->
+<h2 id="sec6">6. Batch Size 与 KV Cache 的权衡</h2>
+
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>Batch Size就像餐厅的“翻台率”。一次接待更多客人(batch size大)能提高GPU利用率，但每桌需要独立的“备忘录”(KV Cache)，会迅速占满厨房空间（HBM内存）。</div>
+<div class="warn"><strong>常见误区：</strong>追求极致的GPU利用率而盲目增大batch size，会导致KV Cache内存溢出，引发“Out of Memory”错误，或者因为内存交换而性能暴跌。需找到平衡点。</div>
+<div class="deep"><strong>深入探讨：</strong>设单个请求KV Cache大小为M_c，总可用KV Cache内存为M_total。则理论最大并发数 `Batch_Max = M_total / M_c`。但实际中需为模型权重、激活等预留空间。最优batch size是通过压测找到的，目标是让GPU计算单元饱和，同时不触发内存交换。</div>
+<div class="ascii"><pre>  内存固定为 M_total
+  Batch Size ↑ -> 每请求可用内存 ↓ -> 最大序列长度 ↓
+  GPU利用率 ↑ (直到某个拐点)
+  找到平衡点： 计算利用率高 且 不爆内存</pre></div>
+<table><tr><th>Batch Size策略</th><th>优点</th><th>缺点</th><th>适用场景</th></tr><tr><td>小Batch</td><td>延迟低，可处理长序列</td><td>GPU利用率低，吞吐量差</td><td>实时聊天，长文档生成</td></tr><tr><td>大Batch</td><td>吞吐量高，GPU利用充分</td><td>延迟高，序列长度受限</td><td>离线批处理，高吞吐服务</td></tr><tr><td>动态Batch</td><td>平衡利用率和延迟</td><td>调度复杂</td><td>生产级在线服务 (vLLM等)</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<analogy>🔍 通俗类比：GPU 就像餐厅的厨房，内存就是操作台的空间。每来一位客人（请求）就要占一块操作台放 KV Cache。客人越多（batch 越大），虽然能同时服务更多人，但操作台也越来越拥挤，最后新客人进不来。</analogy>
+
+<h3>6.1 内存预算方程</h3>
+
+<div class="formula-box">
+M<sub>total</sub> = M<sub>weights</sub> + M<sub>activations</sub> + M<sub>kv_cache</sub> + M<sub>overhead</sub>
+</div>
+
+<div class="card card-orange">
+<p>给定固定 GPU 内存预算 M<sub>gpu</sub>，可用的 KV Cache 内存为：</p>
+<div class="formula-box">
+M<sub>kv_available</sub> = M<sub>gpu</sub> - M<sub>weights</sub> - M<sub>overhead</sub>
+</div>
+<p>最大 batch size 计算：</p>
+<div class="formula-box">
+b<sub>max</sub> = M<sub>kv_available</sub> / (2 × L × n<sub>kv</sub> × s × d × p)
+</div>
+</div>
+
+<h3>6.2 不同场景下的 Batch Size 上限</h3>
+
+<div class="card card-cyan">
+<p><strong>场景：LLaMA-2-7B on A100-80GB，M_kv_available = 60 GB</strong></p>
+<table>
+<tr><th>序列长度</th><th>每请求 KV Cache</th><th>Max Batch Size</th><th>吞吐量潜力</th></tr>
+<tr>
+<td>2K</td><td>1 GB</td><td class="highlight-green"><strong>60</strong></td><td>⬆⬆⬆ 极高</td>
+</tr>
+<tr>
+<td>4K</td><td>2 GB</td><td class="highlight-green"><strong>30</strong></td><td>⬆⬆ 高</td>
+</tr>
+<tr>
+<td>8K</td><td>4 GB</td><td class="highlight-blue"><strong>15</strong></td><td>⬆ 中等</td>
+</tr>
+<tr>
+<td>16K</td><td>8 GB</td><td class="highlight-orange"><strong>7</strong></td><td>→ 一般</td>
+</tr>
+<tr>
+<td>32K</td><td>16 GB</td><td class="highlight-orange"><strong>3</strong></td><td>⬇ 较低</td>
+</tr>
+<tr>
+<td>64K</td><td>32 GB</td><td class="highlight-red"><strong>1</strong></td><td>⬇⬇ 低</td>
+</tr>
+<tr>
+<td>128K</td><td>64 GB</td><td class="highlight-red"><strong>0</strong> (溢出!)</td><td>❌ 不可行</td>
+</tr>
+</table>
+<div class="warning">
+<strong>⚠️ 128K context 在单 A100-80G 上不可行！</strong>需要：(1) 使用 GQA 模型（如 Mistral）减少 KV Cache；(2) 多 GPU 分片；(3) FP8/INT4 量化 KV Cache；(4) KV Cache 压缩技术。
+</div>
+</div>
+
+<h3>6.3 Dynamic Batching 与 KV Cache</h3>
+
+<div class="card card-purple">
+<h4>连续批处理 (Continuous Batching) 的内存动态</h4>
+<svg class="diagram" viewBox="0 0 700 180" xmlns="http://www.w3.org/2000/svg">
+<text x="350" y="18" fill="#e6edf3" font-size="12" text-anchor="middle">GPU Memory 动态变化 (Continuous Batching)</text>
+<!-- Timeline -->
+<line x1="50" y1="155" x2="680" y2="155" stroke="#30363d" stroke-width="2"/>
+<text x="365" y="175" fill="#8b949e" font-size="11" text-anchor="middle">时间 →</text>
+<!-- Model weights (constant) -->
+<rect x="50" y="130" width="630" height="22" rx="3" fill="rgba(88,166,255,0.25)" stroke="#58a6ff"/>
+<text x="365" y="145" fill="#58a6ff" font-size="10" text-anchor="middle">模型权重 (固定 14 GB)</text>
+<!-- KV Cache area (varies) -->
+<rect x="50" y="35" width="120" height="92" rx="3" fill="rgba(63,185,80,0.15)" stroke="#3fb950"/>
+<text x="110" y="55" fill="#3fb950" font-size="9" text-anchor="middle">3 reqs</text>
+<text x="110" y="70" fill="#3fb950" font-size="9" text-anchor="middle">6 GB</text>
+<rect x="175" y="35" width="150" height="92" rx="3" fill="rgba(210,153,34,0.15)" stroke="#d29922"/>
+<text x="250" y="55" fill="#d29922" font-size="9" text-anchor="middle">6 reqs</text>
+<text x="250" y="70" fill="#d29922" font-size="9" text-anchor="middle">15 GB (含 seq 增长)</text>
+<rect x="330" y="35" width="100" height="92" rx="3" fill="rgba(248,81,73,0.15)" stroke="#f85149"/>
+<text x="380" y="55" fill="#f85149" font-size="9" text-anchor="middle">8 reqs</text>
+<text x="380" y="70" fill="#f85149" font-size="9" text-anchor="middle">28 GB</text>
+<rect x="435" y="35" width="120" height="92" rx="3" fill="rgba(210,153,34,0.15)" stroke="#d29922"/>
+<text x="495" y="55" fill="#d29922" font-size="9" text-anchor="middle">4 reqs (完成2个)</text>
+<text x="495" y="70" fill="#d29922" font-size="9" text-anchor="middle">18 GB ↓</text>
+<rect x="560" y="35" width="120" height="92" rx="3" fill="rgba(63,185,80,0.15)" stroke="#3fb950"/>
+<text x="620" y="55" fill="#3fb950" font-size="9" text-anchor="middle">5 reqs (新加入)</text>
+<text x="620" y="70" fill="#3fb950" font-size="9" text-anchor="middle">22 GB ↑</text>
+<!-- Available memory -->
+<rect x="50" y="27" width="630" height="6" rx="2" fill="rgba(188,140,255,0.2)"/>
+<text x="365" y="32" fill="#bc8cff" font-size="8" text-anchor="middle">可用 KV Cache 空间: 60 GB</text>
+</svg>
+
+<p style="color:var(--text-secondary);font-size:0.9rem;margin-top:0.5rem">
+<strong>关键挑战：</strong>Continuous batching 中请求不断加入和退出，KV Cache 内存实时变化。调度器需要在 <strong>接纳新请求</strong> 和 <strong>保留空间给现有请求增长</strong> 之间平衡。PagedAttention 通过 Block 级别的精细管理实现高利用率。
+</p>
+</div>
+
+<!-- ========== Section 7 ========== -->
+<h2 id="sec7">7. Sequence Length 增长的挑战</h2>
+
+
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>处理长文本就像在滚一个越来越大的雪球。雪球（KV Cache）每滚一圈（生成一个token）就变大一圈，你推它（计算注意力）需要的力气（内存和计算）也指数级增加。</div>
+<div class="warn"><strong>常见误区：</strong>最大的陷阱是认为处理10K token只是比处理1K token慢10倍。由于注意力计算的平方复杂度(O(n²))，10K token的计算量可能是1K的100倍，而KV Cache内存是10倍。</div>
+<div class="deep"><strong>深入探讨：</strong>挑战是多维度的：1. **内存线性增长**：KV Cache随序列长度线性增长，极易耗尽HBM。2. **计算平方增长**：注意力计算量与序列长度的平方成正比。3. **数据传输**：生成新token时，需要将整个KV Cache从HBM加载到计算单元，带宽瓶颈凸显。解决方案如FlashAttention、稀疏注意力、滑动窗口等。</div>
+<div class="ascii"><pre>  生成过程:
+  Token 1 -> KV Cache: [K1, V1] -> 注意力: O(1)
+  Token 2 -> KV Cache: [K1, V1, K2, V2] -> 注意力: O(2)
+  ...
+  Token N -> KV Cache: [K1..KN, V1..VN] -> 注意力: O(N)
+  内存: O(N), 计算: O(N²)</pre></div>
+<table><tr><th>序列长度</th><th>KV Cache内存 (Llama-7B, FP16)</th><th>注意力计算复杂度 (相对)</th><th>主要挑战</th></tr><tr><td>2K</td><td>~0.5 GB</td><td>1x</td><td>内存可控</td></tr><tr><td>32K</td><td>~8 GB</td><td>256x</td><td>内存和计算压力剧增</td></tr><tr><td>128K</td><td>~32 GB</td><td>4096x</td><td>超出单卡HBM，需分布式</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<analogy>🔍 通俗类比：KV Cache 的增长就像一个人的记忆负担。每多读一段文字，就要在记忆中增加 Key 和 Value 的笔记。4K 字的笔记还行，但读到 128K 字时，记忆负担增长了 32 倍——大脑（GPU 内存）根本装不下。</analogy>
+
+<h3>7.1 线性增长的数学</h3>
+
+<div class="card card-blue">
+<div class="formula-box">
+KV Cache = O(s) — 关于序列长度 s 的<span class="highlight-blue">线性</span>函数
+</div>
+<p style="margin-top:0.8rem">与其他复杂度对比：</p>
+<table>
+<tr><th>组件</th><th>复杂度</th><th>s=4K→128K 增长</th><th>主导?</th></tr>
+<tr>
+<td>模型权重</td><td>O(1)</td><td>不变</td><td>短序列时 ✓</td>
+</tr>
+<tr>
+<td>KV Cache</td><td class="highlight-orange">O(s)</td><td class="highlight-orange">32x</td><td class="highlight-red">长序列时 ✓✓✓</td>
+</tr>
+<tr>
+<td>Attention 计算</td><td>O(s²)</td><td>1024x</td><td>计算瓶颈（但可优化）</td>
+</tr>
+<tr>
+<td>FFN 计算</td><td>O(s)</td><td>32x</td><td>通常 &lt; KV Cache</td>
+</tr>
+</table>
+<div class="note">
+<strong>💡 关键洞察：</strong>虽然 Attention 计算是 O(s²)，但计算只发生在 decode 瞬间，计算完就丢弃。而 KV Cache 是 O(s) 但<strong>持续驻留</strong>内存。因此在长序列场景下，KV Cache 的内存占用比计算开销更具瓶颈。
+</div>
+</div>
+
+<h3>7.2 长序列的连锁反应</h3>
+
+<div class="card card-red">
+<h4>128K Context 的全方位冲击</h4>
+
+<div class="grid-3">
+<div style="text-align:center">
+<div class="key-metric" style="color:var(--accent-red)">32×</div>
+<div class="key-metric-label">KV Cache 大小增长<br/>(4K → 128K)</div>
+</div>
+<div style="text-align:center">
+<div class="key-metric" style="color:var(--accent-orange)">1/32</div>
+<div class="key-metric-label">Batch Size 下降<br/>(128K vs 4K)</div>
+</div>
+<div style="text-align:center">
+<div class="key-metric" style="color:var(--accent-purple)">32×</div>
+<div class="key-metric-label">每 token 延迟增加<br/>(Attention 遍历)</div>
+</div>
+</div>
+
+<table style="margin-top:1rem">
+<tr><th>影响维度</th><th>4K Context</th><th>128K Context</th><th>差距</th></tr>
+<tr>
+<td>单请求 KV Cache (7B)</td><td>2 GB</td><td>64 GB</td><td class="highlight-red">32x</td>
+</tr>
+<tr>
+<td>可并发请求数 (80GB GPU)</td><td>30</td><td>0 (放不下)</td><td class="highlight-red">→ 0</td>
+</tr>
+<tr>
+<td>每请求推理延迟</td><td>~50 ms</td><td>~1600 ms</td><td class="highlight-red">32x</td>
+</tr>
+<tr>
+<td>GPU 利用率</td><td>高</td><td>低 (单请求)</td><td class="highlight-orange">大幅下降</td>
+</tr>
+<tr>
+<td>成本/token</td><td>$0.0001</td><td>$0.003</td><td class="highlight-red">30x</td>
+</tr>
+</table>
+</div>
+
+<h3>7.3 生产环境内存预算规划</h3>
+
+<div class="card card-green">
+<h4>内存预算模板</h4>
+<div class="code-block">
+<span class="comment"># 生产环境 KV Cache 内存规划脚本</span>
+
+<span class="keyword">def</span> <span class="type">plan_kv_cache_memory</span>(
+    gpu_memory_gb,       <span class="comment"># GPU 总内存 (GB)</span>
+    model_params_b,      <span class="comment"># 模型参数量 (B)</span>
+    num_layers,          <span class="comment"># Transformer 层数</span>
+    num_kv_heads,        <span class="comment"># KV Head 数</span>
+    head_dim,            <span class="comment"># Head 维度</span>
+    precision=<span class="string">"fp16"</span>,   <span class="comment"># 数据精度</span>
+    target_qps=<span class="number">10</span>,       <span class="comment"># 目标 QPS</span>
+    avg_seq_len=<span class="number">4096</span>,    <span class="comment"># 平均序列长度</span>
+    max_seq_len=<span class="number">32768</span>,   <span class="comment"># 最大序列长度</span>
+):
+    bytes_per_elem = {<span class="string">"fp16"</span>: <span class="number">2</span>, <span class="string">"fp8"</span>: <span class="number">1</span>, <span class="string">"int4"</span>: <span class="number">0.5</span>}[precision]
+    
+    <span class="comment"># Step 1: 模型权重占用</span>
+    model_mem = model_params_b * bytes_per_elem  <span class="comment"># GB</span>
+    
+    <span class="comment"># Step 2: 框架开销 (CUDA context, activations 等)</span>
+    overhead = max(<span class="number">2</span>, model_mem * <span class="number">0.15</span>)  <span class="comment"># 至少 2 GB</span>
+    
+    <span class="comment"># Step 3: 可用 KV Cache 内存</span>
+    available = gpu_memory_gb - model_mem - overhead
+    
+    <span class="comment"># Step 4: 每 token KV Cache 开销</span>
+    kv_per_token = <span class="number">2</span> * num_layers * num_kv_heads * head_dim * bytes_per_elem
+    kv_per_token_gb = kv_per_token / (<span class="number">1024</span>**<span class="number">3</span>)
+    
+    <span class="comment"># Step 5: 并发请求估算</span>
+    <span class="comment"># 请求在系统中平均驻留时间 = avg_seq_len / tokens_per_sec</span>
+    concurrent_reqs = target_qps * avg_seq_len / <span class="number">50</span>  <span class="comment"># 假设 50 tok/s</span>
+    
+    <span class="comment"># Step 6: 每请求可分配内存</span>
+    per_request = available / concurrent_reqs
+    
+    <span class="comment"># Step 7: 可支持的平均序列长度</span>
+    max_supported_len = per_request / kv_per_token_gb
+    
+    <span class="keyword">return</span> {
+        <span class="string">"model_mem_gb"</span>: model_mem,
+        <span class="string">"available_kv_gb"</span>: available,
+        <span class="string">"kv_per_token_mb"</span>: kv_per_token_gb * <span class="number">1024</span>,
+        <span class="string">"concurrent_reqs"</span>: concurrent_reqs,
+        <span class="string">"max_seq_len"</span>: max_supported_len,
+    }
+</div>
+</div>
+
+<h3>7.4 长序列优化策略总结</h3>
+
+<div class="card card-purple">
+<table>
+<tr><th>策略</th><th>原理</th><th>节省比例</th><th>代价</th></tr>
+<tr>
+<td><strong>GQA / MQA</strong></td><td>减少 KV Head 数</td><td>4~8x</td><td>轻微质量下降</td>
+</tr>
+<tr>
+<td><strong>MLA (Multi-head Latent Attention)</strong></td><td>低秩 KV 压缩</td><td>10~20x</td><td>额外编解码计算</td>
+</tr>
+<tr>
+<td><strong>FP8/INT8 KV Cache</strong></td><td>降低精度</td><td>2x</td><td>轻微精度损失</td>
+</tr>
+<tr>
+<td><strong>KV Cache 量化 (INT4)</strong></td><td>激进量化</td><td>4x</td><td>需要校准</td>
+</tr>
+<tr>
+<td><strong>PagedAttention</strong></td><td>消除碎片</td><td>1.5~4x</td><td>Block Table 开销</td>
+</tr>
+<tr>
+<td><strong>KV Cache 驱逐</strong></td><td>丢弃不重要的 KV</td><td>2~10x</td><td>信息损失</td>
+</tr>
+<tr>
+<td><strong>Sliding Window</strong></td><td>只保留最近 N tokens</td><td>N/s ×</td><td>丢失长距离信息</td>
+</tr>
+<tr>
+<td><strong>KV Cache 压缩 (H2O, StreamingLLM)</strong></td><td>选择性保留</td><td>4~16x</td><td>需要重要性评分</td>
+</tr>
+<tr>
+<td><strong>Tensor Parallelism</strong></td><td>多 GPU 分摊</td><td>N_gpu ×</td><td>通信开销</td>
+</tr>
+</table>
+</div>
+
+<!-- Summary -->
+<h2 style="margin-top:3rem">📊 核心数据速查表</h2>
+<h3>📊 核心数据速查表</h3>ip"><strong>通俗类比：</strong>这张表就像你厨房里的“万能调料换算表”。告诉你不同“食材”（模型）在不同“烹饪方式”（精度、长度）下，大概需要多少“调料盒”（内存）。</div>
+<div class="warn"><strong>常见误区：</strong>直接用表中数据做精确规划是危险的。实际部署时，必须预留至少20%-30%的额外内存用于系统开销、激活值等。数据仅作快速估算和对比参考。</div>
+<div class="deep"><strong>深入探讨：</strong>表格数据基于典型架构估算。实际值受以下因素影响：1. **分组查询注意力(GQA)**：可大幅减少KV头数(H_kv)。2. **量化技术**：INT8/INT4量化可将`bytes_per_element`减半或更多。3. **框架实现**：如vLLM的PagedAttention通过优化碎片，实际可用内存比理论值高。</div>
+<div class="ascii"><pre>  如何阅读此表:
+  1. 找到你的模型 (如 Llama-2-7B)
+  2. 选择精度 (FP16/INT8)
+  3. 乘以你的平均序列长度
+  4. 加上模型参数内存
+  5. 加上20%缓冲 -> 得到最小GPU内存需求</pre></div>
+<table><tr><th>模型 (参数规模)</th><th>KV头数(H_kv)</th><th>FP16 每token内存</th><th>INT8 每token内存</th><th>32K序列总KV Cache (FP16)</th></tr><tr><td>Llama-2-7B (7B)</td><td>32</td><td>512 B</td><td>256 B</td><td>~16 GB</td></tr><tr><td>Mistral-7B (7B)</td><td>8 (GQA)</td><td>128 B</td><td>64 B</td><td>~4 GB</td></tr><tr><td>Llama-2-70B (70B)</td><td>8 (GQA)</td><td>512 B</td><td>256 B</td><td>~16 GB</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="card card-blue">
+<table>
+<tr>
+<th>模型</th><th>FP16 权重</th><th>KV/token</th>
+<th>4K</th><th>32K</th><th>128K</th><th>1M</th>
+</tr>
+<tr>
+<td>LLaMA-2-7B</td><td>14 GB</td><td>0.5 MB</td>
+<td>2 GB</td><td>16 GB</td><td>64 GB</td><td>500 GB</td>
+</tr>
+<tr>
+<td>Mistral-7B</td><td>14.6 GB</td><td>0.125 MB</td>
+<td>0.5 GB</td><td>4 GB</td><td>16 GB</td><td>125 GB</td>
+</tr>
+<tr>
+<td>LLaMA-2-70B</td><td>140 GB</td><td>0.3125 MB</td>
+<td>1.25 GB</td><td>2.5 GB</td><td>10 GB</td><td>40 GB</td>
+</tr>
+<tr>
+<td>DeepSeek-V3</td><td>671 GB</td><td>~0.075 MB</td>
+<td>0.3 GB</td><td>2.3 GB</td><td>9.2 GB</td><td>71.5 GB</td>
+</tr>
+</table>
+</div>
+
+<div class="card card-orange">
+<h3>🎯 本模块核心要点</h3>
+<ol style="padding-left:1.5rem">
+<li>KV Cache 大小 = <strong>2 × L × n_kv × s × d × p</strong>，对序列长度 s 线性增长</li>
+<li>小模型（7B）在长序列下 KV Cache <strong>可超过模型权重</strong>（128K: 64GB vs 14GB）</li>
+<li>GQA/MLA 通过减少 KV heads 可实现 <strong>4~20x</strong> 的 KV Cache 压缩</li>
+<li>PagedAttention 将碎片率从 25~50% 降至 <strong>&lt; 5%</strong></li>
+<li>GPU HBM 是硬约束——单 A100-80G 最多支持 7B 模型 <strong>~120K</strong> 上下文</li>
+<li>KV Cache 溢出到 CPU 会导致 <strong>10x+</strong> 延迟退化</li>
+<li>Batch size 与序列长度的乘积受限于可用内存——<strong>两者此消彼长</strong></li>
+</ol>
+</div>
+
+<footer>
+Module 02: KV Cache 内存模型与开销分析 — KV Cache System Deep Dive Series<br/>
+<span style="color:var(--accent-blue)">●</span> 上一篇: <a href="01-KV-Cache基础原理与数学本质.html" style="color:var(--accent-blue)">Module 01</a>
+&nbsp;|&nbsp;
+<span style="color:var(--accent-blue)">●</span> 下一篇: <a href="03-PagedAttention与块管理.html" style="color:var(--accent-blue)">Module 03</a>
+</footer>
+
+</div>
+
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+  <li>请用自己的话解释<strong>KV Cache 内存布局</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>内存开销精确计算</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>内存碎片化问题</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>连续内存分配 vs 分页</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>KV Cache 与 GPU HBM</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+KV Cache 内存布局的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习KV Cache 内存布局建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GLM | GLM 学习指南</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0d1117;--surface:#161b22;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.7;padding:0 1rem;max-width:900px;margin:0 auto}
+nav.top{display:flex;justify-content:space-between;align-items:center;padding:1rem 0;border-bottom:1px solid var(--border);margin-bottom:2rem;flex-wrap:wrap;gap:.5rem}
+nav.top a{color:var(--accent);text-decoration:none;font-size:.9rem}
+nav.top a:hover{text-decoration:underline}
+h1{font-size:1.8rem;color:var(--accent);margin:1.5rem 0 1rem}
+h2{font-size:1.3rem;color:var(--green);margin:2rem 0 .8rem;padding-bottom:.3rem;border-bottom:1px solid var(--border)}
+h3{font-size:1.1rem;color:var(--orange);margin:1.2rem 0 .5rem}
+p,li{margin-bottom:.5rem;color:var(--text)}
+ul,ol{padding-left:1.5rem;margin-bottom:1rem}
+li{margin-bottom:.4rem}
+code{background:var(--surface);padding:.15rem .4rem;border-radius:4px;font-size:.88rem;color:var(--purple);border:1px solid var(--border)}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:1rem;overflow-x:auto;margin:1rem 0;font-size:.85rem;line-height:1.5}
+pre code{background:none;padding:0;border:none;color:var(--text)}
+table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9rem}
+th,td{border:1px solid var(--border);padding:.5rem .8rem;text-align:left}
+th{background:var(--surface);color:var(--accent)}
+tr:nth-child(even){background:var(--surface)}
+.highlight{background:var(--surface);border-left:3px solid var(--accent);padding:.8rem 1rem;margin:1rem 0;border-radius:0 6px 6px 0}
+.tag{display:inline-block;padding:.1rem .5rem;border-radius:12px;font-size:.75rem;margin-right:.3rem}
+.tag-blue{background:rgba(88,166,255,.15);color:var(--accent)}
+.tag-green{background:rgba(63,185,80,.15);color:var(--green)}
+.tag-orange{background:rgba(210,153,34,.15);color:var(--orange)}
+.tag-red{background:rgba(248,81,73,.15);color:var(--red)}
+.formula{background:var(--surface);border:1px solid var(--border);padding:.6rem 1rem;border-radius:6px;margin:.5rem 0;font-family:'Courier New',monospace;text-align:center;color:var(--green)}
+footer{margin-top:3rem;padding:1.5rem 0;border-top:1px solid var(--border);text-align:center;color:var(--text2);font-size:.85rem}
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+<nav class="top">
+<a href="04-逐代架构详解.html">← 04 逐代架构详解</a>
+<a href="index.html">📚 目录</a>
+<a href="06-预训练策略与数据工程.html">06 预训练策略与数据工程 →</a>
+</nav>
+
+<h1>GLM</h1>
+<p>GLM系列在注意力机制上进行了多项独特创新，从自回归填空掩码到二维位置编码，再到GLM-5引入的稀疏注意力机制，形成了差异化的技术路线。</p>
+
+<h2>5.1 自回归填空注意力掩码</h2>
+<p>GLM在5.1 自回归填空注意力掩码方面的优化是其技术路线的核心之一。标准Softmax注意力的计算复杂度为O(n²d)，这在长序列场景下成为主要瓶颈。GLM通过引入稀疏注意力模式、分组查询注意力(GQA)等技术，在保持注意力质量的同时将计算复杂度降低到O(n·d)或O(n·√n)。这些优化的数学基础是注意力矩阵的低秩特性。</p>
+
+
+<h3>GLM的混合注意力掩码矩阵构造</h3>
+<p>GLM的自回归填空掩码矩阵是一个精心设计的分块结构。对于长度为N的输入序列，前M个token为Part A（上下文），后N-M个token为Part B（待生成的填空内容）。Part A内部采用全连接的双向注意力（M×M全1矩阵），Part B到Part A采用全连接注意力（(N-M)×M全1矩阵），Part B内部采用下三角因果掩码。这种设计的数学表达为：mask[i][j] = 1 当且仅当 (i∈A) 或 (j∈A) 或 (i≥j且i,j∈B)。在GLM-130B的实现中，掩码矩阵在预训练阶段动态生成——每个训练样本的span数量（1-10个）、span长度（2-128个token）和span位置都是随机采样的，确保模型学习到多种填空模式的泛化能力。</p>
+<p>从工程实现角度看，这种混合掩码可以通过修改标准Causal Mask的单行代码实现——只需将Part A对应的列设为全可见即可。GLM-130B在96个A100节点上的训练中，掩码生成的计算开销不到总训练时间的0.1%，但由于每个样本的掩码模式不同，无法使用FlashAttention的固定掩码优化，因此实际训练速度比纯因果模型慢约10-15%。这种"以训练速度换模型能力"的权衡在GLM-130B上被证明是值得的——填空任务在理解类基准上带来了3-5%的增益。</p>
+<div class="tip"><strong>通俗类比：</strong>自回归填空就像"完形填空"考试——给定一段文字，挖掉几个空让模型填。但GLM的巧妙之处在于：它用注意力掩码控制模型能"看到"哪些位置。对于被挖掉的token，模型只能看到它左边的上下文（自回归生成）；对于未挖掉的token，模型可以看到双向信息。这种"混合视野"让GLM同时具备理解和生成能力。</div>
+<div class="warn"><strong>常见误区：</strong>GLM在5.1 自回归填空注意力方面的一个误区是以为Agent就是让LLM循环调工具。真正的Agent需要可靠的规划、错误恢复和状态管理。GLM的Agent设计采用有限状态机避免无限循环。</div>
+<div class="deep"><strong>深入探讨：</strong>GLM在5.1 自回归填空注意力方面的训练稳定性保障涉及梯度裁剪、学习率warmup和z-loss正则化。从数学角度看，训练稳定性本质是优化曲面上的病态条件问题。GLM通过多种技术组合确保训练过程的平稳收敛。</div>
+<div class="ascii"><pre>Transformer 注意力计算
+输入 X ──┬──▶ Wq ──▶ Q ──┐
+          ├──▶ Wk ──▶ K ──┼──▶ Attn = softmax(QK^T/√d)V
+          └──▶ Wv ──▶ V ──┘
+                              │
+                  ┌───────────┼───────────┐
+                  ▼           ▼           ▼
+            Self-Attn    Cross-Attn   Multi-Head
+                  │           │           │
+                  └───────────┼───────────┘
+                              ▼
+                        Output Projection</pre></div>
+<table><tr><th>注意力变体</th><th>复杂度</th><th>适用场景</th><th>代表模型</th></tr>
+<tr><td>标准自注意力</td><td>O(n²d)</td><td>通用</td><td>GPT, LLaMA</td></tr>
+<tr><td>FlashAttention</td><td>O(n²d) IO减少</td><td>长序列</td><td>大多数现代模型</td></tr>
+<tr><td>线性注意力</td><td>O(nd²)</td><td>超长序列</td><td>Linear Transformer</td></tr>
+<tr><td>GQA/MQA</td><td>减少KV头数</td><td>推理加速</td><td>LLaMA-2, Mistral</td></tr></table>
+
+<p>GLM的核心创新之一是<strong>Autoregressive Blank Infilling</strong>，这是一种将自回归生成与填空任务统一的注意力掩码设计。</p>
+
+<div class="highlight">
+<strong>核心思想：</strong>在输入序列中随机挖去若干span，模型需要同时理解上下文（双向注意力）并自回归地生成被挖去的部分（单向注意力）。
+</div>
+
+<h3>掩码矩阵设计</h3>
+<p>注意力掩码由两个部分组成：</p>
+<ul>
+<li><span class="tag tag-blue">Part A</span> 上下文部分：采用双向注意力（类似BERT），所有token互相可见</li>
+<li><span class="tag tag-green">Part B</span> 生成部分：采用自回归注意力，每个token只能看到自己之前的token和所有Part A的token</li>
+</ul>
+
+<div class="formula">
+Attention Mask = [A双向; B单向→A双向] + 三角因果掩码(仅B部分)</div>
+
+<pre><code># 伪代码示意
+def glm_attention_mask(seq_len, part_a_len, part_b_len):
+    mask = zeros(seq_len, seq_len)
+    # Part A: 双向注意力
+    mask[:part_a_len, :part_a_len] = 1
+    # Part B → Part A: B可以看A
+    mask[part_a_len:, :part_a_len] = 1
+    # Part B内部: 因果掩码
+    for i in range(part_b_len):
+        mask[part_a_len+i, part_a_len:part_a_len+i+1] = 1
+    return mask</code></pre>
+
+<h2>5.2 二维位置编码 (2D Position Encoding)</h2><p>GLM在5.1 自回归填空注意力掩码方面的技术实现经历了从概念验证到工程落地的完整过程。在概念验证阶段，团队通过小规模实验验证了核心技术假设的可行性；在工程优化阶段，通过系统性的性能分析和针对性调优，将各项指标提升到生产级水平；在规模化部署阶段，通过完善的监控告警和自动扩缩容机制，保障了服务的稳定性和可靠性。</p>
+
+
+<div class="tip"><strong>通俗类比：</strong>2D位置编码就像给棋盘上的棋子定位——不能只用一个数字（如"第15个格子"），而要用两个坐标（如"第3行第5列"）。GLM处理文本填空时，被挖掉的token需要知道两件事：它在原文中的位置（position 1）和它在填空序列中的位置（position 2）。2D位置编码让模型同时掌握这两种位置信息。</div>
+<div class="warn"><strong>常见误区：</strong>关于GLM的5.1 自回归填空注意力，不要以为LoRA能完全替代全量微调。LoRA在95%任务接近全量微调，但改变行为模式时全量更好。GLM根据任务复杂度选择。</div>
+<div clas<div class="deep"><strong>深入探讨：</strong>GLM在5.1 自回归填空注意力方面的RLHF训练核心是Bradley-Terry偏好模型：P(y_w≻y_l)=σ(r(y_w)-r(y_l))。DPO进一步简化——直接从偏好数据优化策略，无需显式奖励模型。GLM在两种方法上都有深入实践。</div>ss="ascii"><pre>Transformer 注意力计算
+输入 X ──┬──▶ Wq ──▶ Q ──┐
+          ├──▶ Wk ──▶ K ──┼──▶ Attn = softmax(QK^T/√d)V
+          └──▶ Wv ──▶ V ──┘
+                              │
+                  ┌───────────┼───────────┐
+                  ▼           ▼           ▼
+            Self-Attn    Cross-Attn   Multi-Head
+                  │           │           │
+                  └───────────┼───────────┘
+                              ▼
+                        Output Projection</pre></div>
+<table><tr><th>注意力变体</th><th>复杂度</th><th>适用场景</th><th>代表模型</th></tr>
+<tr><td>标准自注意力</td><td>O(n²d)</td><td>通用</td><td>GPT, LLaMA</td></tr>
+<tr><td>FlashAttention</td><td>O(n²d) IO减少</td><td>长序列</td><td>大多数现代模型</td></tr>
+<tr><td>线性注意力</td><td>O(nd²)</td><td>超长序列</td><td>Linear Transformer</td></tr>
+<tr><td>GQA/MQA</td><td>减少KV头数</td><td>推理加速</td><td>LLaMA-2, Mistral</td></tr></table>
+
+<p>为了区分Part A和Part B中的位置信息，GLM引入了<strong>二维位置编码</strong>：</p>
+<ul>
+<li><strong>第一维 (token position)</strong>：token在原始输入中的绝对位置</li>
+<li><strong>第二维 (blank position)</strong>：对于Part B中的token，记录其所属blank span的起始位置</li>
+</ul>
+<p>两个位置编码通过可学习的投影矩阵相加：</p>
+<div class="formula">h_i = TokenEmbed(x_i) + PosEnc_1(pos_i) + PosEnc_2(blank_id_i)</div>
+
+<div class="highlight">
+<strong>为什么需要2D？</strong> 如果只用1D位置编码，Part B中不同blank span的相同相对位置会产生混淆。2D编码让模型能区分"第1个blank的第2个token"和"第2个blank的第2个token"。
+</div>
+
+<h2>5.3 GLM-5: DSA 稀疏注意力机制</h2>
+<p>GLM在5.3 GLM-5: DSA 稀疏注意力机制方面的优化是其技术路线的核心之一。标准Softmax注意力的计算复杂度为O(n²d)，这在长序列场景下成为主要瓶颈。GLM通过引入稀疏注意力模式、分组查询注意力(GQA)等技术，在保持注意力质量的同时将计算复杂度降低到O(n·d)或O(n·√n)。这些优化的数学基础是注意力矩阵的低秩特性。</p>
+
+
+<h3>DSA的三阶段注意力计算流程</h3>
+<p>DSA（DeepSeek Sparse Attention）的核心计算流程分为三个串联阶段：第一阶段是"局部窗口注意力"，每个token与其前后各w/2个邻近token（w=4096）执行完整的QK^T注意力计算，捕获近距离的语法和语义依赖，复杂度为O(n×w)；第二阶段是"全局KV压缩"，将整个序列划分为若干固定大小的块（通常256个token为一块），对每块的K和V进行平均池化压缩为一个代表性的KV对，然后每个query与所有压缩KV对计算注意力分数，快速获取全局信息摘要，复杂度为O(n×c)其中c为块数；第三阶段是"动态Top-k选择"，根据第二阶段的全局注意力分数，为每个query选择得分最高的k个块（通常k=8-16），对这些块内的原始KV执行精确的全注意力计算，捕获全局范围内的关键信息，复杂度为O(n×k×block_size)。</p>
+<p>三阶段的总复杂度为O(n×(w + c + k×block_size))，当n=128K、w=4096、c=512、k=16、block_size=256时，总复杂度约为O(n×12288)，相比标准注意力的O(n²)=O(n×131072)降低了约10倍。GLM-5在128K上下文的推理中，DSA相比标准注意力将延迟从约1200ms降低到约280ms（Prefill阶段），同时在LongBench基准上的准确率损失不超过1.2%。</p>
+<div class="tip"><strong>通俗类比：</strong>DSA（Dynamic Sparse Attention）就像图书馆的"索引系统"——你不会逐页翻阅整本书找信息，而是先查目录（稀疏注意力找到关键位置），再精读相关章节（全注意力处理关键区域）。DSA让模型在处理超长文本时，先用稀疏模式快速扫描，找到重要区域后再用全注意力深入分析。</div>
+<div class="warn"><strong>常见误区：</strong>学习GLM的5.1 自回归填空注意力技术时，不要以为并行越多越快。张量并行每层需要AllReduce同步，流水线并行有气泡。GLM的经验是：单层计算时间应至少是通信时间的5倍才能保证80%效率。</div>
+<div class="deep"><div class="deep"><strong>深入探讨：</strong>GLM在5.1 自回归填空注意力方面的推理优化遵循FlashAttention的IO优化原理。通过分块计算将HBM访问从O(n²)降到理论下界。GLM在A100上实测2-4倍加速，达到理论FLOPS的50-70%。</div>"><pre>Transformer 注意力计算
+输入 X ──┬──▶ Wq ──▶ Q ──┐
+          ├──▶ Wk ──▶ K ──┼──▶ Attn = softmax(QK^T/√d)V
+          └──▶ Wv ──▶ V ──┘
+                              │
+                  ┌───────────┼───────────┐
+                  ▼           ▼           ▼
+            Self-Attn    Cross-Attn   Multi-Head
+                  │           │           │
+                  └───────────┼───────────┘
+                              ▼
+                        Output Projection</pre></div>
+<table><tr><th>注意力变体</th><th>复杂度</th><th>适用场景</th><th>代表模型</th></tr>
+<tr><td>标准自注意力</td><td>O(n²d)</td><td>通用</td><td>GPT, LLaMA</td></tr>
+<tr><td>FlashAttention</td><td>O(n²d) IO减少</td><td>长序列</td><td>大多数现代模型</td></tr>
+<tr><td>线性注意力</td><td>O(nd²)</td><td>超长序列</td><td>Linear Transformer</td></tr>
+<tr><td>GQA/MQA</td><td>减少KV头数</td><td>推理加速</td><td>LLaMA-2, Mistral</td></tr></table>
+
+<p>GLM-5采用了智谱自研的<strong>DSA (DeepSeek Sparse Attention)</strong>机制，在长序列场景下显著降低计算复杂度：</p>
+<ul>
+<li><strong>局部窗口注意力</strong>：每个token关注固定窗口内的邻近token</li>
+<li><strong>全局稀疏注意力</strong>：通过压缩的KV表示捕获全局信息</li>
+<li><strong>动态稀疏选择</strong>：根据query动态选择最相关的top-k key进行精细注意力计算</li>
+</ul>
+
+<table>
+<tr><th>组件</th><th>功能</th><th>复杂度</th></tr>
+<tr><td>局部窗口</td><td>捕获近距离依赖</td><td>O(n × w)</td></tr>
+<tr><td>全局压缩</td><td>压缩KV捕获全局摘要</td><td>O(n × c)</td></tr>
+<tr><td>动态选择</td><td>Top-k精细注意力</td><td>O(n × k)</td></tr>
+</table>
+<p>总复杂度：<code>O(n × (w + c + k))</code>，远低于标准注意力的 <code>O(n²)</code></p>
+
+<h2>5.4 GQA 在 GLM-4/5 中的应用</h2><p>GLM的模型已广泛应用于多个领域：智能客服（7×24小时自动应答）、内容创作（文章、代码、翻译）、教育辅导（个性化学习助手）、数据分析（自然语言查询数据库）。每个应用场景对模型能力的要求不同，需要针对性的优化和定制。</p>
+<p>将大模型应用到实际场景的关键是工程化——将模型能力封装为标准化的API服务，提供稳定的SLA保障、合理的成本控制和灵活的定制选项。GLM的API平台提供了完整的开发工具链，从模型调用到结果处理，降低了AI应用的开发门槛。</p>
+
+<div class="tip"><strong>通俗类比：</strong>GQA（Grouped Query Attention）就像"团队协作"——传统MHA是每个人（注意力头）都有自己的秘书（KV头），GQA是几个团队共享一个秘书。比如8个Q头共享2个KV头，秘书的工作量减少了75%，但团队成员可能偶尔会"抢"同一个秘书的时间。这种折中在推理速度和模型质量之间取得了很好的平衡。</div>
+<div class="warn"><strong>常见误区：</strong>GLM在5.1 自回归填空注意力方面的误区是以为看到很多技术就都要学。实际上大部分技术互补非互斥。GLM建议先搞懂核心概念，其他用到再学。</div>
+<div class="deep"><strong>深<div class="deep"><strong>深入探讨：</strong>从技术经济学角度分析，GLM的投入产出比取决于三个因素：技术成熟度、业务价值和团队能力。GLM在技术选型时采用"技术就绪度"(TRL)评估框架——只有TRL≥6的技术才会进入生产系统。</div>ansformer 注意力计算
+输入 X ──┬──▶ Wq ──▶ Q ──┐
+          ├──▶ Wk ──▶ K ──┼──▶ Attn = softmax(QK^T/√d)V
+          └──▶ Wv ──▶ V ──┘
+                              │
+                  ┌───────────┼───────────┐
+                  ▼           ▼           ▼
+            Self-Attn    Cross-Attn   Multi-Head
+                  │           │           │
+                  └───────────┼───────────┘
+                              ▼
+                        Output Projection</pre></div>
+<table><tr><th>注意力变体</th><th>复杂度</th><th>适用场景</th><th>代表模型</th></tr>
+<tr><td>标准自注意力</td><td>O(n²d)</td><td>通用</td><td>GPT, LLaMA</td></tr>
+<tr><td>FlashAttention</td><td>O(n²d) IO减少</td><td>长序列</td><td>大多数现代模型</td></tr>
+<tr><td>线性注意力</td><td>O(nd²)</td><td>超长序列</td><td>Linear Transformer</td></tr>
+<tr><td>GQA/MQA</td><td>减少KV头数</td><td>推理加速</td><td>LLaMA-2, Mistral</td></tr></table>
+
+<p><strong>Grouped Query Attention (GQA)</strong> 在GLM-4和GLM-5中被广泛采用：</p>
+<ul>
+<li>将Query head分组，每组共享一组KV head</li>
+<li>相比MHA减少KV Cache内存，相比MQA保持更好的表达能力</li>
+<li>GLM-4采用8组KV head配合64个Q head的设计</li>
+</ul>
+
+<h2>5.5 KV Cache 优化策略</h2>
+<p>GLM在5.5 KV Cache 优化策略方面的优化是其技术路线的核心之一。标准Softmax注意力的计算复杂度为O(n²d)，这在长序列场景下成为主要瓶颈。GLM通过引入稀疏注意力模式、分组查询注意力(GQA)等技术，在保持注意力质量的同时将计算复杂度降低到O(n·d)或O(n·√n)。这些优化的数学基础是注意力矩阵的低秩特性。</p>
+
+<h3>5 KV Cache 优化策略的对比分析与选型建议</h3>
+<p>5.5 KV Cache 优化策略的训练流程通常分为三个阶段：预训练(Pre-training)在大规模无标注语料上学习语言表示，微调(Fine-tuning)在任务特定数据上适配下游任务，对齐(Alignment)通过人类偏好反馈优化输出质量。每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。</p>
+
+
+
+<div class="tip"><strong>通俗类比：</strong>KV Cache就像"记笔记"——每次生成新token时，不需要重新计算之前所有token的Key和Value，而是把它们缓存起来复用。就像考试时把公式写在草稿纸上，后面直接查就行，不用每次重新推导。KV Cache是LLM推理加速的基础，没有它，生成100个token需要重复计算99次之前的注意力。</div>
+<div class="warn"><strong>常见误区：</strong>学习GLM的5.1 自回归填空注意力时，不要认为KV Cache只是缓存删了也行。没有KV Cache每生成token都要重算所有K/V，速度下降100倍以上。GLM的推理引擎将KV Cache视为必需品。</div>
+<div class="deep"><strong>深入探讨：</str<div class="deep"><strong>深入探讨：</strong>GLM在5.1 自回归填空注意力方面的技术深度体现在对KV Cache显存管理的优化上。KV Cache公式为2×n_layers×n_heads×d_head×seq_len×batch×bytes。以7B模型4K序列为例约1.4GB。GLM通过分页管理和前缀共享降低显存占用。</div> 注意力计算
+输入 X ──┬──▶ Wq ──▶ Q ──┐
+          ├──▶ Wk ──▶ K ──┼──▶ Attn = softmax(QK^T/√d)V
+          └──▶ Wv ──▶ V ──┘
+                              │
+                  ┌───────────┼───────────┐
+                  ▼           ▼           ▼
+            Self-Attn    Cross-Attn   Multi-Head
+                  │           │           │
+                  └───────────┼───────────┘
+                              ▼
+                        Output Projection</pre></div>
+<table><tr><th>注意力变体</th><th>复杂度</th><th>适用场景</th><th>代表模型</th></tr>
+<tr><td>标准自注意力</td><td>O(n²d)</td><td>通用</td><td>GPT, LLaMA</td></tr>
+<tr><td>FlashAttention</td><td>O(n²d) IO减少</td><td>长序列</td><td>大多数现代模型</td></tr>
+<tr><td>线性注意力</td><td>O(nd²)</td><td>超长序列</td><td>Linear Transformer</td></tr>
+<tr><td>GQA/MQA</td><td>减少KV头数</td><td>推理加速</td><td>LLaMA-2, Mistral</td></tr></table>
+
+<p>推理阶段的KV Cache优化是GLM系列的重要工程创新：</p>
+<ul>
+<li><strong>PagedAttention</strong>：类似vLLM的分页KV管理，减少内存碎片</li>
+<li><strong>KV Cache量化</strong>：将KV cache从FP16量化到INT8/INT4</li>
+<li><strong>Prefix Caching</strong>：对共享前缀的请求复用KV cache</li>
+<li><strong>动态批处理</strong>：支持continuous batching提高吞吐</li>
+</ul>
+
+<h2>5.6 注意力机制演进路线</h2><p>GLM在5.6 注意力机制演进路线上的创新主要体现在计算效率和建模能力的平衡上。传统Softmax注意力的O(N²)复杂度限制了长序列处理能力，而GLM通过引入稀疏注意力模式、线性近似或Flash Attention等技术，在保持注意力精度的同时显著降低了计算成本。这些优化使得模型能够处理更长的上下文窗口，同时保持较低的推理延迟。</p>
+<p>注意力机制的设计直接影响模型的长距离依赖建模能力。GLM的方案通过优化注意力头的分组策略和KV Cache管理，在显存占用和计算效率之间取得了良好平衡。实验表明，这种设计在保持短距离精度的同时，显著提升了长距离信息检索的准确率。</p>
+
+
+<div class="tip"><strong>通俗类比：</strong>注意力机制的演进就像交通工具的发展——RNN是步行（一步一步走，慢但简单），标准Transformer是开车（快但费油/O(n²)），FlashAttention是优化了发动机（同样速度但更省油），线性注意力是骑自行车（极省能源但速度受限），DSA是智能导航（自动选择最优路线）。没有"最好"的方案，只有"最适合"的场景。</div>
+<div class="warn"><strong>常见误区：</strong>关于GLM的5.1 自回归填空注意力，很多人以为注意力权重代表token重要性。实际上注意力只是Q-K点积的相关性度量。GLM的多头注意力设计通过多个视角综合判断token的真正重要性。</div>
+<div class="deep"><strong>深入探讨：</strong>从信息论角<div class="deep"><strong>深入探讨：</strong>从信息论角度看，GLM的核心挑战是"在有限的计算资源下最大化信息处理效率"。模型的每一层都在进行信息压缩和提取——将高维输入压缩为低维表示，同时保留任务相关的关键信息。GLM通过注意力机制实现动态的信息路由——让模型根据输入内容自适应地决定"关注什么"和"忽略什么"。</div> X ──┬──▶ Wq ──▶ Q ──┐
+          ├──▶ Wk ──▶ K ──┼──▶ Attn = softmax(QK^T/√d)V
+          └──▶ Wv ──▶ V ──┘
+                              │
+                  ┌───────────┼───────────┐
+                  ▼           ▼           ▼
+            Self-Attn    Cross-Attn   Multi-Head
+                  │           │           │
+                  └───────────┼───────────┘
+                              ▼
+                        Output Projection</pre></div>
+<table><tr><th>注意力变体</th><th>复杂度</th><th>适用场景</th><th>代表模型</th></tr>
+<tr><td>标准自注意力</td><td>O(n²d)</td><td>通用</td><td>GPT, LLaMA</td></tr>
+<tr><td>FlashAttention</td><td>O(n²d) IO减少</td><td>长序列</td><td>大多数现代模型</td></tr>
+<tr><td>线性注意力</td><td>O(nd²)</td><td>超长序列</td><td>Linear Transformer</td></tr>
+<tr><td>GQA/MQA</td><td>减少KV头数</td><td>推理加速</td><td>LLaMA-2, Mistral</td></tr></table>
+
+<table>
+<tr><th>版本</th><th>注意力类型</th><th>位置编码</th><th>序列长度</th><th>特点</th></tr>
+<tr><td>GLM-130B</td><td>ALiBi + Blank Infilling</td><td>RoPE + 2D</td><td>2K</td><td>首次引入ABI注意力掩码</td></tr>
+<tr><td>ChatGLM-6B</td><td>MHA + 前缀注意力</td><td>RoPE 2D</td><td>2K→8K</td><td>简化版填空掩码</td></tr>
+<tr><td>GLM-4</td><td>GQA</td><td>RoPE + YaRN</td><td>128K</td><td>GQA降KV开销，YaRN外推</td></tr>
+<tr><td>GLM-5</td><td>GQA + DSA</td><td>RoPE + YaRN</td><td>1M+</td><td>DSA稀疏注意力，超长上下文</td></tr>
+<tr><td>GLM-5.1</td><td>GQA + DSA</td><td>RoPE + YaRN</td><td>1M+</td><td>优化DSA配置，推理增强</td></tr>
+</table>
+
+<h2>5.7 MHA/MQA/GQA/MLA 对比</h2>
+<p>GLM在5.7 MHA/MQA/GQA/MLA 对比方面的技术实现体现了其对工程质量和创新的追求。从技术原理到工程落地，GLM在每个环节都进行了深入的优化。这些优化不仅提升了模型的性能指标，更重要的是提升了模型在实际应用中的可靠性和用户体验。GLM的技术团队在实践中积累的"隐性知识"是其核心竞争力之一。</p>
+
+<h3>5.7 MHA/MQA/GQA/MLA 对比的工程实践与性能优化</h3>
+<p>在实际工程应用中，5.7 MHA/MQA/GQA/MLA 对比的实现需要在准确率、推理速度和资源消耗之间找到最优平衡。关键优化策略包括：(1)算子融合(Operator Fusion)将多个小kernel合并为一个大kernel，减少GPU启动开销和中间结果的显存读写；(2)混合精度计算在保持数值稳定性的前提下使用FP16/BF16，将显存占用降低约50%；(3)动态批处理(Dynamic Batching)根据请求的序列长度自适应调整batch大小，最大化GPU利用率。</p>
+
+
+<h3>5.7 MHA/MQA/GQA/MLA 对比的最新研究进展与未来方向</h3>
+<p>当前5.7 MHA/MQA/GQA/MLA 对比领域的研究热点集中在三个方向：(1)效率优化——通过稀疏化、量化和架构搜索(NAS)等技术进一步降低计算成本，目标是在保持模型质量的前提下将推理成本降低10倍；(2)能力扩展——将模型的能力从纯文本扩展到多模态(图像、音频、视频)，实现真正的通用智能；(3)安全对齐——确保模型的输出符合人类价值观和社会规范，防止有害内容的生成。</p>
+<p>从产业趋势看，5.7 MHA/MQA/GQA/MLA 对比正在从实验室走向大规模生产部署。关键技术挑战包括：如何在保证质量的前提下将模型压缩到端侧设备可运行的大小(通常<4GB)、如何实现跨地域的低延迟分布式推理(目标P99<200ms)、以及如何构建高效的模型更新和灰度发布流水线(从模型训练到上线的周期从周级缩短到天级)。</p>
+<h3>5.7 MHA/MQA/GQA/MLA 对比的工程实践与性能优化（GLM视角1）</h3>
+<p>在实际工程应用中，5.7 MHA/MQA/GQA/MLA 对比的实现需要在准确率、推理速度和资源消耗之间找到最优平衡。关键优化策略包括：(1)算子融合(Operator Fusion)将多个小kernel合并为一个大kernel，减少GPU启动开销和中间结果的显存读写；(2)混合精度计算在保持数值稳定性的前提下使用FP16/BF16，将显存占用降低约50%；(3)动态批处理(Dynamic Batching)根据请求的序列长度自适应调整batch大小，最大化GPU利用率。</p>
+
+
+<h3>5.7 MHA/MQA/GQA/MLA 对比的最新研究进展与未来方向（GLM视角1）</h3>
+<p>当前5.7 MHA/MQA/GQA/MLA 对比领域的研究热点集中在三个方向：(1)效率优化——通过稀疏化、量化和架构搜索(NAS)等技术进一步降低计算成本，目标是在保持模型质量的前提下将推理成本降低10倍；(2)能力扩展——将模型的能力从纯文本扩展到多模态(图像、音频、视频)，实现真正的通用智能；(3)安全对齐——确保模型的输出符合人类价值观和社会规范，防止有害内容的生成。</p>
+<p>从产业趋势看，5.7 MHA/MQA/GQA/MLA 对比正在从实验室走向大规模生产部署。关键技术挑战包括：如何在保证质量的前提下将模型压缩到端侧设备可运行的大小(通常<4GB)、如何实现跨地域的低延迟分布式推理(目标P99<200ms)、以及如何构建高效的模型更新和灰度发布流水线(从模型训练到上线的周期从周级缩短到天级)。</p>
+
+<div class="tip"><strong>通俗类比：</strong>MHA/MQA/GQA/MLA就像不同的"会议组织方式"——MHA是"全员大会"（每个Q头都有独立的KV头，信息最全但成本最高），MQA是"一人汇报"（所有Q头共享一个KV头，最快但信息损失大），GQA是"分组讨论"（几个Q头共享一组KV头，折中方案），MLA是"压缩会议纪要"（先压缩KV再还原，理论上不损失信息但实现复杂）。选择哪种取决于"会议预算"（显存）和"信息质量要求"。</div>
+<div cl<div class="warn"><strong>常见误区：</strong>关于GLM的5.1 自回归填空注意力，很多人以为注意力权重代表token重要性。实际上注意力只是Q-K点积的相关性度量。GLM的多头注意力设计通过多个视角综合判断token的真正重要性。</div>lass="deep"><strong>深入探讨：</strong>从系统工程角度看，GLM的实现涉及多个子系统的协同：数据管线、训练系统、推理服务和监控告警。GLM的技术栈中，每个子系统都有独立的优化空间和运维要求。子系统之间的接口设计和数据流优化是整体性能的关键。</div>
+<div class="ascii"><pre>Transformer 注意力计算
+输入 X ──┬──▶ Wq ──▶ Q ──┐
+          ├──▶ Wk ──▶ K ──┼──▶ Attn = softmax(QK^T/√d)V
+          └──▶ Wv ──▶ V ──┘
+                              │
+                  ┌───────────┼───────────┐
+                  ▼           ▼           ▼
+            Self-Attn    Cross-Attn   Multi-Head
+                  │           │           │
+                  └───────────┼───────────┘
+                              ▼
+                        Output Projection</pre></div>
+<table><tr><th>注意力变体</th><th>复杂度</th><th>适用场景</th><th>代表模型</th></tr>
+<tr><td>标准自注意力</td><td>O(n²d)</td><td>通用</td><td>GPT, LLaMA</td></tr>
+<tr><td>FlashAttention</td><td>O(n²d) IO减少</td><td>长序列</td><td>大多数现代模型</td></tr>
+<tr><td>线性注意力</td><td>O(nd²)</td><td>超长序列</td><td>Linear Transformer</td></tr>
+<tr><td>GQA/MQA</td><td>减少KV头数</td><td>推理加速</td><td>LLaMA-2, Mistral</td></tr></table>
+
+<table>
+<tr><th>方案</th><th>Q Heads</th><th>KV Heads</th><th>KV Cache大小</th><th>性能</th><th>代表模型</th></tr>
+<tr><td>MHA</td><td>h</td><td>h</td><td>最大</td><td>最优</td><td>GPT-3, LLaMA-1</td></tr>
+<tr><td>MQA</td><td>h</td><td>1</td><td>最小</td><td>略降</td><td>PaLM, Falcon</td></tr>
+<tr><td>GQA</td><td>h</td><td>g (分组)</td><td>中等</td><td>接近MHA</td><td>LLaMA-2/3, <span class="tag tag-green">GLM-4/5</span></td></tr>
+<tr><td>MLA</td><td>h</td><td>低秩压缩</td><td>极小</td><td>最优</td><td>DeepSeek-V2/V3</td></tr>
+</table>
+
+<div class="highlight">
+<strong>GLM的选择：</strong>GLM-4/5采用GQA而非MLA，在工程成熟度和性能之间取得了良好平衡。MLA（Multi-head Latent Attention）虽然是DeepSeek的创新，但实现复杂度更高。
+</div>
+
+<footer>GLM 学习指南 · 05 注意力机制创新</footer>
+
+<div class="deep"><strong><h3>GLMGLM的工程实践与最佳方案</h3>
+<p>从GLM的工程实践角度看，GLM的落地实施需要考虑多个关键因素。首先是性能基准的建立——在正式优化之前，需要通过profiling工具（如PyTorch Profiler、NVIDIA Nsight）定位真正的性能瓶颈。常见的误区是凭直觉优化，实际上80%的性能问题集中在20%的代码路径上。其次是回归测试的保障——每次优化后都需要验证模型输出质量没有退化。GLM的工程团队会维护一套包含1000+测试用例的回归测试集，覆盖边界情况和典型场景。</p>
+<div class="tip"><strong>通俗类比：</strong>GLM的工程优化就像医生看病——先做全面检查(profiling)找到病因(瓶颈)，再对症下药(针对性优化)，最后复查(回归测试)确认疗效。盲目吃药(凭直觉优化)不仅浪费时间，还可能产生副作用(引入新bug)。</div>
+<div class="war<div class="warn"><strong>常见误区：</strong>关于GLM的5.1 自回归填空注意力，不要以为看到很多优化技术就焦虑要全部学完。大部分技术互补非互斥。GLM建议先掌握核心概念其他用到再学。</div>注意力机制创新领域的技术积累与行业贡献</h3>
+<p>从行业发展的角度看，GLM在GLM领域的技术积累不仅体现在模型性能的提升上，更体现在对整个AI技术生态的推动作用。GLM通过开源项目、技术论文和开发者工具，将自身的技术经验分享给社区，促进了整个行业的技术进步。这种开放的技术策略也反过来帮助GLM获得了更多的技术反馈和社区贡献，形成了良性的技术循环。从商业角度看，技术开放策略降低了客户的技术迁移成本，增强了GLM的市场竞争力。</p>
+<p>在GLM的工程实践中，GLM积累了大量的"隐性知识"——这些知识不在论文中，而是在工程团队的实践经验中。例如，模型训练中的超参数调优经验、推理服务的运维最佳实践、以及数据处理的工程技巧。这些隐性知识是GLM的核心竞争力之一，也是新进入者最难复制的技术壁垒。</p>
+
+<h3>GLMGLM的技术要点1</h3>
+<p>从GLM的工程实践看，GLM的实现需要在性能、成本和可靠性之间找到最优平衡。通过系统性的性能分析和针对性优化，可以在给定资源约束下实现最优的整体表现。</p>
+思考与练习：</strong>
+<ol>
+<li><strong>概念理解：</strong>请用自己的话解释"1 自回归填空注意力掩码"的核心原理，并说明它在GLM技术体系中的定位。</li>
+<li><strong>对比分析：</strong>对比"1 自回归填空注意力掩码"与"2 二维位置编码 (2D Position Encoding)"的异同点，分析各自的适用场景和优劣势。</li>
+<li><strong>实践思考：</strong>如果要将本章技术应用到实际项目中，你会如何设计方案？请列出关键步骤并说明可能遇到的挑战。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+本章内容为理解GLM后续更高级的技术主题奠定了基础。建议在学习后续章节时，回顾本章的核心概念作为知识锚点。特别是本章介绍的关键技术原理，将在后续的性能优化和工程部署中反复出现。
+</div>
+
+<div class="deep"><strong>深入探讨：</strong>GLM在5.1 自回归填空注意力方面的工程深度体现在对性能瓶颈的精确分析上。通过profiling工具定位真正的瓶颈——是计算密集型还是内存密集型，然后选择对应的优化策略。GLM的经验表明，80%的性能问题集中在20%的代码路径上，针对性优化的ROI远高于全面优化。</div>采用的MLA（Multi-head Latent Attention）通过低秩压缩实现KV Cache极致缩减不同，GLM-4/5选择GQA作为主要的KV优化方案，这一决策背后体现了智谱AI对工程成熟度和性能稳定性的权衡考量。GQA的优势在于实现简单、调试方便、与现有推理框架兼容性好，而MLA虽然理论上压缩率更高，但需要额外的上投影矩阵和解耦RoPE处理，工程复杂度显著增加。在实际部署场景中，GLM-4的GQA配置（64个Q头、8组KV头）在128K上下文下的推理延迟仅为标准MHA的约60%，同时模型质量损失不超过0.5个百分点，这种"足够好"的工程哲学使得GLM能够快速迭代和稳定部署。值得注意的是，GLM-5引入的DSA稀疏注意力机制是对GQA的有力补充——GQA解决了KV Cache的显存问题，DSA则解决了长序列的计算复杂度问题，两者协同工作使得GLM-5能够在单张GPU上处理百万级token的输入，这在国产模型中属于领先水平。</p>
+
+<p>从学术研究的视角审视GLM的注意力机制演进，可以发现一条清晰的技术主线：从GLM-130B的自回归填空掩码（ABI）开始，智谱AI就在探索如何将"理解"和"生成"统一在同一个注意力框架中。ABI的核心贡献在于证明了混合注意力掩码的可行性——通过精心设计的掩码矩阵，一个Transformer模型可以同时具备BERT式的双向理解能力和GPT式的自回归生成能力，而无需训练两个独立的模型。2D位置编码的引入进一步完善了这一框架，解决了填空任务中的位置歧义问题。从ChatGLM-6B到GLM-4再到GLM-5，每次升级都在注意力效率上做了显著改进：ChatGLM-6B从MHA简化为前缀注意力降低推理开销，GLM-4引入GQA将KV Cache压缩8倍，GLM-5进一步引入DSA将注意力复杂度从O(n²)降至近线性。这种渐进式的优化路线体现了智谱AI"稳扎稳打"的技术风格——不追求单点突破，而是通过系统性的工程优化持续提升模型的实用价值。对于学习者而言，理解这条注意力演进主线是掌握GLM技术体系的关键入口。</p>
+
+<p>从工程实践的角度审视GLM系列注意力机制的完整技术栈，可以发现其核心设计理念是"在保证模型质量的前提下，通过多层级的效率优化手段逐步降低推理成本"。在KV Cache优化层面，GLM采用了三级压缩策略：第一级是GQA将KV头数从与Q头数相同压缩到约1/8（GLM-4的64个Q头配8组KV头），直接将KV Cache大小减少87.5%；第二级是KV Cache量化，将FP16精度的KV Cache进一步量化到INT8甚至INT4，显存占用再减少50-75%；第三级是Prefix Caching，对共享相同系统提示或文档前缀的多个请求复用已计算的KV Cache，避免重复计算。这三级优化的叠加效应使得GLM-5在128K上下文下的KV Cache显存占用仅为标准MHA方案的约3-5%，相当于将单卡可服务的并发请求数从2-3个提升到20-30个。在注意力计算优化层面，GLM-5引入的DSA稀疏注意力机制将长序列的注意力复杂度从O(n²)降低到O(n·k)（k≈4096），配合FlashAttention-2的IO优化，在128K序列长度下的Prefill延迟从约1200ms降低到约280ms，降幅达77%。这种"GQA降低Cache+DSA降低计算+FlashAttention优化IO"的三层协同优化，使得GLM-5能够在单张A100-80G GPU上处理百万级token的输入，这在国产开源模型中处于领先水平，也为其他大模型团队的注意力机制设计提供了有价值的工程参考。</p>
+
+<p>展望GLM注意力机制的未来发展方向，可以从技术趋势和应用场景两个维度进行推演。在技术趋势方面，注意力机制正在从"静态稀疏"向"动态自适应"演进——DSA虽然已经实现了动态Top-k选择，但其局部窗口大小和全局压缩粒度仍然是超参数，未来可能发展为完全自适应的注意力模式，根据输入内容的复杂度自动调整稀疏程度。在应用场景方面，GLM-5.1的Agent能力对注意力机制提出了新的需求：在多步工具调用场景中，模型需要在极长的上下文（包含多次工具调用的结果）中准确定位关键信息，这要求注意力机制不仅能处理长序列，还能理解任务结构和信息层次。智谱AI在GLM-5.1中通过任务状态追踪（Task State Tracking）机制部分解决了这一问题，但更根本的解决方案可能需要将注意力机制与外部记忆系统（如检索增强）深度整合。对于国产大模型行业而言，GLM的注意力演进路线提供了一个重要启示：在算力受限的条件下，通过工程创新（GQA+DSA+FlashAttention的组合）而非简单的参数堆叠来提升模型效率，是一种更加可持续的技术发展路径。</p>
+
+<p>GLM系列在注意力机制创新方面的技术演进为整个大模型行业提供了宝贵的工程参考和学术贡献。从GLM-130B的自回归填空注意力掩码开始，智谱AI就在探索如何将理解和生成统一在同一个注意力框架中——ABI的核心贡献在于证明了混合注意力掩码的可行性，通过精心设计的分块掩码矩阵（Part A全连接双向注意力加Part B下三角因果掩码加Part B到Part A全连接注意力），一个Transformer模型可以同时具备BERT式的双向理解能力和GPT式的自回归生成能力，无需训练两个独立的模型。2D位置编码的引入进一步完善了这一框架，将每个token的位置分解为绝对位置和填空片段相对位置两个分量，解决了传统1D位置编码在填空任务中的歧义问题。从ChatGLM-6B到GLM-4再到GLM-5的演进路径上，注意力效率的优化呈现出清晰的梯度：ChatGLM-6B从MHA简化为前缀注意力降低推理开销，GLM-4引入GQA（64个Q头配8组KV头）将KV Cache压缩8倍使得128K上下文成为可能，GLM-5进一步引入DSA将注意力复杂度从O(n²)降至O(n·k)实现了百万级token处理。在MHA、MQA、GQA、MLA四种注意力变体的选择上，GLM-4和GLM-5选择GQA而非DeepSeek的MLA这一决策尤其值得深思——MLA虽然理论上压缩率更高但实现复杂度显著增加，而GQA在工程成熟度、调试便利性和推理框架兼容性上都具有明显优势，GLM-4的GQA配置在128K上下文下的推理延迟仅为标准MHA的约60%且模型质量损失不超过0.5%。</p>
+
+<p>GLM系列在注意力机制创新方面的技术演进为整个大模型行业提供了宝贵的工程参考和学术贡献。从GLM-130B的自回归填空注意力掩码开始，智谱AI就在探索如何将理解和生成统一在同一个注意力框架中——ABI的核心贡献在于证明了混合注意力掩码的可行性，通过精心设计的分块掩码矩阵（Part A全连接双向注意力加Part B下三角因果掩码加Part B到Part A全连接注意力），一个Transformer模型可以同时具备BERT式的双向理解能力和GPT式的自回归生成能力，无需训练两个独立的模型。2D位置编码的引入进一步完善了这一框架，将每个token的位置分解为绝对位置和填空片段相对位置两个分量，解决了传统1D位置编码在填空任务中的歧义问题。从ChatGLM-6B到GLM-4再到GLM-5的演进路径上，注意力效率的优化呈现出清晰的梯度：ChatGLM-6B从MHA简化为前缀注意力降低推理开销，GLM-4引入GQA（64个Q头配8组KV头）将KV Cache压缩8倍使得128K上下文成为可能，GLM-5进一步引入DSA将注意力复杂度从O(n²)降至O(n·k)实现了百万级token处理。在MHA、MQA、GQA、MLA四种注意力变体的选择上，GLM-4和GLM-5选择GQA而非DeepSeek的MLA这一决策尤其值得深思——MLA虽然理论上压缩率更高但实现复杂度显著增加，而GQA在工程成熟度、调试便利性和推理框架兼容性上都具有明显优势，GLM-4的GQA配置在128K上下文下的推理延迟仅为标准MHA的约60%且模型质量损失不超过0.5%。</p>
+
+<p style="margin-top:2rem;padding:1rem;background:var(--surface-2);border-radius:8px;border-left:3px solid var(--accent);">📌 <strong>学习目标：</strong>通过本节学习，您将深入理解本章核心概念，掌握关键技术和实践方法，为后续进阶学习打下坚实基础。</p>
+<div class="tip"><strong>学习路径建议：</strong>建议先理解本节的基础概念和核心原理，再深入学习数学推导和工程实现细节。可结合配套的代码示例进行动手实践，最后通过对比分析巩固所学知识。</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释自回归填空注意力掩码的核心原理，并举一个实际应用场景。</li>
+<li>自回归填空注意力掩码在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比自回归填空注意力掩码与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="ascii">
+自回归填空注意力掩码 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+</div>
+<div class="tip"><strong>相关章节：</strong>
+自回归填空注意力掩码与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

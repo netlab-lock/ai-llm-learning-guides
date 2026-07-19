@@ -1,0 +1,254 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>RM Training - RLHF</title><style>
+*{margin:0;padding:0;box-sizing:border-box}body{background:#0f1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;line-height:1.8;padding:20px;max-width:1000px;margin:0 auto}h1{color:#58a6ff;font-size:1.8em;margin:20px 0 10px;border-bottom:2px solid #30363d;padding-bottom:10px}h2{color:#79c0ff;font-size:1.4em;margin:25px 0 10px}h3{color:#d2a8ff;font-size:1.2em;margin:20px 0 8px}p{margin:10px 0}.nav{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:25px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}.nav a{color:#58a6ff;text-decoration:none;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;overflow-x:auto;margin:15px 0;font-size:0.9em}code{background:#161b22;padding:2px 6px;border-radius:4px;font-size:0.9em;color:#e6edf3}pre code{background:none;padding:0}table{border-collapse:collapse;width:100%;margin:15px 0}th,td{border:1px solid #30363d;padding:10px 12px;text-align:left}th{background:#161b22;color:#58a6ff}tr:nth-child(even){background:#161b22}.highlight{background:#1a2332;border-left:4px solid #58a6ff;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.formula{background:#1a1a2e;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;text-align:center;font-family:'Courier New',monospace;color:#e6edf3}.ascii-art{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto}ul,ol{margin:10px 0 10px 25px}li{margin:5px 0}.warning{background:#2d1b00;border-left:4px solid #d29922;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.tip{background:#0d2818;border-left:4px solid #3fb950;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.footer{margin-top:40px;padding-top:20px;border-top:1px solid #30363d;font-size:0.85em;color:#8b949e}.ref{margin-top:30px;padding:16px;background:#161b22;border-radius:8px;border:1px solid #30363d}.ref h2{margin-top:0}.ref a{color:#58a6ff}</style></head><body><div class="nav"><a href="06-RLVR与推理增强训练.html">#RLVR</a><a href="index.html">Index</a><a href="08-拒绝采样与迭代对齐.html">RFT &raquo;</a></div><h1>07 Reward Model Training</h1><h2>RM Training Code</h2>
+
+<h3>RM Training Code：核心技术原理与实现细节</h3>
+<p>从系统设计角度看，RM Training Code的核心在于平衡计算效率与模型质量。具体来说，需要在三个维度上做出权衡：(1)计算复杂度——算法的理论时间复杂度决定了在大规模数据上的可行性，O(n²)的算法在序列长度超过8K时会成为瓶颈；(2)内存占用——模型参数、激活值和优化器状态的显存需求决定了所需的硬件配置，70B模型在FP16下需要约140GB显存；(3)通信开销——分布式训练中的集合通信(AllReduce/AllGather)可能占据30-50%的总训练时间。</p>
+<p>工程实现中，RM Training Code通常采用分层架构：底层是硬件抽象层(CUDA/Triton kernels)，负责高效的矩阵运算和内存管理；中间层是算法核心层，实现主要的计算逻辑；上层是服务接口层(OpenAI兼容API)，提供标准化的调用方式。这种分层设计使得每一层都可以独立优化——例如底层可以针对不同GPU架构(Ampere/Hopper)编译不同的kernel，而上层接口保持不变。</p>
+<p>从最新进展来看，2025-2026年RM Training Code领域出现了几个重要趋势：混合专家(MoE)架构成为主流、推理时计算(Test-Time Compute)的价值被充分认识、以及端到端的训练-推理协同优化取代了单独的推理优化。这些趋势正在重塑LLM系统的设计范式。</p>
+<h3>RM Training Code的训练流程与优化策略</h3>
+<p>RM Training Code的训练流程通常分为三个阶段：预训练(Pre-training)在大规模无标注语料上学习语言表示，微调(Fine-tuning)在任务特定数据上适配下游任务，对齐(Alignment)通过人类偏好反馈优化输出质量。每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。</p>
+
+
+<h3>RM Training Code的训练流程与优化策略</h3>
+<p>RM Training Code的训练流程通常分为三个阶段：预训练(Pre-training)在大规模无标注语料上学习语言表示，微调(Fine-tuning)在任务特定数据上适配下游任务，对齐(Alignment)通过人类偏好反馈优化输出质量。每个阶段的数据配比、学习率调度和正则化策略都需要精心设计。</p>
+
+<pre><code>import torch
+import torch.nn as nn
+from transformers import AutoModel
+
+class RewardModel(nn.Module):
+    def __init__(self, model_name):
+        super().__init__()
+        self.backbone = AutoModel.from_pretrained(model_name)
+        self.reward_head = nn.Linear(self.backbone.config.hidden_size, 1)
+    
+    def forward(self, input_ids, attention_mask):
+        outputs = self.backbone(input_ids, attention_mask)
+        last_hidden = outputs.last_hidden_state[:, -1, :]
+        reward = self.reward_head(last_hidden).squeeze(-1)
+        return reward
+
+# Training loop
+rm = RewardModel("meta-llama/Llama-3-8B").cuda()
+optimizer = torch.optim.AdamW(rm.parameters(), lr=1e-5)
+
+for batch in preference_dataloader:
+    chosen_ids = batch["chosen_input_ids"].cuda()
+    rejected_ids = batch["rejected_input_ids"].cuda()
+    chosen_mask = batch["chosen_attention_mask"].cuda()
+    rejected_mask = batch["rejected_attention_mask"].cuda()
+    
+    r_chosen = rm(chosen_ids, chosen_mask)
+    r_rejected = rm(rejected_ids, rejected_mask)
+    
+    # Bradley-Terry loss
+    loss = -torch.log(torch.sigmoid(r_chosen - r_rejected)).mean()
+    
+    loss.backward()
+    optimizer.step()
+    optimizer.zero_grad()
+    
+    # Metrics
+    accuracy = (r_chosen > r_rejected).float().mean()
+    margin = (r_chosen - r_rejected).mean()</code></pre>
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「RM Training Code」的常见陷阱：不要盲目照搬网上的配置参数。不同的数据分布和模型规模下，RM的最优配置可能完全不同。务必在自己的场景下做充分的验证实验。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「RM Training Code」的深层理解：奖励模型的架构设计遵循 Bradley-Terry 偏好模型：P(y_w ≻ y_l) = σ(r(x, y_w) - r(x, y_l))。InstructGPT 使用 6B 参数的 RM 对 175B 策略模型进行评分，实践证明 RM 参数量达到策略模型的 1/10-1/3 时性能已足够。RM 训练的关键细节包括：(1) 使用最后一个 token 的隐藏状态（而非平均池化）作为特征向量，接一个线性层输出标量奖励；(2) 训练数据通常需要 50K-500K 偏好对，标注者一致性（agreement rate）需 >60%；(3) 学习率通常设为 1e-5，比策略模型训练低一个量级；(4) RM 的评估指标是在 held-out 偏好对上的准确率，目标值 >65%。过拟合是 RM 训练的主要风险——当 RM 准确率接近 100% 时，往往意味着过拟合而非完美学习。</div>
+
+<div class="ascii">
+RLHF Pipeline (4个模型):
+  Prompt → [Actor] → Response → [Reward Model] → Score
+                          ↓                           ↓
+                    [Critic] → Value          PPO Update ← KL Penalty
+                          ↓
+                    [Reference] → KL
+
+DPO Pipeline (2个模型):
+  (Prompt, y_w, y_l) → [Policy] → log π(y_w), log π(y_l)
+                              ↓
+                        [Reference] → log π_ref(y_w), log π_ref(y_l)
+                              ↓
+                        DPO Loss (无需奖励模型)
+
+GRPO Pipeline (2个模型):
+  Prompt → [Actor] × G次采样 → {y_1,...,y_G}
+                              ↓
+              [Rule-based Reward] → {r_1,...,r_G}
+                              ↓
+              组内排名归一化 → 优势估计A_i
+                              ↓
+              GRPO Update (无需Critic)
+</div><h2>Data Format</h2>
+
+<h3>Data Format：核心技术原理与实现细节</h3>
+<p>从系统设计角度看，Data Format的核心在于平衡计算效率与模型质量。具体来说，需要在三个维度上做出权衡：(1)计算复杂度——算法的理论时间复杂度决定了在大规模数据上的可行性，O(n²)的算法在序列长度超过8K时会成为瓶颈；(2)内存占用——模型参数、激活值和优化器状态的显存需求决定了所需的硬件配置，70B模型在FP16下需要约140GB显存；(3)通信开销——分布式训练中的集合通信(AllReduce/AllGather)可能占据30-50%的总训练时间。</p>
+<p>工程实现中，Data Format通常采用分层架构：底层是硬件抽象层(CUDA/Triton kernels)，负责高效的矩阵运算和内存管理；中间层是算法核心层，实现主要的计算逻辑；上层是服务接口层(OpenAI兼容API)，提供标准化的调用方式。这种分层设计使得每一层都可以独立优化——例如底层可以针对不同GPU架构(Ampere/Hopper)编译不同的kernel，而上层接口保持不变。</p>
+<p>从最新进展来看，2025-2026年Data Format领域出现了几个重要趋势：混合专家(MoE)架构成为主流、推理时计算(Test-Time Compute)的价值被充分认识、以及端到端的训练-推理协同优化取代了单独的推理优化。这些趋势正在重塑LLM系统的设计范式。</p>
+
+<div class="ascii">
+RLHF训练三阶段流程
+
+阶段1: SFT (监督微调)
+  高质量(指令, 回答)对 → 微调基座模型 → SFT模型
+
+阶段2: RM (奖励模型训练)
+  SFT模型生成多个回答 → 人类排序偏好 → 训练奖励模型
+
+阶段3: PPO/GRPO (强化学习)
+  SFT模型 + 奖励模型 → RL优化 → 对齐后模型
+
+┌─────────┐    ┌─────────┐    ┌─────────┐
+│  SFT    │ →  │  RM     │ →  │  PPO    │
+│ (指令  │    │ (偏好  │    │ (强化  │
+│  微调) │    │  学习)  │    │  学习)  │
+└─────────┘    └─────────┘    └─────────┘
+</div>
+
+<h3>Data Format的核心组件与工作原理</h3>
+
+
+
+
+<div class="ascii">
+RLHF训练三阶段流程
+
+阶段1: SFT (监督微调)
+  高质量(指令, 回答)对 → 微调基座模型 → SFT模型
+
+阶段2: RM (奖励模型训练)
+  SFT模型生成多个回答 → 人类排序偏好 → 训练奖励模型
+
+阶段3: PPO/GRPO (强化学习)
+  SFT模型 + 奖励模型 → RL优化 → 对齐后模型
+
+┌─────────┐    ┌─────────┐    ┌─────────┐
+│  SFT    │ →  │  RM     │ →  │  PPO    │
+│ (指令  │    │ (偏好  │    │ (强化  │
+│  微调) │    │  学习)  │    │  学习)  │
+└─────────┘    └─────────┘    └─────────┘
+</div>
+
+<h3>Data Format的核心组件与工作原理</h3>
+
+
+<pre><code># Preference data (JSONL)
+{"prompt": "Explain quantum computing",
+ "chosen": "Quantum computing uses quantum mechanics...",
+ "rejected": "Quantum computing is just fast computers..."}
+
+# Scale: 50K-500K pairs
+# Sources: Human annotation, AI feedback (RLAIF), Synthetic</code></pre>
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「Data Format」的常见陷阱：常见陷阱：忽略JSONL的边界条件和异常情况。这些在小规模测试中可能不会暴露，但在生产环境中往往是最先出问题的地方。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「Data Format」的深层理解：JSONL背后的核心权衡是灵活性与效率之间的平衡。更灵活的方案通常计算开销更大，更高效的方案往往需要更强的假设。在AI的设计中也能看到类似的权衡。</div>
+<h2>RM Evaluation</h2>
+
+<h3>RM Evaluation：核心技术原理与实现细节</h3>
+<p>从系统设计角度看，RM Evaluation的核心在于平衡计算效率与模型质量。具体来说，需要在三个维度上做出权衡：(1)计算复杂度——算法的理论时间复杂度决定了在大规模数据上的可行性，O(n²)的算法在序列长度超过8K时会成为瓶颈；(2)内存占用——模型参数、激活值和优化器状态的显存需求决定了所需的硬件配置，70B模型在FP16下需要约140GB显存；(3)通信开销——分布式训练中的集合通信(AllReduce/AllGather)可能占据30-50%的总训练时间。</p>
+<p>工程实现中，RM Evaluation通常采用分层架构：底层是硬件抽象层(CUDA/Triton kernels)，负责高效的矩阵运算和内存管理；中间层是算法核心层，实现主要的计算逻辑；上层是服务接口层(OpenAI兼容API)，提供标准化的调用方式。这种分层设计使得每一层都可以独立优化——例如底层可以针对不同GPU架构(Ampere/Hopper)编译不同的kernel，而上层接口保持不变。</p>
+<p>从最新进展来看，2025-2026年RM Evaluation领域出现了几个重要趋势：混合专家(MoE)架构成为主流、推理时计算(Test-Time Compute)的价值被充分认识、以及端到端的训练-推理协同优化取代了单独的推理优化。这些趋势正在重塑LLM系统的设计范式。</p>
+
+<table>
+<caption>对齐训练方法对比</caption>
+<thead><tr><th>方法</th><th>需要奖励模型</th><th>数据需求</th><th>训练稳定性</th><th>计算成本</th></tr></thead>
+<tbody>
+<tr><td>RLHF(PPO)</td><td>是</td><td>偏好对</td><td>低(调参难)</td><td>高(4模型)</td></tr>
+<tr><td>DPO</td><td>否</td><td>偏好对</td><td>高</td><td>低(2模型)</td></tr>
+<tr><td>KTO</td><td>否</td><td>好/坏标签</td><td>高</td><td>低</td></tr>
+<tr><td>GRPO</td><td>否</td><td>规则奖励</td><td>中</td><td>中(2模型)</td></tr>
+<tr><td>RLVR</td><td>否</td><td>可验证答案</td><td>高</td><td>中</td></tr>
+</tbody></table>
+
+<h3>RM Evaluation的评估方法与基准</h3>
+<p>评估RM Evaluation的质量需要多维度指标体系。首先是准确性指标——在标准测试集上的表现，如困惑度(Perplexity)、准确率(Accuracy)和F1分数。其次是效率指标——推理延迟、吞吐量和显存占用。最后是鲁棒性指标——在对抗样本、分布外数据和噪声环境下的表现。</p>
+
+
+
+<table>
+<caption>对齐训练方法对比</caption>
+<thead><tr><th>方法</th><th>需要奖励模型</th><th>数据需求</th><th>训练稳定性</th><th>计算成本</th></tr></thead>
+<tbody>
+<tr><td>RLHF(PPO)</td><td>是</td><td>偏好对</td><td>低(调参难)</td><td>高(4模型)</td></tr>
+<tr><td>DPO</td><td>否</td><td>偏好对</td><td>高</td><td>低(2模型)</td></tr>
+<tr><td>KTO</td><td>否</td><td>好/坏标签</td><td>高</td><td>低</td></tr>
+<tr><td>GRPO</td><td>否</td><td>规则奖励</td><td>中</td><td>中(2模型)</td></tr>
+<tr><td>RLVR</td><td>否</td><td>可验证答案</td><td>高</td><td>中</td></tr>
+</tbody></table>
+
+<h3>RM Evaluation的评估方法与基准</h3>
+<p>评估RM Evaluation的质量需要多维度指标体系。首先是准确性指标——在标准测试集上的表现，如困惑度(Perplexity)、准确率(Accuracy)和F1分数。其次是效率指标——推理延迟、吞吐量和显存占用。最后是鲁棒性指标——在对抗样本、分布外数据和噪声环境下的表现。</p>
+
+<pre><code># Evaluate RM on held-out preferences
+rm.eval()
+correct = 0
+total = 0
+with torch.no_grad():
+    for batch in test_dataloader:
+        r_chosen = rm(batch["chosen_ids"], batch["chosen_mask"])
+        r_rejected = rm(batch["rejected_ids"], batch["rejected_mask"])
+        correct += (r_chosen > r_rejected).sum().item()
+        total += len(batch)
+
+accuracy = correct / total
+print(f"RM Accuracy: {accuracy:.2%}")  # Target: > 65%</code></pre><div class="tip"><strong>通俗类比：</strong>奖励模型就像"品酒师"——你给他两杯酒（两个回答），他说"这杯更好"（偏好标注）。品酒师不需要知道酿酒的化学原理（不需要理解模型内部），只需要有良好的品味（准确的偏好判断）。训练一个好的品酒师需要大量的品鉴经验（标注数据），而品酒师的水平直接决定了最终酿出的酒的品质（模型能力）。</div>
+
+<div class="warn"><strong>常见误区：</strong>① 认为奖励模型越大越好——实际上，奖励模型的大小通常与策略模型相当或略小，过大的奖励模型会浪费计算资源；② 忽略标注数据的质量——奖励模型的质量高度依赖标注数据，标注者之间的不一致性（inter-annotator disagreement）是最大的挑战之一。</div>
+
+<div class="deep"><strong>深入探讨：</strong>奖励模型训练面临一个根本性挑战："谁来评判评判者？"奖励模型的训练数据来自人类标注者，但人类标注者本身可能有偏见、不一致、甚至错误。这导致了一个"无限回归"问题：我们需要更好的标注者来训练更好的奖励模型，但更好的标注者本身也需要评估标准。目前的解决方案包括：① 多标注者投票 ② 专家标注者审核 ③ Constitutional AI（让 AI 自己做标注）。但这个问题本质上是"价值对齐"的核心难题——如何将人类的价值观编码到一个可计算的函数中。</div>
+
+<div class="ref"><h2>Refs</h2>
+
+<h3>Refs：核心技术原理与实现细节</h3>
+<p>从系统设计角度看，Refs的核心在于平衡计算效率与模型质量。具体来说，需要在三个维度上做出权衡：(1)计算复杂度——算法的理论时间复杂度决定了在大规模数据上的可行性，O(n²)的算法在序列长度超过8K时会成为瓶颈；(2)内存占用——模型参数、激活值和优化器状态的显存需求决定了所需的硬件配置，70B模型在FP16下需要约140GB显存；(3)通信开销——分布式训练中的集合通信(AllReduce/AllGather)可能占据30-50%的总训练时间。</p>
+<p>工程实现中，Refs通常采用分层架构：底层是硬件抽象层(CUDA/Triton kernels)，负责高效的矩阵运算和内存管理；中间层是算法核心层，实现主要的计算逻辑；上层是服务接口层(OpenAI兼容API)，提供标准化的调用方式。这种分层设计使得每一层都可以独立优化——例如底层可以针对不同GPU架构(Ampere/Hopper)编译不同的kernel，而上层接口保持不变。</p>
+<p>从最新进展来看，2025-2026年Refs领域出现了几个重要趋势：混合专家(MoE)架构成为主流、推理时计算(Test-Time Compute)的价值被充分认识、以及端到端的训练-推理协同优化取代了单独的推理优化。这些趋势正在重塑LLM系统的设计范式。</p>
+<h3>Refs的核心组件与工作原理</h3>
+
+
+
+<h3>Refs的核心组件与工作原理</h3>
+
+
+<ul><li>Ouyang et al., NeurIPS 2022</li><li>Lambert et al., RewardBench 2024</li></ul></div>
+<div class="tip"><strong>💡 实用技巧：</strong>关于「Refs」的实用建议：建议：不要一开始就追求完美方案，先跑通一个能工作的版本，再迭代优化。在RewardBench的调优过程中，逐步调整比一次性大改更安全。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>关于「Refs」的常见陷阱：一次只改一个变量。在调整RewardBench的参数时，如果同时改多个参数，你无法确定是哪个改动带来了效果变化或引入了问题。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>「Refs」的深层理解：从历史视角看，当前RewardBench的主流方法经历了多年的演进。早期被认为过时的技术在大规模场景下可能重新焕发生机。保持对经典方法的了解很重要。</div>
+<div class="footer">RLHF &copy; 2026</div>
+
+<table>
+<caption>对齐训练方法对比</caption>
+<thead><tr><th>方法</th><th>需要奖励模型</th><th>需要偏好数据</th><th>训练稳定性</th><th>计算成本</th></tr></thead>
+<tbody>
+<tr><td>RLHF(PPO)</td><td>是</td><td>是</td><td>低(调参难)</td><td>高(4模型)</td></tr>
+<tr><td>DPO</td><td>否</td><td>是</td><td>高</td><td>低(2模型)</td></tr>
+<tr><td>KTO</td><td>否</td><td>否(只需标签)</td><td>高</td><td>低</td></tr>
+<tr><td>GRPO</td><td>否</td><td>否(规则奖励)</td><td>中</td><td>中(2模型)</td></tr>
+<tr><td>RLVR</td><td>否</td><td>否(可验证)</td><td>高</td><td>中</td></tr>
+</tbody></table>
+
+
+
+
+
+<div class="deep"><strong>深入探讨：</strong>
+
+</div>
+
+<div class="deep"><strong>🔬 奖励模型训练技术深度剖析：</strong>
+<p>奖励模型（Reward Model, RM）是RLHF流水线的核心组件，其训练质量直接决定了最终对齐效果。InstructGPT（Ouyang et al., NeurIPS 2022）使用6B参数的RM对175B策略模型评分，证明RM参数量达到策略模型的1/10至1/3即可胜任。架构上，RM通常在基座模型的最后一个token隐藏状态（dim=4096-8192）后接一个线性层投影到标量奖励值。训练数据通常需要50K-500K偏好对，InstructGPT使用约33K人类排序数据（每组4-9个回答的全排列），Llama 2使用超过100万偏好对。Bradley-Terry损失函数L = -log σ(r_chosen - r_rejected)是标准选择，学习率通常设为1e-5（比策略模型低一个量级）。RewardBench（Lambert et al., 2024）是首个标准化RM评估基准，涵盖Chat、Chat-Hard、Safety、Reasoning和IF五个类别，发现最佳开源RM（如Llama-3.1-8B-RM）在Chat-Hard子集上准确率仅约65-72%，表明RM在细微偏好区分上仍有较大提升空间。过拟合是RM训练的最大风险：当训练准确率接近100%时几乎必定过拟合，典型策略包括early stopping（通常在准确率70-80%时停止）、dropout（0.1-0.2）、以及使用margin loss替代简单二分类（margin越大表示偏好越强）。Llama 3采用的迭代RM训练策略——每轮RL训练后用新生成的数据更新RM——被证明比静态RM提升约3-5%的最终对齐效果。</p>
+</div>
+
+<h2>对齐训练与偏好优化(1)与工程实践</h2>
+<h3>对齐训练与偏好优化(1)的核心设计原则</h3>
+
+
+<h3>对齐训练与偏好优化(1)的性能评估与优化策略</h3>
+
+
+
+<p style="margin-top:1.5rem;padding:0.8rem;background:var(--surface-2,#1e1e2e);border-radius:6px;border-left:3px solid var(--accent,#7c3aed);">📌 <strong>学习目标：</strong>通过本节学习，掌握核心概念与技术原理，为后续进阶学习奠定基础。</p>
+<div class="exercise"><strong>思考与练习：</strong><ol><li>用自己的话解释07-奖励模型训练的核心原理和工作机制。</li><li>对比本节涉及的不同方案，分析各自的优缺点和适用场景。</li><li>设计一个实验验证本节介绍的关键技术，并记录实验结果。</li></ol></div>
+<div class="tip"><strong>学习路径建议：</strong><p>建议先理解本节的基础概念和核心原理，再深入学习数学推导和工程实现细节。可结合配套的代码示例进行动手实践，最后通过对比分析巩固所学知识。</p></div>
+</body></html>

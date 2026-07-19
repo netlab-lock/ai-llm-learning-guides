@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02 GPU内部架构：Compute Die、IO Die、HBM | 集合通信入门指南</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; line-height: 1.8; }
+a { color: #58a6ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
+.nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 0.8rem 1.5rem; display: flex; justify-content: space-between; align-items: center; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #58a6ff; font-size: 0.9rem; }
+.nav span { color: #f0f6fc; font-weight: 600; }
+h1 { color: #58a6ff; font-size: 1.8rem; margin: 2rem 0 1rem; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 0.8rem; margin: 2.5rem 0 1rem; font-size: 1.4rem; }
+h3 { color: #f0f6fc; margin: 1.5rem 0 0.8rem; font-size: 1.15rem; }
+h4 { color: #f0f6fc; margin: 1.2rem 0 0.6rem; font-size: 1.05rem; }
+p { margin: 0.6rem 0; }
+code { background: #21262d; color: #79c0ff; padding: 0.15rem 0.4rem; border-radius: 4px; font-size: 0.9em; }
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; overflow-x: auto; margin: 1rem 0; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.9rem; line-height: 1.6; }
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+th, td { border: 1px solid #30363d; padding: 0.6rem 0.8rem; text-align: left; font-size: 0.9rem; }
+th { background: #161b22; color: #f0f6fc; }
+td { background: #0d1117; }
+.tip { background: #0d1d30; border-left: 4px solid #58a6ff; padding: 1rem 1.2rem; border-radius: 0 6px 6px 0; margin: 1rem 0; }
+.warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 1rem 1.2rem; border-radius: 0 6px 6px 0; margin: 1rem 0; }
+.exercise { background: #0d2818; border-left: 4px solid #238636; padding: 1rem 1.2rem; border-radius: 0 6px 6px 0; margin: 1rem 0; }
+.deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 1rem 1.2rem; border-radius: 0 6px 6px 0; margin: 1rem 0; }
+.tip strong { color: #58a6ff; }
+.warn strong { color: #d29922; }
+.exercise strong { color: #3fb950; }
+.deep strong { color: #a371f7; }
+.svg-diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; text-align: center; }
+.svg-diagram svg { max-width: 100%; height: auto; }
+.ascii { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; overflow-x: auto; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.85rem; line-height: 1.5; margin: 1rem 0; color: #c9d1d9; }
+.next-prev { display: flex; justify-content: space-between; border-top: 1px solid #21262d; margin-top: 3rem; padding-top: 1.5rem; }
+.footer { text-align: center; padding: 2rem 0; border-top: 1px solid #21262d; margin-top: 2rem; color: #484f58; font-size: 0.85rem; }
+ul, ol { margin: 0.5rem 0 0.5rem 1.5rem; }
+li { margin: 0.3rem 0; }
+</style>
+</head>
+<body>
+<div class="nav">
+<a href="01-芯片基础.html">&larr; 01 芯片基础</a>
+<span>02 GPU内部架构</span>
+<a href="03-PCIe总线基础.html">03 PCIe总线 &rarr;</a>
+</div>
+<div class="container">
+
+<h1>🖥️ 02 GPU内部架构：Compute Die、IO Die、HBM</h1>
+
+<!-- ==================== 1. 背景与动机 ==================== -->
+<h2>2.1 背景与动机：为什么要拆开GPU看？</h2>
+<h3>背景与动机：为什么要拆开GPU看？</h3>看一颗现代AI GPU的<strong>内部</strong>到底长什么样。</p>
+
+<p>为什么要了解GPU内部架构？因为在集合通信中，数据的流动路径是：</p>
+<div class="ascii">
+数据流动路径：
+HBM（显存） ↔ L2 Cache ↔ L1 Cache ↔ SM（计算单元）↔ NVLink/PCIe接口 ↔ 外部
+</div>
+<p>每一步都有<strong>带宽限制</strong>和<strong>延迟</strong>。如果你不知道这些组件在哪里、怎么连接的，就无法理解通信瓶颈出在哪里。</p>
+
+<div class="deep">
+<strong>🔬 历史背景：</strong> 早期的GPU（2010年之前）是"图形处理器"——专门为游戏渲染设计。NVIDIA从2006年的CUDA开始把GPU推向通用计算。但真正的转折点是2017年——Volta
+<pre><code class="language-python"># 1 背景与动机：为什么要拆开GPU看？ - 核心实现示例
+import torch
+import numpy as np
+
+class 1_背景与动机：为什么要拆开GPU看？Config:
+    """配置类：定义1 背景与动机：为什么要拆开GPU看？的关键参数"""
+    def __init__(self):
+        self.batch_size = 32
+        self.max_seq_len = 2048
+        self.dtype = torch.float16
+        
+    def validate(self):
+        """参数验证"""
+        assert self.batch_size > 0, "batch_size must be positive"
+        assert self.max_seq_len > 0, "max_seq_len must be positive"
+        return True
+
+def benchmark(func, iterations=100):
+    """性能基准测试"""
+    import time
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iterations):
+        func()
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iterations
+    print(f"Average latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+架构引入了<strong>Tensor Core</strong>，专门加速矩阵乘法。从此，GPU从"通用并行处理器"变成了"AI专用加速器"。这个架构转变直接影响了GPU的内部组成和通信需求。
+</div>
+
+<!-- ==================== 2. 名字由来 ==================== -->
+<h2>2.2 名字由来：SM、GPC、TPC这些缩写</h2>
+<h3>名字由来：SM、GPC、TPC这些缩写</h3>
+<table>
+<tr><th>缩写</th><th>全称</th><th>名字由来</th></tr>
+<tr><td><strong>SM</strong></td><td>Streaming Multiprocessor</td><td>"流式多处理器"——能同时处理大量"流式"（独立、可并行）的计算任务。"Streaming"来自GPU的图形渲染传统——像素着色就是一种流式处理。</td></tr>
+<tr><td><strong>GPC</strong></td><td>Graphics Processing Cluster</td><td>"图形处理集群"——GPU内部最大的组织单元。名字保留了"Graphics"的历史痕迹，但现在主要用于计算。</td></tr>
+<tr><td><strong>TPC</strong></td><td>Texture Processing Cluster</td><td>"纹理处理集群"——最初负责纹理采样和过滤。现在仍保留纹理单元，但对AI计算来说意义不大。</td></tr>
+<tr><td><strong>CUDA Core</strong></td><td>——</td><td>CUDA是"Compute Unified Device Architecture"的缩写。CUDA Core就是能执行浮点/整数运算的基本计算单元，相当于CPU里的ALU（算术逻辑单元）。</td></tr>
+<tr><td><strong>Tensor Core</strong></td><td>——</td><td>"张量核心"——专门为张量（多维数组）运算设计的硬件单元。核心操作是矩阵乘法（D = A × B + C），一个Tensor Core可以在一个时钟周期内完成一个4×4矩阵乘法。</td></tr>
+<tr><td><strong>HBM</strong></td><td>High Bandwidth Memory</td><td>"高带宽内存"——通过3D堆叠实现超高带宽的内存技术。"High Bandwidth"是相对于传统GDDR/DDR内存而言的。</td></tr>
+</table>
+
+<!-- ==================== 3. 核心原理 ==================== -->
+<h2>2.3 核心原理：GPU的层级结构</h2>
+
+<p>NVIDIA GPU内部有严格的层级组织，从大到小：</p>
+
+<div class="ascii">
+GPU层级结构（从大到小）：
+
+GPU（整颗芯片）
+│
+├── GPC 0（Graphics Processing Cluster）
+│   ├── TPC 0（Texture Processing Cluster）
+│   │   ├── SM 0（Streaming Multiprocessor）
+│   │   │   ├── 128个 FP32 CUDA Core
+│   │   │   ├── 128个 INT32 CUDA Core
+│   │   │   ├── 4个 Tensor Core（第四代）
+│   │   │   ├── 32个 LD/ST单元（加载/存储）
+│   │   │   ├── 4个 Special Function单元（sin/cos等）
+│   │   │   ├── 128KB 寄存器文件
+│   │   │   └── 128KB L1/共享内存（可配置比例）
+│   │   ├── SM 1
+│   │   └── ...
+│   ├── TPC 1
+│   └── ...
+│
+├── GPC 1
+│   └── ...
+│
+├── ...
+│
+├── L2 Cache（全局共享，50MB on H100）
+│
+├── 内存控制器（连接HBM）
+│
+├── NVLink接口（连接其他GPU）
+│
+└── PCIe接口（连接CPU）
+</div>
+
+<h3>SM：GPU的基本计算单元</h3>
+<p>SM（Streaming Multiprocessor）是GPU的"工人"。每个SM能<strong>同时执行大量线程</strong>（H100的每个SM可以管理2048个活跃线程）。SM内部的关键组件：</p>
+
+<table>
+<tr><th>组件</th><th>H100每SM数量</th><th>作用</th></tr>
+<tr><td>FP32 CUDA Core</td><td>128</td><td>执行单精度浮点运算</td></tr>
+<tr><td>INT32 CUDA Core</td><td>128</td><td>执行整数运算</td></tr>
+<tr><td>Tensor Core（第四代）</td><td>4</td><td>执行矩阵乘法（FP16/BF16/FP8）</td></tr>
+<tr><td>LD/ST单元</td><td>32</td><td>执行内存加载/存储操作</td></tr>
+<tr><td>SFU</td><td>4</td><td>执行特殊函数（sin, cos, exp等）</td></tr>
+<tr><td>寄存器文件</td><td>256 KB</td><td>最快的存储，每个线程私有</td></tr>
+<tr><td>L1/共享内存</td><td>256 KB</td><td>SM内共享，可配置比例</td></tr>
+</table>
+
+<div class="tip">
+<strong>💡 为什么Tensor Core只有4个，而CUDA Core有128个？</strong>
+<p>因为Tensor Core<strong>效率极高</strong>。一个第四代Tensor Core在一个时钟周期内可以完成一个4×4矩阵乘法（64次乘加运算）。而一个CUDA Core一个周期只能做1次乘加。所以4个Tensor Core = 4×64 = 256次乘加/周期，已经超过了128个CUDA Core的128次乘加/周期。</p>
+<p>这就是为什么AI训练主要靠Tensor Core——<strong>不是靠堆CUDA Core的数量</strong>。</p>
+</div>
+
+<h3>GPC和TPC：组织层级</h3>
+<p>GPC是GPU内部最大的组织单元。每个GPC包含多个TPC，每个TPC包含2个SM。GPC的作用是：</p>
+<ul>
+<li><strong>资源隔离</strong>：每个GPC有自己的L1 Cache、指令缓存等</li>
+<li><strong>并行调度</strong>：不同的GPC可以独立处理不同的任务</li>
+<li><strong>光栅化</strong>：在图形渲染中，每个GPC有自己的光栅化引擎</li>
+</ul>
+
+<!-- ==================== 4. 技术细节 ==================== -->
+<h2>2.4 技术细节：Compute Die vs IO Die</h2>
+
+<h3>为什么要把IO功能拆出来？</h3>
+<p>在第一章讲过，现代芯片趋向于Chiplet架构。对于GPU来说，IO功能（PCIe接口、NVLink接口、内存控制器等）有两个特点：</p>
+<ol>
+<li><strong>不需要先进制程</strong>：IO电路用6nm/7nm就够了，不需要4nm/3nm</li>
+<li><strong>需要大量模拟电路</strong>：高速SerDes（串行/解串器）、PHY（物理层接口）是模拟电路，和数字计算电路的制造工艺不同</li>
+</ol>
+
+<p>把IO功能拆到独立的IO Die上，可以：</p>
+<ul>
+<li>Compute Die用<strong>最先进制程</strong>（4nm/3nm），最大化晶体管密度和计算性能</li>
+<li>IO Die用<strong>成熟制程</strong>（6nm/7nm），成本更低，良率更高</li>
+<li>两种Die可以<strong>独立迭代</strong>——升级Compute Die不需要重新设计IO Die</li>
+</ul>
+
+<h3>IO Die管理的接口</h3>
+<table>
+<tr><th>接口</th><th>作用</th><th>带宽</th></tr>
+<tr><td>PCIe接口</td><td>和CPU通信、连接网卡</td><td>~128 GB/s (PCIe 5.0 x16)</td></tr>
+<tr><td>NVLink接口</td><td>和其他GPU直连通信</td><td>900-1800 GB/s</td></tr>
+<tr><td>内存控制器</td><td>管理HBM的读写</td><td>3.35-8 TB/s</td></tr>
+<tr><td>NVLink-C2C</td><td>和Grace CPU直连（Grace Hopper）</td><td>900 GB/s</td></tr>
+<tr><td>电源管理</td><td>电压调节、功耗控制</td><td>——</td></tr>
+</table>
+
+<div class="warn">
+<strong>⚠️ H100没有独立IO Die：</strong> NVIDIA H100是单Die设计——所有IO功能（NVLink、PCIe、内存控制器）都集成在那颗814mm²的大Die上。这是因为它用了4nm制程，面积足够大。但到了Blackwell（B200），由于要塞进更多计算单元，NVIDIA采用了<strong>双Compute Die + NVLink-C2C</strong>的方案。
+</div>
+
+<h3>GPU内部的内存层次</h3>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 600 380" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <defs>
+    <linearGradient id="mem-grad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#a78bfa" stop-opacity="0.3"/>
+    </linearGradient>
+  </defs>
+  <text x="300" y="25" text-anchor="middle" fill="#f0f6fc" font-size="14" font-weight="bold">GPU 内存层次（从快到慢、从小到大）</text>
+  <!-- Pyramid layers -->
+  <rect x="200" y="45" width="200" height="55" rx="8" fill="rgba(8,51,68,0.5)" stroke="#22d3ee" stroke-width="2"/>
+  <text x="300" y="68" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">寄存器</text>
+  <text x="300" y="85" text-anchor="middle" fill="#c9d1d9" font-size="10">256 KB/SM · 每线程私有</text>
+  <text x="520" y="68" text-anchor="middle" fill="#fbbf24" font-size="10">~1 周期</text>
+  <text x="520" y="85" text-anchor="middle" fill="#34d399" font-size="9">带宽: 极高</text>
+
+  <path d="M200,100 L500,100" stroke="#30363d" stroke-dasharray="4,3"/>
+  <rect x="150" y="110" width="300" height="55" rx="8" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="300" y="133" text-anchor="middle" fill="#34d399" font-size="12" font-weight="bold">共享内存 / L1 Cache</text>
+  <text x="300" y="150" text-anchor="middle" fill="#c9d1d9" font-size="10">228 KB/SM · SM内共享</text>
+  <text x="520" y="133" text-anchor="middle" fill="#fbbf24" font-size="10">~20-30 周期</text>
+  <text x="520" y="150" text-anchor="middle" fill="#34d399" font-size="9">~19 TB/s</text>
+
+  <path d="M150,165 L450,165" stroke="#30363d" stroke-dasharray="4,3"/>
+  <rect x="100" y="175" width="400" height="55" rx="8" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="300" y="198" text-anchor="middle" fill="#a78bfa" font-size="12" font-weight="bold">L2 Cache</text>
+  <text x="300" y="215" text-anchor="middle" fill="#c9d1d9" font-size="10">50 MB · 全GPU共享</text>
+  <text x="520" y="198" text-anchor="middle" fill="#fbbf24" font-size="10">~200 周期</text>
+  <text x="520" y="215" text-anchor="middle" fill="#34d399" font-size="9">~12 TB/s</text>
+
+  <path d="M100,230 L500,230" stroke="#30363d" stroke-dasharray="4,3"/>
+  <rect x="50" y="240" width="500" height="55" rx="8" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="300" y="263" text-anchor="middle" fill="#fbbf24" font-size="12" font-weight="bold">HBM3</text>
+  <text x="300" y="280" text-anchor="middle" fill="#c9d1d9" font-size="10">80 GB · 高带宽显存</text>
+  <text x="520" y="263" text-anchor="middle" fill="#fbbf24" font-size="10">~400-600 周期</text>
+  <text x="520" y="280" text-anchor="middle" fill="#34d399" font-size="9">3.35 TB/s</text>
+
+  <!-- Speed arrow -->
+  <line x1="30" y1="60" x2="30" y2="270" stroke="#8b949e" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="30" y="55" text-anchor="middle" fill="#8b949e" font-size="9">快</text>
+  <text x="30" y="285" text-anchor="middle" fill="#8b949e" font-size="9">慢</text>
+  <line x1="25" y1="62" x2="25" y2="70" stroke="#8b949e" stroke-width="1" marker-end="url(#arrow-r)"/>
+
+  <!-- Key insight -->
+  <text x="300" y="320" text-anchor="middle" fill="#8b949e" font-size="11">梯度数据通常从HBM直接读取（太大放不进Cache）</text>
+  <text x="300" y="340" text-anchor="middle" fill="#fbbf24" font-size="11">HBM带宽 + NVLink带宽 = 通信的两个关键瓶颈</text>
+  <text x="300" y="365" text-anchor="middle" fill="#8b949e" font-size="9">每一级大约慢 10 倍，容量大约大 10 倍</text>
+</svg>
+</div>
+
+<p>在集合通信中，梯度数据通常<strong>直接从HBM读取</strong>（因为梯度很大，放不进Cache），然后通过NVLink/PCIe发送到其他GPU。所以HBM带宽和NVLink带宽是通信的两个关键瓶颈。</p>
+
+<h3>Blackwell的双Die架构</h3>
+<p>NVIDIA B200采用了<strong>两个Compute Die</strong>通过NVLink-C2C连接的方案：</p>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 620 300" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <defs>
+    <marker id="arr-c2c2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#fbbf24"/></marker>
+    <marker id="arr-c2c2-l" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto"><path d="M8,0 L0,3 L8,6" fill="#fbbf24"/></marker>
+  </defs>
+  <text x="310" y="22" text-anchor="middle" fill="#f0f6fc" font-size="14" font-weight="bold">B200 内部架构（双Compute Die）</text>
+  <!-- Compute Die 0 -->
+  <rect x="40" y="45" width="230" height="100" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="2"/>
+  <text x="155" y="75" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">Compute Die 0</text>
+  <text x="155" y="95" text-anchor="middle" fill="#c9d1d9" font-size="10">~66 SM × 6 GPC</text>
+  <text x="155" y="112" text-anchor="middle" fill="#8b949e" font-size="9">~800mm² · 4nm</text>
+  <text x="155" y="130" text-anchor="middle" fill="#8b949e" font-size="9">1040亿晶体管</text>
+  <!-- Compute Die 1 -->
+  <rect x="350" y="45" width="230" height="100" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="2"/>
+  <text x="465" y="75" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">Compute Die 1</text>
+  <text x="465" y="95" text-anchor="middle" fill="#c9d1d9" font-size="10">~66 SM × 6 GPC</text>
+  <text x="465" y="112" text-anchor="middle" fill="#8b949e" font-size="9">~800mm² · 4nm</text>
+  <text x="465" y="130" text-anchor="middle" fill="#8b949e" font-size="9">1040亿晶体管</text>
+  <!-- NVLink-C2C -->
+  <line x1="270" y1="80" x2="350" y2="80" stroke="#fbbf24" stroke-width="2.5" marker-end="url(#arr-c2c2)"/>
+  <line x1="350" y1="100" x2="270" y2="100" stroke="#fbbf24" stroke-width="2.5" marker-end="url(#arr-c2c2-l)"/>
+  <rect x="278" y="66" width="64" height="16" rx="3" fill="rgba(120,53,15,0.4)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="310" y="78" text-anchor="middle" fill="#fbbf24" font-size="7" font-weight="bold">NVLink-C2C</text>
+  <text x="310" y="120" text-anchor="middle" fill="#fbbf24" font-size="9">1.8 TB/s</text>
+  <!-- IO Die / Memory -->
+  <rect x="40" y="170" width="540" height="55" rx="8" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="310" y="195" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="bold">IO Die / 内存控制器</text>
+  <text x="310" y="212" text-anchor="middle" fill="#c9d1d9" font-size="9">NVLink 5.0 接口 · PCIe 5.0 · 内存控制器</text>
+  <!-- Connection lines -->
+  <line x1="155" y1="145" x2="155" y2="170" stroke="#a78bfa" stroke-width="1.5"/>
+  <line x1="465" y1="145" x2="465" y2="170" stroke="#a78bfa" stroke-width="1.5"/>
+  <!-- HBM stacks -->
+  <rect x="40" y="240" width="540" height="40" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="310" y="265" text-anchor="middle" fill="#fbbf24" font-size="10">8× HBM3e · 192GB · 8 TB/s</text>
+  <line x1="310" y1="225" x2="310" y2="240" stroke="#fbbf24" stroke-width="1.5"/>
+  <!-- External connections -->
+  <text x="310" y="295" text-anchor="middle" fill="#8b949e" font-size="9">对软件透明 — 看起来像一个 2080 亿晶体管的 GPU</text>
+</svg>
+</div>
+
+<p>两个Compute Die通过<strong>NVLink-C2C</strong>连接，带宽高达1.8 TB/s——相当于把两个GPU"粘"成一个。对软件来说，它看起来像一个2080亿晶体管的"超级GPU"。</p>
+
+<!-- ==================== 5. 使用场景 ==================== -->
+<h2>2.5 使用场景：不同GPU架构的适用场景</h2>
+的工作原理，有助于在实际工程中做出更合理的技术选择和优化决策。</p>
+
+<h3>5 使用场景：不同GPU架构的适用场景</h3>
+<table>
+<tr><th>GPU</th><th>架构</th><th>内部设计</th><th>适用场景</th></tr>
+<tr><td>H100 SXM</td><td>Hopper</td><td>单Die 80GB HBM3</td><td>主流AI训练/推理</td></tr>
+<tr><td>B200</td><td>Blackwell</td><td>双Die 192GB HBM3e</td><td>大模型训练/推理</td></tr>
+<tr><td>B300 Ultra</td><td>Blackwell Ultra</td><td>双Die 288GB HBM3e</td><td>超大模型训练</td></tr>
+<tr><td>GH200</td><td>Hopper + Grace</td><td>Grace CPU + Hopper GPU</td><td>推理 + 内存密集型</td></tr>
+<tr><td>AMD MI300X</td><td>CDNA 3</td><td>8 Compute + 4 IO Die</td><td>大模型训练</td></tr>
+</table>
+
+<!-- ==================== 6. 相似技术对比 ==================== -->
+<h2>2.6 相似技术对比：NVIDIA vs AMD的GPU内部设计</h2>
+化决策。</p>
+
+<h3>6 相似技术对比：NVIDIA vs AMD的GPU内部设计</h3>
+<table>
+<tr><th>对比维度</th><th>NVIDIA H100</th><th>AMD MI300X</th></tr>
+<tr><td>Die设计</td><td>单Compute Die</td><td>8个Compute Die + 4个IO Die</td></tr>
+<tr><td>制程</td><td>4nm (TSMC)</td><td>5nm Compute + 6nm IO (TSMC)</td></tr>
+<tr><td>封装</td><td>CoWoS-S</td><td>3D堆叠 + CoWoS</td></tr>
+<tr><td>内存</td><td>80GB HBM3, 3.35 TB/s</td><td>192GB HBM3, 5.3 TB/s</td></tr>
+<tr><td>计算单元</td><td>132 SM (Tensor Core)</td><td>304 CU (Matrix Core)</td></tr>
+<tr><td>Die间互连</td><td>无（单Die）</td><td>Infinity Fabric (IO Die中转)</td></tr>
+</table>
+
+<p>AMD的Chiplet方案更激进——直接用了8个Compute Die。但代价是Die间通信需要通过IO Die中转，延迟比NVIDIA的单Die方案高。</p>
+
+<!-- ==================== 7. 关联技术 ==================== -->
+<h2>2.7 关联技术：GPU内部架构如何影响通信</h2>
+<h3>7 关联技术：GPU内部架构如何影响通信</h3>
+<p></p设计决策：</p>
+
+<ol>
+<li><strong>NVLink带宽为什么是900 GB/s？</strong> → 因为H100的NVLink接口有18条链路，每条50 GB/s。18×50=900。这些链路的物理线路通过封装实现。</li>
+<li><strong>为什么HBM带宽比NVLink高？</strong> → HBM通过TSV（3D封装）连接，几千根线；NVLink通过PCB/线缆连接，物理上只能放18条链路。</li>
+<li><strong>为什么GPUDirect RDMA能加速通信？</strong> → 因为它让数据从HBM直接通过NVLink接口发出，不经过CPU内存——省了一次HBM→CPU内存的拷贝。</li>
+<li><strong>为什么B200要用双Die？</strong> → 单Die的面积已经接近制造极限（~800mm²），要塞进更多晶体管只能拆成两个Die。</li>
+</ol>
+
+<!-- ==================== 8. 实际效果 ==================== -->
+<h2>2.8 实际效果：内部架构对训练速度的影响</h2>
+<h3>关联技术：GPU内部架构如何影响通信</h3>>假设8个H100做AllReduce，数据量1GB：</p>
+
+<div class="ascii">
+AllReduce数据流（简化）：
+
+  ① HBM → SM:     1GB / 3,350 GB/s ≈ 0.3 ms
+  ② SM → NVLink:   1GB / 900 GB/s   ≈ 1.1 ms
+  ③ NVLink → HBM:  1GB / 3,350 GB/s ≈ 0.3 ms
+
+  总计 ≈ 1.7 ms（Ring AllReduce，4步）
+
+  如果HBM带宽只有500 GB/s（如DDR内存）：
+  ① 变成 2.0 ms → 总计 ≈ 3.1 ms → 慢了 1.8倍
+</div>
+
+<p>HBM的超高带宽直接决定了AllReduce中"从显存读取/写入梯度"这一步的速度。如果HBM是瓶颈，整个通信都会变慢。</p>
+
+<div class="tip">
+<strong>💡 HBM4展望：</strong> HBM4预计随NVIDIA Rubin架构（2026年）登场，采用更宽的接口和更高的堆叠�次，带宽有望突破每堆叠2TB/s。HBM4还将引入逻辑层（Logic Die）作为基础芯片，将部分控制逻辑下放到HBM内部，进一步降低延迟、提升效率。对于下一代万亿参数模型的训练来说，HBM4将是关键使能技术。
+</div>
+
+<!-- ==================== 9. Blackwell与Rubin架构演进 ==================== -->
+<h2>2.9 🆕 Blackwell与Rubin的架构演进</h2>
+
+<h3>H100 vs B200 vs VR200 架构对比</h3>
+<table>
+<tr><th>特性</th><th>H100 (Hopper)</th><th>B200 (Blackwell)</th><th>VR200 (Rubin)</th></tr>
+<tr><td><strong>Compute Die数量</strong></td><td>1个</td><td>2个（NVLink-C2C连接）</td><td>2个（下一代C2C）</td></tr>
+<tr><td><strong>HBM代数/容量</strong></td><td>HBM3 / 80GB</td><td>HBM3e / 192GB</td><td>HBM4 / 288GB（4×64GB堆叠）</td></tr>
+<tr><td><strong>HBM带宽</strong></td><td>3.35 TB/s</td><td>8.0 TB/s</td><td>12+ TB/s（预期）</td></tr>
+<tr><td><strong>NVLink版本/带宽</strong></td><td>NVLink 4.0 / 900 GB/s</td><td>NVLink 5.0 / 1,800 GB/s</td><td>NVLink 6.0 / 3,600 GB/s（预期）</td></tr>
+<tr><td><strong>晶体管数</strong></td><td>800亿</td><td>2,080亿（双Die合计）</td><td>~4,000亿（预期）</td></tr>
+<tr><td><strong>TDP功耗</strong></td><td>700W</td><td>1,000W</td><td>1,200W+（预期）</td></tr>
+</table>
+
+<h3>Blackwell双Die架构 vs Rubin架构</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 700 520" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <defs>
+    <marker id="arr-b" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#fbbf24"/></marker>
+    <marker id="arr-bl" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto"><path d="M8,0 L0,3 L8,6" fill="#fbbf24"/></marker>
+  </defs>
+  <!-- B200 -->
+  <text x="350" y="20" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">Blackwell B200 封装</text>
+  <rect x="20" y="30" width="660" height="200" rx="10" fill="none" stroke="#22d3ee" stroke-width="1" stroke-dasharray="6,4"/>
+  <rect x="40" y="50" width="260" height="80" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="170" y="75" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="bold">Compute Die 0</text>
+  <text x="170" y="92" text-anchor="middle" fill="#c9d1d9" font-size="9">80 SM × 8 GPC</text>
+  <text x="170" y="108" text-anchor="middle" fill="#8b949e" font-size="8">1040亿晶体管 · 800mm²</text>
+  <rect x="400" y="50" width="260" height="80" rx="8" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="530" y="75" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="bold">Compute Die 1</text>
+  <text x="530" y="92" text-anchor="middle" fill="#c9d1d9" font-size="9">80 SM × 8 GPC</text>
+  <text x="530" y="108" text-anchor="middle" fill="#8b949e" font-size="8">1040亿晶体管 · 800mm²</text>
+  <line x1="300" y1="80" x2="400" y2="80" stroke="#fbbf24" stroke-width="2" marker-end="url(#arr-b)"/>
+  <line x1="400" y1="95" x2="300" y2="95" stroke="#fbbf24" stroke-width="2" marker-end="url(#arr-bl)"/>
+  <text x="350" y="75" text-anchor="middle" fill="#fbbf24" font-size="7">NVLink-C2C</text>
+  <rect x="40" y="140" width="620" height="30" rx="6" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1"/>
+  <text x="350" y="160" text-anchor="middle" fill="#a78bfa" font-size="9">NVLink 5.0 Switch · 1.8 TB/s</text>
+  <rect x="40" y="178" width="620" height="35" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="350" y="200" text-anchor="middle" fill="#fbbf24" font-size="9">5× HBM3e · 192GB · 8 TB/s</text>
+  <text x="350" y="242" text-anchor="middle" fill="#8b949e" font-size="9">▲ NVLink 5.0 (1.8TB/s) ▲</text>
+
+  <!-- VR200 -->
+  <text x="350" y="270" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">Rubin VR200 封装（预期 2026）</text>
+  <rect x="20" y="280" width="660" height="200" rx="10" fill="none" stroke="#34d399" stroke-width="1" stroke-dasharray="6,4"/>
+  <rect x="40" y="300" width="260" height="80" rx="8" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="170" y="325" text-anchor="middle" fill="#34d399" font-size="11" font-weight="bold">Compute Die 0</text>
+  <text x="170" y="342" text-anchor="middle" fill="#c9d1d9" font-size="9">更多 SM / Tensor Core</text>
+  <text x="170" y="358" text-anchor="middle" fill="#8b949e" font-size="8">~2000亿晶体管</text>
+  <rect x="400" y="300" width="260" height="80" rx="8" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="530" y="325" text-anchor="middle" fill="#34d399" font-size="11" font-weight="bold">Compute Die 1</text>
+  <text x="530" y="342" text-anchor="middle" fill="#c9d1d9" font-size="9">更多 SM / Tensor Core</text>
+  <text x="530" y="358" text-anchor="middle" fill="#8b949e" font-size="8">~2000亿晶体管</text>
+  <line x1="300" y1="330" x2="400" y2="330" stroke="#fbbf24" stroke-width="2" marker-end="url(#arr-b)"/>
+  <line x1="400" y1="345" x2="300" y2="345" stroke="#fbbf24" stroke-width="2" marker-end="url(#arr-bl)"/>
+  <text x="350" y="325" text-anchor="middle" fill="#fbbf24" font-size="7">NVLink-C2C ~2TB/s?</text>
+  <rect x="40" y="390" width="620" height="30" rx="6" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1"/>
+  <text x="350" y="410" text-anchor="middle" fill="#a78bfa" font-size="9">NVLink 6.0 Switch · 3.6 TB/s（预期）</text>
+  <rect x="40" y="428" width="620" height="35" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="350" y="450" text-anchor="middle" fill="#fbbf24" font-size="9">4× HBM4 · 256-288GB · 12+ TB/s（预期）</text>
+  <text x="350" y="495" text-anchor="middle" fill="#8b949e" font-size="9">每一代：算力翻倍 · 带宽翻倍 · 容量翻倍 · 平衡持续维护</text>
+</svg>
+</div>
+
+<h3>HBM4：Rubin的核心升级</h3>
+<p>HBM4是Rubin架构的关键技术升级，相比HBM3e有显著提升：</p>
+
+<table>
+<tr><th>特性</th><th>HBM3e (当前)</th><th>HBM4 (Rubin)</th><th>影响</th></tr>
+<tr><td><strong>单堆叠带宽</strong></td><td>~1.2 TB/s</td><td>2+ TB/s</td><td>训练/推理吞吐量大幅提升</td></tr>
+<tr><td><strong>单堆叠容量</strong></td><td>36GB (12层堆叠)</td><td>64GB (16层堆叠)</td><td>更大模型可单卡部署</td></tr>
+<tr><td><strong>功耗</strong></td><td>~15W/堆叠</td><td>~25W/堆叠</td><td>散热设计更关键</td></tr>
+<tr><td><strong>接口技术</strong></td><td>TSV直连</td><td>Logic Die基础层</td><td>更低延迟、更高能效</td></tr>
+</table>
+
+<div class="deep">
+<strong>🔬 对集合通信的影响：</strong> HBM4的更大容量意味着更大的模型可以装进更少的GPU中。例如，一个700亿参数的FP16模型需要约140GB显存——在H100（80GB）上需要2卡张量并行，但在Rubin（288GB）上可以单卡部署，完全消除张量并行带来的AllReduce通信开销。这从根本上改变了模型并行策略。
+</div>
+
+<div class="tip">
+<strong>💡 为什么了解GPU内部架构对通信优化很重要？</strong>
+<p>知道GPU内部的<strong>分层架构</strong>和<strong>连接方式</strong>直接影响你的通信优化策略：</p>
+<ul>
+<li><strong>Blackwell的双Die设计</strong>：两个Compute Die之间通过NVLink-C2C连接（900GB/s），而GPU之间通过NVLink 5.0（1.8TB/s）。这意味着Die间通信（片内）实际上<strong>比</strong>GPU间通信（片间）更慢！优化时需要考虑数据放在哪个Die上。</li>
+<li><strong>HBM带宽 vs NVLink带宽</strong>：HBM带宽通常是NVLink带宽的4-5倍。如果你的AllReduce操作需要频繁读写HBM，HBM是瓶颈；如果数据量小但需要跨GPU传输，NVLink才是瓶颈。</li>
+<li><strong>IO Die的角色</strong>：所有NVLink/PCIe通信都经过IO Die。IO Die的调度策略影响通信延迟——这就是为什么NCCL的拓扑检测很重要，它会根据物理连接选择最优通信路径。</li>
+</ul>
+<p>一句话：<strong>不理解GPU内部架构，就无法理解NCCL为什么这样调度通信</strong>。</p>
+</div>
+
+<!-- ==================== 2.9.2 SM内部工作机制 ==================== -->
+<h3>2.9.2 内部工作机制：SM如何执行计算</h3>
+
+<p>前面我们介绍了SM的组件清单，但这些组件是如何<strong>协同工作</strong>来执行计算的？理解SM的内部执行模型，是理解GPU为什么能同时处理数千线程的关键。</p>
+
+<h4>SM内部的硬件组成</h4>
+<p>以H100为例，每个SM内部包含以下核心计算资源：</p>
+
+<table>
+<tr><th>资源</th><th>数量</th><th>说明</th></tr>
+<tr><td>FP32 CUDA Core</td><td>128个</td><td>单精度浮点运算单元，每个时钟周期执行1次FP32乘加</td></tr>
+<tr><td>Tensor Core</td><td>4个</td><td>矩阵乘法加速单元，每个时钟周期完成1个4×4矩阵乘法（64次乘加）</td></tr>
+<tr><td>Warp Scheduler</td><td>4个</td><td>调度器，每个周期从就绪队列中选择一个warp并发射指令</td></tr>
+<tr><td>寄存器文件</td><td>256 KB</td><td>每个线程最多分配255个32位寄存器</td></tr>
+<tr><td>共享内存 / L1</td><td>256 KB</td><td>SM内所有线程共享，可配置比例</td></tr>
+</table>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 620 520" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="310" y="22" text-anchor="middle" fill="#f0f6fc" font-size="14" font-weight="bold">SM 内部结构示意（H100）</text>
+  <!-- SM boundary -->
+  <rect x="30" y="35" width="560" height="310" rx="10" fill="none" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="310" y="55" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="bold">SM（Streaming Multiprocessor）</text>
+  <!-- Warp Schedulers -->
+  <rect x="50" y="65" width="120" height="35" rx="6" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1.2"/>
+  <text x="110" y="87" text-anchor="middle" fill="#fb923c" font-size="9">Scheduler 0</text>
+  <rect x="185" y="65" width="120" height="35" rx="6" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1.2"/>
+  <text x="245" y="87" text-anchor="middle" fill="#fb923c" font-size="9">Scheduler 1</text>
+  <rect x="320" y="65" width="120" height="35" rx="6" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1.2"/>
+  <text x="380" y="87" text-anchor="middle" fill="#fb923c" font-size="9">Scheduler 2</text>
+  <rect x="455" y="65" width="120" height="35" rx="6" fill="rgba(251,146,60,0.2)" stroke="#fb923c" stroke-width="1.2"/>
+  <text x="515" y="87" text-anchor="middle" fill="#fb923c" font-size="9">Scheduler 3</text>
+  <!-- Arrows down -->
+  <line x1="110" y1="100" x2="310" y2="120" stroke="#fb923c" stroke-width="0.8" opacity="0.5"/>
+  <line x1="245" y1="100" x2="310" y2="120" stroke="#fb923c" stroke-width="0.8" opacity="0.5"/>
+  <line x1="380" y1="100" x2="310" y2="120" stroke="#fb923c" stroke-width="0.8" opacity="0.5"/>
+  <line x1="515" y1="100" x2="310" y2="120" stroke="#fb923c" stroke-width="0.8" opacity="0.5"/>
+  <!-- CUDA Cores -->
+  <rect x="50" y="120" width="520" height="50" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="310" y="143" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="bold">128个 FP32 CUDA Core</text>
+  <text x="310" y="160" text-anchor="middle" fill="#8b949e" font-size="9">4组 × 32个（每组对应一个Warp）</text>
+  <!-- Tensor Cores -->
+  <rect x="50" y="180" width="520" height="45" rx="6" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="310" y="200" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="bold">4个 Tensor Core（第四代）</text>
+  <text x="310" y="216" text-anchor="middle" fill="#8b949e" font-size="9">每周期 4×4矩阵乘法 = 64次乘加</text>
+  <!-- Register + Shared Memory -->
+  <rect x="50" y="235" width="250" height="45" rx="6" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.2"/>
+  <text x="175" y="255" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">寄存器文件 256KB</text>
+  <text x="175" y="270" text-anchor="middle" fill="#8b949e" font-size="8">每线程私有</text>
+  <rect x="320" y="235" width="250" height="45" rx="6" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.2"/>
+  <text x="445" y="255" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">共享内存/L1 256KB</text>
+  <text x="445" y="270" text-anchor="middle" fill="#8b949e" font-size="8">SM内所有线程共享</text>
+  <!-- LD/ST + SFU -->
+  <rect x="50" y="290" width="340" height="40" rx="6" fill="rgba(30,41,59,0.4)" stroke="#94a3b8" stroke-width="1"/>
+  <text x="220" y="315" text-anchor="middle" fill="#94a3b8" font-size="10">32个 LD/ST 单元</text>
+  <rect x="405" y="290" width="165" height="40" rx="6" fill="rgba(30,41,59,0.4)" stroke="#94a3b8" stroke-width="1"/>
+  <text x="487" y="315" text-anchor="middle" fill="#94a3b8" font-size="10">4个 SFU</text>
+  <!-- Down arrow to L2 -->
+  <line x1="310" y1="345" x2="310" y2="370" stroke="#8b949e" stroke-width="1.5"/>
+  <polygon points="305,370 315,370 310,378" fill="#8b949e"/>
+  <!-- L2 Cache -->
+  <rect x="160" y="380" width="300" height="45" rx="8" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="310" y="407" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="bold">L2 Cache · 50MB · 全GPU共享</text>
+  <!-- Down arrow to HBM -->
+  <line x1="310" y1="425" x2="310" y2="450" stroke="#8b949e" stroke-width="1.5"/>
+  <polygon points="305,450 315,450 310,458" fill="#8b949e"/>
+  <!-- HBM -->
+  <rect x="110" y="460" width="400" height="40" rx="8" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="310" y="485" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="bold">HBM3 · 80GB · 3.35 TB/s</text>
+</svg>
+</div>
+
+<h4>Warp与SIMT执行模型</h4>
+<p>GPU执行计算的基本单位不是单个线程，而是<strong>Warp</strong>——一组32个线程。这32个线程被捆绑在一起，<strong>每时钟周期执行相同的指令</strong>。这就是SIMT（Single Instruction Multiple Thread）模型：</p>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 660 220" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="330" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">SIMT 执行模型（Warp = 32个线程同步执行）</text>
+  <!-- Timeline -->
+  <g transform="translate(30,40)">
+    <rect x="0" y="0" width="600" height="35" rx="4" fill="rgba(8,51,68,0.3)" stroke="#22d3ee" stroke-width="1"/>
+    <text x="30" y="22" text-anchor="middle" fill="#22d3ee" font-size="9" font-weight="bold">周期1</text>
+    <text x="180" y="22" text-anchor="middle" fill="#22d3ee" font-size="9" font-weight="bold">周期2</text>
+    <text x="330" y="22" text-anchor="middle" fill="#22d3ee" font-size="9" font-weight="bold">周期3</text>
+    <text x="480" y="22" text-anchor="middle" fill="#22d3ee" font-size="9" font-weight="bold">周期4</text>
+    <!-- Warp A -->
+    <rect x="0" y="45" width="150" height="30" rx="4" fill="rgba(34,211,238,0.2)" stroke="#22d3ee" stroke-width="1"/>
+    <text x="75" y="65" text-anchor="middle" fill="#22d3ee" font-size="9">Warp A: LDG</text>
+    <rect x="150" y="45" width="150" height="30" rx="4" fill="rgba(34,211,238,0.2)" stroke="#22d3ee" stroke-width="1"/>
+    <text x="225" y="65" text-anchor="middle" fill="#22d3ee" font-size="9">Warp A: FFMA</text>
+    <rect x="450" y="45" width="150" height="30" rx="4" fill="rgba(34,211,238,0.2)" stroke="#22d3ee" stroke-width="1"/>
+    <text x="525" y="65" text-anchor="middle" fill="#22d3ee" font-size="9">Warp A: STG</text>
+    <!-- Warp B -->
+    <rect x="300" y="45" width="150" height="30" rx="4" fill="rgba(167,139,250,0.2)" stroke="#a78bfa" stroke-width="1"/>
+    <text x="375" y="65" text-anchor="middle" fill="#a78bfa" font-size="9">Warp B: LDG</text>
+    <!-- Latency hide annotation -->
+    <line x1="300" y1="80" x2="450" y2="80" stroke="#fbbf24" stroke-width="1" stroke-dasharray="4,3"/>
+    <text x="375" y="95" text-anchor="middle" fill="#fbbf24" font-size="8">↑ 切换到 Warp B 隐藏内存延迟</text>
+    <!-- Legend -->
+    <text x="300" y="125" text-anchor="middle" fill="#8b949e" font-size="9">LDG = 从HBM加载 · FFMA = 浮点乘加 · STG = 写回HBM</text>
+    <text x="300" y="145" text-anchor="middle" fill="#c9d1d9" font-size="10">32个线程执行相同指令，但处理不同数据</text>
+    <text x="300" y="165" text-anchor="middle" fill="#34d399" font-size="10">4个 Warp Scheduler → 4个 Warp 并行管理 → 延迟隐藏</text>
+  </g>
+</svg>
+</div>
+
+<p>4个Warp Scheduler意味着SM可以同时管理4个Warp的执行。当一个Warp因为等待内存数据而暂停时（称为<strong>内存延迟隐藏</strong>），调度器立刻切换到另一个就绪的Warp继续执行。这就是GPU能隐藏长达数百时钟周期的HBM延迟的秘诀——SM始终保持忙碌。</p>
+
+<div class="tip">
+<strong>💡 为什么GPU需要这么多线程？</strong>
+<p>CPU的设计哲学是"尽量让每个核心快"——用乱序执行、分支预测等复杂逻辑来提升单线程性能。GPU的设计哲学是"尽量让所有单元忙"——用大量线程来隐藏延迟。H100的一个SM可以管理2048个活跃线程（64个Warp × 32线程/Warp），这么多线程足以保证即使部分Warp在等内存，总有Warp可以执行计算。</p>
+</div>
+
+<h4>SM的内存层次：从寄存器到HBM</h4>
+<p>SM执行计算时，数据需要在多级存储之间流动。每一级的速度和容量差异巨大：</p>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 680 280" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <defs>
+    <marker id="arr-mem" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#34d399"/></marker>
+  </defs>
+  <text x="340" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">SM 内存层次（数据流动方向）</text>
+  <!-- Scope labels -->
+  <text x="85" y="45" text-anchor="middle" fill="#8b949e" font-size="8">线程私有</text>
+  <text x="230" y="45" text-anchor="middle" fill="#8b949e" font-size="8">SM共享</text>
+  <text x="390" y="45" text-anchor="middle" fill="#8b949e" font-size="8">全GPU共享</text>
+  <text x="560" y="45" text-anchor="middle" fill="#8b949e" font-size="8">全局</text>
+  <!-- Boxes -->
+  <rect x="30" y="55" width="110" height="50" rx="6" fill="rgba(8,51,68,0.5)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="85" y="77" text-anchor="middle" fill="#22d3ee" font-size="10" font-weight="bold">寄存器</text>
+  <text x="85" y="94" text-anchor="middle" fill="#c9d1d9" font-size="8">255/线程</text>
+  <line x1="140" y1="80" x2="165" y2="80" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr-mem)"/>
+  <rect x="165" y="55" width="130" height="50" rx="6" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="230" y="77" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">共享内存/L1</text>
+  <text x="230" y="94" text-anchor="middle" fill="#c9d1d9" font-size="8">164KB/SM</text>
+  <line x1="295" y1="80" x2="320" y2="80" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr-mem)"/>
+  <rect x="320" y="55" width="140" height="50" rx="6" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="390" y="77" text-anchor="middle" fill="#a78bfa" font-size="10" font-weight="bold">L2 Cache</text>
+  <text x="390" y="94" text-anchor="middle" fill="#c9d1d9" font-size="8">50MB</text>
+  <line x1="460" y1="80" x2="485" y2="80" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr-mem)"/>
+  <rect x="485" y="55" width="140" height="50" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="555" y="77" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="bold">HBM3</text>
+  <text x="555" y="94" text-anchor="middle" fill="#c9d1d9" font-size="8">80GB</text>
+  <!-- Latency row -->
+  <text x="85" y="130" text-anchor="middle" fill="#fbbf24" font-size="8">~1 周期</text>
+  <text x="230" y="130" text-anchor="middle" fill="#fbbf24" font-size="8">~20-30 周期</text>
+  <text x="390" y="130" text-anchor="middle" fill="#fbbf24" font-size="8">~200 周期</text>
+  <text x="555" y="130" text-anchor="middle" fill="#fbbf24" font-size="8">~400 周期</text>
+  <!-- Bandwidth row -->
+  <text x="85" y="145" text-anchor="middle" fill="#34d399" font-size="8">极高</text>
+  <text x="230" y="145" text-anchor="middle" fill="#34d399" font-size="8">~19 TB/s</text>
+  <text x="390" y="145" text-anchor="middle" fill="#34d399" font-size="8">~12 TB/s</text>
+  <text x="555" y="145" text-anchor="middle" fill="#34d399" font-size="8">3.35 TB/s</text>
+  <!-- 10x slower annotation -->
+  <text x="340" y="170" text-anchor="middle" fill="#8b949e" font-size="9">◀ ────── 每一级大约慢 10 倍 ────── ▶</text>
+  <!-- Data access patterns -->
+  <rect x="30" y="190" width="620" height="70" rx="8" fill="rgba(30,41,59,0.3)" stroke="#30363d" stroke-width="1"/>
+  <text x="340" y="210" text-anchor="middle" fill="#f0f6fc" font-size="10" font-weight="bold">数据访问模式</text>
+  <text x="340" y="228" text-anchor="middle" fill="#34d399" font-size="9">计算密集型（矩阵乘法）：数据在寄存器/共享内存中反复使用，极少访问HBM</text>
+  <text x="340" y="245" text-anchor="middle" fill="#fbbf24" font-size="9">通信密集型（AllReduce）：数据必须从HBM读出，通过NVLink发送到其他GPU</text>
+</svg>
+</div>
+
+<div class="deep">
+<strong>🔬 AllReduce中的数据路径：</strong>
+<p>在执行AllReduce时，GPU需要从HBM中读取梯度数据，通过NVLink发送到其他GPU。这个过程的关键瓶颈是<strong>HBM读取带宽</strong>。以H100为例：</p>
+<ul>
+<li>HBM带宽：3.35 TB/s —— 决定数据能多快从显存"搬出来"</li>
+<li>NVLink带宽：900 GB/s —— 决定数据能多快传到其他GPU</li>
+</ul>
+<p>如果HBM带宽不够，NVLink就会"饿着"——数据来不及从HBM搬到NVLink接口。这就是为什么HBM带宽是集合通信的基础瓶颈。</p>
+</div>
+
+<!-- ==================== 2.9.3 向前串联 ==================== -->
+<h3>2.9.3 向前串联：GPU架构如何决定通信需求</h3>
+
+<p>前面几节我们了解了GPU的内部结构。现在让我们把这些知识<strong>串联起来</strong>，看看GPU架构如何从根本上决定了集合通信的行为模式。</p>
+
+<h4>Compute Die vs IO Die：两条独立的物理通路</h4>
+<p>这是理解GPU通信最关键的架构洞察：</p>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 680 420" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <defs>
+    <marker id="arr-comp" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#34d399"/></marker>
+    <marker id="arr-comm" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#fbbf24"/></marker>
+  </defs>
+  <text x="340" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">GPU 内部的两条独立数据通路</text>
+  <!-- Compute Die boundary -->
+  <rect x="30" y="35" width="490" height="230" rx="10" fill="none" stroke="#22d3ee" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="275" y="55" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="bold">Compute Die</text>
+  <!-- Components inside Compute Die -->
+  <rect x="50" y="70" width="90" height="40" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="95" y="94" text-anchor="middle" fill="#22d3ee" font-size="10">SM</text>
+  <rect x="170" y="70" width="90" height="40" rx="6" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1"/>
+  <text x="215" y="94" text-anchor="middle" fill="#34d399" font-size="10">L1/共享内存</text>
+  <rect x="290" y="70" width="100" height="40" rx="6" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1"/>
+  <text x="340" y="94" text-anchor="middle" fill="#a78bfa" font-size="10">L2 Cache</text>
+  <rect x="420" y="70" width="90" height="40" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="465" y="94" text-anchor="middle" fill="#fbbf24" font-size="9">HBM控制器</text>
+  <!-- Path 1: Compute -->
+  <text x="275" y="130" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">通路1 — 计算路径</text>
+  <line x1="95" y1="145" x2="215" y2="145" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr-comp)"/>
+  <line x1="215" y1="155" x2="340" y2="155" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr-comp)"/>
+  <line x1="340" y1="165" x2="465" y2="165" stroke="#34d399" stroke-width="1.5" marker-end="url(#arr-comp)"/>
+  <text x="155" y="142" text-anchor="middle" fill="#34d399" font-size="7">计算</text>
+  <text x="278" y="152" text-anchor="middle" fill="#34d399" font-size="7">读写</text>
+  <text x="403" y="162" text-anchor="middle" fill="#34d399" font-size="7">读取</text>
+  <text x="275" y="190" text-anchor="middle" fill="#8b949e" font-size="8">用途：矩阵乘法、激活函数等计算</text>
+  <!-- Path 2: Communication -->
+  <text x="275" y="210" text-anchor="middle" fill="#fbbf24" font-size="10" font-weight="bold">通路2 — 通信路径</text>
+  <line x1="95" y1="225" x2="340" y2="225" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="5,3"/>
+  <line x1="340" y1="235" x2="465" y2="235" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arr-comm)"/>
+  <text x="215" y="222" text-anchor="middle" fill="#fbbf24" font-size="7">HBM读取</text>
+  <text x="403" y="232" text-anchor="middle" fill="#fbbf24" font-size="7">L2缓冲</text>
+  <text x="275" y="255" text-anchor="middle" fill="#8b949e" font-size="8">用途：AllReduce、AllGather等集合通信</text>
+  <!-- IO Die -->
+  <rect x="30" y="280" width="490" height="80" rx="10" fill="rgba(251,146,60,0.15)" stroke="#fb923c" stroke-width="1.5"/>
+  <text x="275" y="300" text-anchor="middle" fill="#fb923c" font-size="11" font-weight="bold">IO Die</text>
+  <line x1="465" y1="245" x2="275" y2="280" stroke="#fbbf24" stroke-width="1.5"/>
+  <rect x="80" y="315" width="130" height="30" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="145" y="335" text-anchor="middle" fill="#fbbf24" font-size="9">NVLink → 其他GPU</text>
+  <rect x="230" y="315" width="130" height="30" rx="6" fill="rgba(30,41,59,0.4)" stroke="#94a3b8" stroke-width="1"/>
+  <text x="295" y="335" text-anchor="middle" fill="#94a3b8" font-size="9">PCIe → CPU</text>
+  <rect x="380" y="315" width="120" height="30" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="440" y="335" text-anchor="middle" fill="#fbbf24" font-size="9">HBM堆叠</text>
+  <!-- Key insight -->
+  <rect x="50" y="375" width="580" height="35" rx="8" fill="rgba(6,78,59,0.2)" stroke="#34d399" stroke-width="1"/>
+  <text x="340" y="397" text-anchor="middle" fill="#34d399" font-size="11" font-weight="bold">关键洞察：计算和通信走不同的物理路径，不会互相抢占资源！</text>
+</svg>
+</div>
+
+<div class="tip">
+<strong>💡 这就是"计算-通信重叠"的硬件基础！</strong>
+<p>因为计算路径（HBM→SM）和通信路径（HBM→IO Die→NVLink）使用<strong>不同的物理硬件</strong>，GPU可以<strong>同时</strong>进行计算和通信——SM在做矩阵乘法的同时，IO Die在通过NVLink发送数据。这就是计算-通信重叠（Compute-Communication Overlap）的物理基础，也是第10章要详细讲解的核心优化技术。</p>
+</div>
+
+<h4>L2 Cache：通信的中转站</h4>
+<p>L2 Cache在集合通信中扮演着一个容易被忽视但至关重要的角色——<strong>数据中转缓冲</strong>：</p>
+
+<div class="ascii">
+NCCL发送数据的内部流程：
+
+步骤1:  NCCL在SM上运行一个kernel
+        → SM从HBM读取梯度数据到寄存器
+        → SM对数据做必要的预处理（如Ring AllReduce中的reduce-scatter）
+
+步骤2:  SM将处理后的数据写回L2 Cache
+        （不是写回HBM！L2比HBM快3-4倍）
+
+步骤3:  NVLink控制器从L2 Cache读取数据
+        → 通过NVLink链路发送到目标GPU
+
+步骤4:  目标GPU收到数据后，NCCL的SM kernel从L2读取
+        → 写入目标GPU的HBM
+
+L2 Cache作为中转缓冲的优势：
+  - L2读写带宽 ~12 TB/s，远高于HBM的3.35 TB/s
+  - 避免了"写HBM再读HBM"的双重延迟
+  - 减少了HBM的读写争用（计算和通信共享HBM带宽）
+</div>
+
+<div class="warn">
+<strong>⚠️ HBM带宽才是瓶颈，不是L2：</strong>
+<p>L2 Cache带宽高达~12 TB/s，而HBM带宽仅3.35 TB/s。在AllReduce中，瓶颈几乎总是HBM——数据必须从HBM"搬出来"才能被NVLink发送。L2 Cache的超高带宽确保了它不会成为额外的瓶颈。这也是为什么HBM带宽的每一代提升对集合通信都至关重要。</p>
+</div>
+
+<h4>算力与带宽的精妙平衡</h4>
+<p>最后，让我们用一个具体数字来说明GPU架构的<strong>设计哲学</strong>——计算能力和通信能力的平衡：</p>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 660 280" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="330" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">H100 算力 vs 带宽对比（BF16）</text>
+  <!-- Stats -->
+  <text x="165" y="50" text-anchor="middle" fill="#a78bfa" font-size="11">Tensor Core: ~2,000 TFLOPS</text>
+  <text x="495" y="50" text-anchor="middle" fill="#fbbf24" font-size="11">NVLink: 1,800 GB/s</text>
+  <!-- Timeline bar -->
+  <text x="330" y="85" text-anchor="middle" fill="#c9d1d9" font-size="10">场景：AllReduce 1GB + 执行 1B 参数 GEMM</text>
+  <!-- Communication bar -->
+  <rect x="50" y="100" width="280" height="40" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="190" y="125" text-anchor="middle" fill="#fbbf24" font-size="11" font-weight="bold">通信 ≈ 1ms</text>
+  <text x="190" y="137" text-anchor="middle" fill="#8b949e" font-size="8">Ring AllReduce 1.78GB ÷ 1.8TB/s</text>
+  <!-- Compute bar -->
+  <rect x="330" y="100" width="280" height="40" rx="6" fill="rgba(76,29,149,0.3)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="470" y="125" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="bold">计算 ≈ 1ms</text>
+  <text x="470" y="137" text-anchor="middle" fill="#8b949e" font-size="8">1B × 2 FLOPs ÷ 2000 TFLOPS</text>
+  <!-- Overlap visualization -->
+  <text x="330" y="170" text-anchor="middle" fill="#34d399" font-size="14" font-weight="bold">↕ 天然平衡！可以完美重叠！</text>
+  <rect x="50" y="185" width="560" height="25" rx="6" fill="rgba(6,78,59,0.2)" stroke="#34d399" stroke-width="1"/>
+  <text x="330" y="203" text-anchor="middle" fill="#34d399" font-size="10">重叠后总时间 ≈ max(通信, 计算) ≈ 1ms（而非 2ms）</text>
+  <!-- Architecture evolution -->
+  <text x="330" y="235" text-anchor="middle" fill="#f0f6fc" font-size="10">架构代际平衡：</text>
+  <text x="330" y="255" text-anchor="middle" fill="#8b949e" font-size="9">H100: 2000 TFLOPS / 900 GB/s → B200: 4000 TFLOPS / 1800 GB/s → VR200: 8000 TFLOPS / 3600 GB/s</text>
+  <text x="330" y="272" text-anchor="middle" fill="#fbbf24" font-size="9">NVIDIA 精心设计：计算吞吐量 ≈ 通信吞吐量（同一数量级）</text>
+</svg>
+</div>
+
+<div class="deep">
+<strong>🔬 这不是巧合，而是精心设计：</strong>
+<p>NVIDIA在设计GPU架构时，有意让计算吞吐量和通信吞吐量处于<strong>同一数量级</strong>。如果计算远快于通信，GPU就不得不空等数据传输（通信瓶颈）；如果通信远快于计算，NVLink的带宽就被浪费了（过度投资）。</p>
+<p>这种平衡意味着：</p>
+<ul>
+<li><strong>计算-通信重叠</strong>是真正有效的——两者耗时相近，重叠后总时间接近于较长的那个，而不是两者之和</li>
+<li><strong>随架构代际演进，平衡被持续维护</strong>：B200的NVLink带宽翻倍到1.8TB/s，同时Tensor Core算力也翻倍到~4000 TFLOPS。Rubin更是同步提升到3.6TB/s和~8000 TFLOPS</li>
+<li><strong>理解这个平衡，你就能预判优化的天花板</strong>：如果AllReduce已经和GEMM完美重叠，再优化通信也不会让整体更快——瓶颈已经转移到计算侧了</li>
+</ul>
+</div>
+
+<div class="tip">
+<strong>💡 模块之间的关联图：</strong>
+<p>本节（GPU内部架构） → 理解了SM、HBM、IO Die的物理结构 →</p>
+<p>下一节（PCIe总线基础） → 理解GPU和CPU之间的连接方式 →</p>
+<p>NVLink/NVSwitch → 理解GPU和GPU之间的高速直连 →</p>
+<p>NCCL库 → 理解软件如何利用这些硬件通路实现集合通信 →</p>
+<p>计算-通信重叠 → 最终目标：让计算和通信同时进行，最大化硬件利用率</p>
+<p>每一个模块都建立在前面模块的基础上。<strong>这就是为什么你需要从GPU内部架构开始学起。</strong></p>
+</div>
+
+<!-- ==================== 术语表 ==================== -->
+<h2>2.10 术语速查表</h2>
+<h3>🆕 Blackwell与Rubin的架构演进</h3>/th><th>全称</th><th>含义</th></tr>
+<tr><td>SM</td><td>Streaming Multiprocessor</td><td>GPU的基本计算单元，包含CUDA Core和Tensor Core</td></tr>
+<tr><td>GPC</td><td>Graphics Processing Cluster</td><td>GPU内部最大的组织单元，包含多个TPC</td></tr>
+<tr><td>TPC</td><td>Texture Processing Cluster</td><td>包含2个SM的中间层级</td></tr>
+<tr><td>CUDA Core</td><td>——</td><td>执行浮点/整数运算的基本单元</td></tr>
+<tr><td>Tensor Core</td><td>——</td><td>执行矩阵乘法的专用加速单元</td></tr>
+<tr><td>IO Die</td><td>I/O Die</td><td>管理PCIe、NVLink、内存控制器等I/O功能的芯片</td></tr>
+<tr><td>HBM</td><td>High Bandwidth Memory</td><td>3D堆叠的高带宽内存</td></tr>
+<tr><td>TSV</td><td>Through-Silicon Via</td><td>硅穿孔，3D封装中的垂直导线</td></tr>
+<tr><td>L2 Cache</td><td>——</td><td>GPU的二级缓存，所有SM共享</td></tr>
+<tr><td>Infinity Fabric</td><td>——</td><td>AMD的芯片间互连技术</td></tr>
+<tr><td>SerDes</td><td>Serializer/Deserializer</td><td>串行/解串器，高速IO的基础电路</td></tr>
+<tr><td>PHY</td><td>Physical Layer</td><td>物理层接口，驱动电信号的模拟电路</td></tr>
+</table>
+
+<pre><code class="language-python"># 1_背景与动机：为什么要拆开GPU看？ - 性能基准测试与分析
+import time
+import torch
+
+def profile_inference(model, input_data, warmup=10, iterations=100):
+    """推理性能分析：测量延迟、吞吐和显存"""
+    # Warmup
+    for _ in range(warmup):
+        with torch.no_grad():
+            model(input_data)
+    torch.cuda.synchronize()
+    
+    # Measure latency
+    latencies = []
+    for _ in range(iterations):
+        start = time.perf_counter()
+        with torch.no_grad():
+            output = model(input_data)
+        torch.cuda.synchronize()
+        latencies.append(time.perf_counter() - start)
+    
+    # Statistics
+    avg_ms = sum(latencies) / len(latencies) * 1000
+    p50 = sorted(latencies)[len(latencies)//2] * 1000
+    p99 = sorted(latencies)[int(len(latencies)*0.99)] * 1000
+    mem_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+    
+    print(f"Latency: avg={avg_ms:.2f}ms, p50={p50:.2f}ms, p99={p99:.2f}ms")
+    print(f"Peak Memory: {mem_mb:.0f}MB")
+    print(f"Throughput: {1000/avg_ms:.0f} req/s")
+    return {"avg_ms": avg_ms, "p50": p50, "p99": p99, "mem_mb": mem_mb}
+</code></pre>
+<pre><code class="language-bash"># 1_背景与动机：为什么要拆开GPU看？ - 环境配置与快速验证
+#!/bin/bash
+set -e
+
+# 1. 环境检查
+echo "=== GPU信息 ==="
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+
+# 2. 依赖安装
+pip install torch transformers accelerate
+
+# 3. 快速验证脚本
+python3 -c "
+import torch
+print(f'PyTorch: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+print(f'GPU: {torch.cuda.get_device_name(0)}')
+print(f'GPU Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB')
+
+# 验证推理
+from transformers import AutoTokenizer, AutoModelForCausalLM
+model_name = 'gpt2'
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name).cuda()
+inputs = tokenizer('Hello world', return_tensors='pt').to('cuda')
+with torch.no_grad():
+    outputs = model.generate(**inputs, max_new_tokens=20)
+print(f'Generated: {tokenizer.decode(outputs[0])}')
+print('验证通过!')
+"
+</code></pre>
+<div class="exercise">
+<strong>🎯 练习：</strong>
+<ol>
+<li>H100有132个SM，每个SM有4个Tensor Core。一个Tensor Core一个周期做64次乘加。H100的时钟频率约1.83 GHz。计算H100的理论Tensor Core FP16算力（TFLOPS）。</li>
+<li>为什么AMD MI300X用8个Compute Die而不是像H100那样用1个大Die？列出至少3个原因。</li>
+<li>如果HBM带宽翻倍但NVLink带宽不变，AllReduce的速度会提升多少？为什么？</li>
+</ol>
+</div>
+
+<div class="next-prev">
+<a href="01-芯片基础.html">&larr; 01 芯片基础</a>
+<a href="03-PCIe总线基础.html">下一章：PCIe总线基础 &rarr;</a>
+</div>
+
+<div class="footer">
+<p>集合通信入门指南 · 02 GPU内部架构</p>
+<p><a href="index.html">返回总目录</a></p>
+</div>
+
+</div>
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习1 背景与动机：为什么要拆开GPU看？建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

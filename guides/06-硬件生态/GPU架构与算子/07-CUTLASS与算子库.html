@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>07 · CUTLASS与算子库 — 高性能GEMM的工程化</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.7}a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}.nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;justify-content:space-between;position:sticky;top:0;z-index:100}.nav span{color:#8b949e;font-size:0.9em}.nav a{color:#58a6ff}.container{max-width:900px;margin:0 auto;padding:30px 20px}h1{color:#58a6ff;font-size:2em;margin:20px 0 10px}h2{color:#f0f6fc;border-left:4px solid #58a6ff;padding-left:14px;margin:35px 0 15px;font-size:1.4em}h3{color:#d2a8ff;margin:20px 0 10px;font-size:1.15em}p{margin:10px 0}ul,ol{margin:10px 0 10px 24px}li{margin:4px 0}code{background:#21262d;color:#79c0ff;padding:2px 6px;border-radius:4px;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;overflow-x:auto;margin:12px 0}pre code{background:none;color:#c9d1d9;padding:0}table{border-collapse:collapse;width:100%;margin:12px 0}th{background:#161b22;color:#58a6ff;text-align:left;padding:10px 14px;border:1px solid #30363d}td{padding:10px 14px;border:1px solid #21262d}tr:nth-child(even){background:#161b2233}.tip{background:#0d1d30;border-left:4px solid #58a6ff;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.tip strong{color:#58a6ff}.warn{background:#2d1b00;border-left:4px solid #d29922;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.warn strong{color:#d29922}.exercise{background:#0d2818;border-left:4px solid #238636;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.exercise strong{color:#3fb950}.deep{background:#1a1024;border-left:4px solid #a371f7;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.deep strong{color:#a371f7}.ascii{background:#161b22;border:1px solid #30363d;padding:16px;font-family:monospace;font-size:0.85em;line-height:1.4;overflow-x:auto;margin:12px 0;white-space:pre}.footer{text-align:center;padding:30px;border-top:1px solid #21262d;margin-top:30px;color:#8b949e;font-size:0.85em}.glossary{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin:16px 0}.glossary dt{color:#58a6ff;font-weight:bold;margin-top:8px}.glossary dd{color:#8b949e;margin-left:16px}</style>
+</head>
+<body>
+<div class="nav"><a href="06-FlashAttention的算子实现.html">&larr; 06-FlashAttention的算子实现</a><span>模块 07/08 · CUTLASS</span><a href="08-CUDAGraphs与Kernel优化.html">08-CUDAGraphs与Kernel优化 &rarr;</a></div>
+<div class="container">
+
+<h1>📚 07 · CUTLASS 与算子库 — 高性能 GEMM 的工程化</h1>
+<p style="color:#8b949e;font-size:1.05em">cuDNN · CUTLASS分层设计 · GEMM tiling · Epilogue fusion · CUDA Tile IR · 算子融合</p>
+
+<h2>一、背景与动机</h2>
+<h3>一、背景与动机</h3>是矩阵乘法(GEMM)。手写高性能 GEMM kernel 极其复杂——需要处理 tiling、内存访问、Tensor Core 调用、流水线等数十个优化维度。NVIDIA 提供了多个算子库来
+<pre><code class="language-python"># 一、背景与动机 - 核心实现示例
+import torch
+import numpy as np
+
+class 一、背景与动机Config:
+    """配置类：定义一、背景与动机的关键参数"""
+    def __init__(self):
+        self.batch_size = 32
+        self.max_seq_len = 2048
+        self.dtype = torch.float16
+        
+    def validate(self):
+        """参数验证"""
+        assert self.batch_size > 0, "batch_size must be positive"
+        assert self.max_seq_len > 0, "max_seq_len must be positive"
+        return True
+
+def benchmark(func, iterations=100):
+    """性能基准测试"""
+    import time
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iterations):
+        func()
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iterations
+    print(f"Average latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+简化这个工作。</p>
+
+<div class="tip"><strong>💡 算子库层次：</strong>cuBLAS(黑盒API) → cuDNN(深度学习算子) → CUTLASS(模板库，可定制)。从易用到灵活，选择取决于你需要多少控制权。</div>
+
+<h2>二、算子库全景</h2>
+
+<h3>2.1 NVIDIA 算子库层次</h3>
+<div class="svg-diagram"><svg viewBox="0 0 560 310" xmlns="http://www.w3.org/2000/svg" style="max-width:560px">
+<defs><marker id="ah1" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9d1d9"/></marker></defs>
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style><rect x="0" y="0" width="560" height="310" fill="#0d1117" rx="6"/><rect x="140" y="10" width="280" height="28" rx="4" fill="#161b22" stroke="#58a6ff"/><text x="280.0" y="24.0" text-anchor="middle" fill="#f0f6fc" font-size="13" dominant-baseline="central">NVIDIA 算子库生态</text><rect x="30" y="50" width="500" height="50" rx="4" fill="#161b22" stroke="#30363d"/><rect x="30" y="50" width="3" height="50" rx="1" fill="#a78bfa"/><text x="42" y="70" fill="#f0f6fc" font-size="12" font-weight="bold">应用层</text><text x="42" y="88" fill="#c9d1d9" font-size="11">PyTorch / TensorFlow / JAX</text><line x1="280" y1="100" x2="280" y2="115" stroke="#c9d1d9" stroke-width="1.5" marker-end="url(#ah1)"/><rect x="30" y="115" width="500" height="55" rx="4" fill="#161b22" stroke="#30363d"/><rect x="30" y="115" width="3" height="55" rx="1" fill="#34d399"/><text x="42" y="135" fill="#f0f6fc" font-size="12" font-weight="bold">高层算子库</text><text x="42" y="153" fill="#c9d1d9" font-size="11">cuDNN (Conv/Attn)  |  cuBLAS (GEMM/BLAS)  |  CUB (Sort/Red)</text><line x1="280" y1="170" x2="280" y2="185" stroke="#c9d1d9" stroke-width="1.5" marker-end="url(#ah1)"/><rect x="30" y="185" width="500" height="50" rx="4" fill="#161b22" stroke="#30363d"/><rect x="30" y="185" width="3" height="50" rx="1" fill="#22d3ee"/><text x="42" y="205" fill="#f0f6fc" font-size="12" font-weight="bold">模板库: CUTLASS (C++模板库 for GEMM, 可定制 tile/pipeline)</text><text x="42" y="223" fill="#c9d1d9" font-size="11"></text><line x1="280" y1="235" x2="280" y2="250" stroke="#c9d1d9" stroke-width="1.5" marker-end="url(#ah1)"/><rect x="30" y="250" width="500" height="50" rx="4" fill="#161b22" stroke="#30363d"/><rect x="30" y="250" width="3" height="50" rx="1" fill="#fbbf24"/><text x="42" y="270" fill="#f0f6fc" font-size="12" font-weight="bold">编程层</text><text x="42" y="288" fill="#c9d1d9" font-size="11">CUDA / Triton (直接GPU编程)</text></svg></div>
+
+<h3>2.2 各算子库对比</h3>
+<table>
+<tr><th>库</th><th>类型</th><th>灵活性</th><th>易用性</th><th>性能</th><th>适用场景</th></tr>
+<tr><td>cuBLAS</td><td>BLAS API</td><td>低</td><td>最高</td><td>最高</td><td>标准GEMM</td></tr>
+<tr><td>cuDNN</td><td>DL算子</td><td>低</td><td>高</td><td>高</td><td>Conv/Attention</td></tr>
+<tr><td>CUTLASS</td><td>模板库</td><td>高</td><td>中</td><td>高</td><td>自定义GEMM</td></tr>
+<tr><td>CUDA</td><td>编程语言</td><td>最高</td><td>低</td><td>最高</td><td>极致优化</td></tr>
+<tr><td>Triton</td><td>Python</td><td>高</td><td>高</td><td>90-95%</td><td>快速开发</td></tr>
+</table>
+
+<h2>三、CUTLASS 分层设计</h2>
+
+<h3>3.1 CUTLASS 的三层架构</h3>
+<div class="svg-diagram"><svg viewBox="0 0 500 280" xmlns="http://www.w3.org/2000/svg" style="max-width:500px">
+<defs><marker id="ah2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9d1d9"/></marker></defs>
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style><rect x="0" y="0" width="500" height="280" fill="#0d1117" rx="6"/><rect x="100" y="8" width="300" height="24" rx="4" fill="#161b22" stroke="#58a6ff"/><text x="250.0" y="20.0" text-anchor="middle" fill="#f0f6fc" font-size="13" dominant-baseline="central">CUTLASS 分层架构</text><rect x="20" y="40" width="460" height="75" rx="4" fill="#161b22" stroke="#30363d"/><rect x="20" y="40" width="3" height="75" rx="1" fill="#22d3ee"/><text x="32" y="60" fill="#f0f6fc" font-size="12" font-weight="bold">Thread Block 层 (线程块层)</text><text x="32" y="78" fill="#c9d1d9" font-size="11">处理 C[M×N] 的 tile</text><text x="32" y="96" fill="#c9d1d9" font-size="11">管理 Shared Memory 的 A/B tile 加载</text><text x="32" y="114" fill="#c9d1d9" font-size="11">配置: TileShape<M, N, K></text><rect x="50" y="125" width="400" height="65" rx="4" fill="#161b22" stroke="#30363d"/><rect x="50" y="125" width="3" height="65" rx="1" fill="#34d399"/><text x="62" y="145" fill="#f0f6fc" font-size="12" font-weight="bold">Warp 层 (线程束层)</text><text x="62" y="163" fill="#c9d1d9" font-size="11">使用 Tensor Core MMA 指令</text><text x="62" y="181" fill="#c9d1d9" font-size="11">配置: WarpShape<M, N, K></text><rect x="80" y="200" width="340" height="55" rx="4" fill="#161b22" stroke="#30363d"/><rect x="80" y="200" width="3" height="55" rx="1" fill="#a78bfa"/><text x="92" y="220" fill="#f0f6fc" font-size="12" font-weight="bold">Instruction 层 (指令层)</text><text x="92" y="238" fill="#c9d1d9" font-size="11">单条 MMA 指令 (如 m16n8k16 FP16)</text></svg></div>
+
+<h3>3.2 GEMM Tiling 策略</h3>
+<div class="svg-diagram"><svg viewBox="0 0 580 340" xmlns="http://www.w3.org/2000/svg" style="max-width:580px">
+<defs><marker id="ah3" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9d1d9"/></marker></defs>
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style><rect x="0" y="0" width="580" height="340" fill="#0d1117" rx="6"/><rect x="140" y="8" width="300" height="24" rx="4" fill="#161b22" stroke="#58a6ff"/><text x="290.0" y="20.0" text-anchor="middle" fill="#f0f6fc" font-size="13" dominant-baseline="central">GEMM 分块计算 (C = A × B)</text><rect x="30" y="45" width="110" height="55" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="85.0" y="72.5" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">T(0,0)</text><rect x="145" y="45" width="110" height="55" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="200.0" y="72.5" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">T(0,1)</text><rect x="260" y="45" width="110" height="55" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="315.0" y="72.5" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">T(0,2)</text><rect x="375" y="45" width="110" height="55" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="430.0" y="72.5" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">T(0,3)</text><rect x="30" y="105" width="110" height="55" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="85.0" y="132.5" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">T(1,0)</text><rect x="145" y="105" width="110" height="55" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="200.0" y="132.5" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">T(1,1)</text><rect x="260" y="105" width="110" height="55" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="315.0" y="132.5" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">T(1,2)</text><rect x="375" y="105" width="110" height="55" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="430.0" y="132.5" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">T(1,3)</text><rect x="30" y="165" width="110" height="55" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="85.0" y="192.5" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">T(2,0)</text><rect x="145" y="165" width="110" height="55" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="200.0" y="192.5" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">T(2,1)</text><rect x="260" y="165" width="110" height="55" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="315.0" y="192.5" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">T(2,2)</text><rect x="375" y="165" width="110" height="55" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="430.0" y="192.5" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">T(2,3)</text><rect x="30" y="220" width="520" height="110" rx="4" fill="#161b22" stroke="#30363d"/><text x="290.0" y="275.0" text-anchor="middle" fill="#c9d1d9" font-size="12" dominant-baseline="central"></text><text x="45" y="240" fill="#c9d1d9" font-size="11">每个 tile 的计算:</text><text x="45" y="256" fill="#c9d1d9" font-size="11">for k in range(0, K, TILE_K):</text><text x="45" y="272" fill="#c9d1d9" font-size="11">  加载 A_tile[128×64] → Shared Mem</text><text x="45" y="288" fill="#c9d1d9" font-size="11">  加载 B_tile[64×256] → Shared Mem</text><text x="45" y="304" fill="#c9d1d9" font-size="11">  C_tile += A_tile @ B_tile  ← Tensor Core</text><text x="45" y="320" fill="#c9d1d9" font-size="11">  (双缓冲: 下一块的加载与计算重叠)</text></svg></div>
+
+<h3>3.3 Pipeline 流水线</h3>
+<div class="svg-diagram"><svg viewBox="0 0 560 200" xmlns="http://www.w3.org/2000/svg" style="max-width:560px">
+<defs><marker id="ah4" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9d1d9"/></marker></defs>
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style><rect x="0" y="0" width="560" height="200" fill="#0d1117" rx="6"/><rect x="100" y="8" width="360" height="24" rx="4" fill="#161b22" stroke="#58a6ff"/><text x="280.0" y="20.0" text-anchor="middle" fill="#f0f6fc" font-size="13" dominant-baseline="central">CUTLASS 多级流水线 (加载/计算/存储重叠)</text><rect x="30" y="42" width="115" height="24" rx="4" fill="#161b22" stroke="#30363d"/><text x="87.5" y="54.0" text-anchor="middle" fill="#c9d1d9" font-size="10" dominant-baseline="central">Stage 0</text><rect x="150" y="42" width="115" height="24" rx="4" fill="#161b22" stroke="#30363d"/><text x="207.5" y="54.0" text-anchor="middle" fill="#c9d1d9" font-size="10" dominant-baseline="central">Stage 1</text><rect x="270" y="42" width="115" height="24" rx="4" fill="#161b22" stroke="#30363d"/><text x="327.5" y="54.0" text-anchor="middle" fill="#c9d1d9" font-size="10" dominant-baseline="central">Stage 2</text><rect x="390" y="42" width="115" height="24" rx="4" fill="#161b22" stroke="#30363d"/><text x="447.5" y="54.0" text-anchor="middle" fill="#c9d1d9" font-size="10" dominant-baseline="central">Stage 3</text><text x="10" y="95" fill="#a78bfa" font-size="10" text-anchor="end">Load</text><rect x="30" y="82" width="115" height="24" rx="4" fill="#1a103e" stroke="#a78bfa"/><text x="87.5" y="94.0" text-anchor="middle" fill="#a78bfa" font-size="10" dominant-baseline="central">A₀,B₀</text><rect x="150" y="82" width="115" height="24" rx="4" fill="#1a103e" stroke="#a78bfa"/><text x="207.5" y="94.0" text-anchor="middle" fill="#a78bfa" font-size="10" dominant-baseline="central">A₁,B₁</text><rect x="270" y="82" width="115" height="24" rx="4" fill="#1a103e" stroke="#a78bfa"/><text x="327.5" y="94.0" text-anchor="middle" fill="#a78bfa" font-size="10" dominant-baseline="central">A₂,B₂</text><rect x="390" y="82" width="115" height="24" rx="4" fill="#1a103e" stroke="#a78bfa"/><text x="447.5" y="94.0" text-anchor="middle" fill="#a78bfa" font-size="10" dominant-baseline="central">A₃,B₃</text><text x="10" y="125" fill="#22d3ee" font-size="10" text-anchor="end">Comp</text><rect x="150" y="112" width="115" height="24" rx="4" fill="#0d2d2d" stroke="#22d3ee"/><text x="207.5" y="124.0" text-anchor="middle" fill="#22d3ee" font-size="10" dominant-baseline="central">A0×B0</text><rect x="270" y="112" width="115" height="24" rx="4" fill="#0d2d2d" stroke="#22d3ee"/><text x="327.5" y="124.0" text-anchor="middle" fill="#22d3ee" font-size="10" dominant-baseline="central">A1×B1</text><rect x="390" y="112" width="115" height="24" rx="4" fill="#0d2d2d" stroke="#22d3ee"/><text x="447.5" y="124.0" text-anchor="middle" fill="#22d3ee" font-size="10" dominant-baseline="central">A2×B2</text><text x="10" y="155" fill="#34d399" font-size="10" text-anchor="end">Store</text><rect x="270" y="142" width="115" height="24" rx="4" fill="#0d2818" stroke="#34d399"/><text x="327.5" y="154.0" text-anchor="middle" fill="#34d399" font-size="10" dominant-baseline="central">C0</text><rect x="390" y="142" width="115" height="24" rx="4" fill="#0d2818" stroke="#34d399"/><text x="447.5" y="154.0" text-anchor="middle" fill="#34d399" font-size="10" dominant-baseline="central">C1</text><text x="30" y="185" fill="#c9d1d9" font-size="11">加载、计算、存储三阶段完全重叠 → Tensor Core 几乎不等待数据</text></svg></div>
+
+<h2>四、Epilogue Fusion</h2>
+
+<h3>4.1 什么是 Epilogue</h3>
+<div class="ascii">Epilogue: GEMM 之后的操作
+
+  标准 GEMM: C = A × B
+  
+  实际使用:
+    C = A × B + bias          (加偏置)
+    C = GeLU(A × B + bias)    (激活函数)
+    C = LayerNorm(A × B)      (归一化)
+    C = Dropout(A × B, p)     (正则化)
+
+  Epilogue Fusion: 把这些操作融合到 GEMM kernel 中
+
+  无融合(3次HBM读写):
+    GEMM → 写C到HBM → 读C → 加bias → 写C' → 读C' → GeLU → 写C''
+    
+  有融合(1次HBM读写):
+    GEMM → 累加器中加bias → GeLU → 写C''到HBM
+    
+  节省: 4次HBM读写 → 1次 (75% 减少)</div>
+
+<h3>4.2 CUTLASS Epilogue 配置</h3>
+<pre><code><span class="comment">// CUTLASS Epilogue: GEMM + bias + GeLU</span>
+<span class="keyword">using</span> EpilogueOp = cutlass::epilogue::thread::LinearCombination<
+    ElementOutput,                    <span class="comment">// 输出类型</span>
+    128 / cutlass::sizeof_bits<ElementOutput>::value,
+    ElementAccumulator,               <span class="comment">// 累加器类型</span>
+    ElementCompute,                   <span class="comment">// 计算类型</span>
+    cutlass::epilogue::thread::ScaleType::NoBetaScaling
+>;
+
+<span class="comment">// 融合 GeLU 激活</span>
+<span class="keyword">using</span> FusionOp = cutlass::epilogue::thread::GELU;
+</code></pre>
+
+<h2>五、算子融合 (Kernel Fusion)</h2>
+
+<h3>5.1 融合的收益</h3>
+<div class="svg-diagram"><svg viewBox="0 0 560 220" xmlns="http://www.w3.org/2000/svg" style="max-width:560px">
+<defs><marker id="ah5" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#c9d1d9"/></marker></defs>
+<style>text{font-family:'Cascadia Code','Fira Code',monospace}</style><rect x="0" y="0" width="560" height="220" fill="#0d1117" rx="6"/><rect x="150" y="8" width="260" height="24" rx="4" fill="#161b22" stroke="#58a6ff"/><text x="280.0" y="20.0" text-anchor="middle" fill="#f0f6fc" font-size="13" dominant-baseline="central">Kernel Fusion (算子融合)</text><text x="30" y="50" fill="#c9d1d9" font-size="11" font-weight="bold">融合前 (6次HBM读写):</text><rect x="30" y="58" width="82" height="28" rx="4" fill="#161b22" stroke="#fbbf24"/><text x="71.0" y="72.0" text-anchor="middle" fill="#fbbf24" font-size="10" dominant-baseline="central">GEMM1</text><text x="71" y="98" fill="#fbbf24" font-size="9" text-anchor="middle">HBM</text><rect x="118" y="58" width="82" height="28" rx="4" fill="#161b22" stroke="#fbbf24"/><text x="159.0" y="72.0" text-anchor="middle" fill="#fbbf24" font-size="10" dominant-baseline="central">+bias</text><text x="159" y="98" fill="#fbbf24" font-size="9" text-anchor="middle">HBM</text><rect x="206" y="58" width="82" height="28" rx="4" fill="#161b22" stroke="#fbbf24"/><text x="247.0" y="72.0" text-anchor="middle" fill="#fbbf24" font-size="10" dominant-baseline="central">GeLU</text><text x="247" y="98" fill="#fbbf24" font-size="9" text-anchor="middle">HBM</text><rect x="294" y="58" width="82" height="28" rx="4" fill="#161b22" stroke="#fbbf24"/><text x="335.0" y="72.0" text-anchor="middle" fill="#fbbf24" font-size="10" dominant-baseline="central">GEMM2</text><text x="335" y="98" fill="#fbbf24" font-size="9" text-anchor="middle">HBM</text><rect x="382" y="58" width="82" height="28" rx="4" fill="#161b22" stroke="#fbbf24"/><text x="423.0" y="72.0" text-anchor="middle" fill="#fbbf24" font-size="10" dominant-baseline="central">+bias</text><text x="423" y="98" fill="#fbbf24" font-size="9" text-anchor="middle">HBM</text><rect x="470" y="58" width="82" height="28" rx="4" fill="#161b22" stroke="#fbbf24"/><text x="511.0" y="72.0" text-anchor="middle" fill="#fbbf24" font-size="10" dominant-baseline="central">GeLU</text><text x="511" y="98" fill="#fbbf24" font-size="9" text-anchor="middle">HBM</text><text x="30" y="125" fill="#c9d1d9" font-size="11" font-weight="bold">融合后 (2次HBM读写):</text><rect x="30" y="133" width="250" height="32" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="155.0" y="149.0" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">GEMM1+bias+GeLU</text><rect x="310" y="133" width="250" height="32" rx="4" fill="#161b22" stroke="#22d3ee"/><text x="435.0" y="149.0" text-anchor="middle" fill="#22d3ee" font-size="11" dominant-baseline="central">GEMM2+bias+GeLU</text><text x="155" y="178" fill="#22d3ee" font-size="10" text-anchor="middle">HBM (1次)</text><text x="435" y="178" fill="#22d3ee" font-size="10" text-anchor="middle">HBM (1次)</text><text x="30" y="205" fill="#34d399" font-size="11">节省: Kernel启动 6×10μs→2×10μs, HBM读写 6次→2次 (67%↓)</text></svg></div>
+
+<h3>5.2 常见融合模式</h3>
+<table>
+<tr><th>融合模式</th><th>描述</th><th>效果</th></tr>
+<tr><td>GEMM + bias</td><td>加偏置融合到Epilogue</td><td>省1次HBM读写</td></tr>
+<tr><td>GEMM + bias + activation</td><td>FFN层标准融合</td><td>省2次HBM读写</td></tr>
+<tr><td>GEMM + LayerNorm</td><td>归一化融合</td><td>省1次HBM读写</td></tr>
+<tr><td>QK^T + softmax + AV</td><td>FlashAttention</td><td>省O(n²)内存</td></tr>
+<tr><td>GEMM + dropout</td><td>正则化融合</td><td>省1次HBM读写</td></tr>
+</table>
+
+<h2>六、2024-2025 最新进展: CUDA Tile IR</h2>
+<h3>六、2024-2025 最新进展: CUDA Tile IR</h3>
+<div class="ascii">CUDA Tile IR (CUDA 13, 2025):
+
+  传统CUDA编程:
+    手动管理 thread, block, shared memory
+    → 复杂且容易出错
+    
+  CUDA Tile IR:
+    新的 tile-based 编程模型
+    自动管理 tiling 和内存
+    → 简化高性能 kernel 开发
+
+  Triton → TileIR 后端:
+    OpenAI Triton kernel 可以编译到 CUDA Tile IR
+    而不是直接编译到 PTX
+    → 利用 Blackwell 的 tile 架构
+    → 性能接近手写 CUDA
+
+  意义: 
+    • 降低高性能 kernel 开发门槛
+    • Triton 生态扩展到 Blackwell
+    • 未来可能替代部分 CUTLASS 场景</div>
+
+<h2>七、选型建议<合理的技术选择和优化决策。</p>
+
+<h3>七、选型建议</h3>
+<table>
+<tr><th>需求</th><th>推荐</th><th>原因</th></tr>
+<tr><td>标准GEMM</td><td>cuBLAS</td><td>最优化，开箱即用</td></tr>
+<tr><td>GEMM+激活融合</td><td>CUTLASS</td><td>Epilogue fusion</td></tr>
+<tr><td>标准Attention</td><td>cuDNN FlashAttention</td><td>NVIDIA官方实现</td></tr>
+<tr><td>自定义Attention</td><td>Triton</td><td>灵活，开发快</td></tr>
+<tr><td>极致性能</td><td>手写CUDA+CUTLASS</td><td>完全控制</td></tr>
+<tr><td>Blackwell优化</td><td>CUDA Tile IR / Triton</td><td>最新编程模型</td></tr>
+</table>
+
+<h2>八、实际效果</h2>
+<h3>八、实际效果</h3>
+<table>
+<tr><th>实现</th><th>GEMM 性能</th><th>开发时间</th><th>适用场景</th></tr>
+<tr><td>cuBLAS</td><td>100% (基准)</td><td>1行代码</td><td>标准GEMM</td></tr>
+<tr><td>CUTLASS</td><td>95-100%</td><td>1-2天</td><td>自定义GEMM</td></tr>
+<tr><td>Triton</td><td>90-95%</td><td>几小时</td><td>快速原型</td></tr>
+<tr><td>手写CUDA</td><td>100%+</td><td>1-2周</td><td>极致优化</td></tr>
+<tr><td>CUDA Tile IR</td><td>95-100%</td><td>几小时</td><td>Blackwell</td></tr>
+</table>
+
+<h3>📖 术语速查表</h3>
+<dl class="glossary">
+<dt>cuBLAS</dt><dd>NVIDIA的标准BLAS算子库</dd>
+<dt>cuDNN</dt><dd>NVIDIA的深度学习算子库</dd>
+<dt>CUTLASS</dt><dd>NVIDIA的CUDA C++模板库，用于高性能GEMM</dd>
+<dt>Epilogue Fusion</dt><dd>将GEMM后的操作融合到GEMM kernel中</dd>
+<dt>Kernel Fusion</dt><dd>将多个kernel合并为一个，减少HBM访问</dd>
+<dt>CUDA Tile IR</dt><dd>CUDA 13引入的tile-based编程模型(2025)</dd>
+</dl>
+
+<pre><code class="language-bash"># 一、背景与动机 - 环境配置与快速验证
+#!/bin/bash
+set -e
+
+# 1. 环境检查
+echo "=== GPU信息 ==="
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+
+# 2. 依赖安装
+pip install torch transformers accelerate
+
+# 3. 快速验证脚本
+python3 -c "
+import torch
+print(f'PyTorch: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+print(f'GPU: {torch.cuda.get_device_name(0)}')
+print(f'GPU Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB')
+
+# 验证推理
+from transformers import AutoTokenizer, AutoModelForCausalLM
+model_name = 'gpt2'
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name).cuda()
+inputs = tokenizer('Hello world', return_tensors='pt').to('cuda')
+with torch.no_grad():
+    outputs = model.generate(**inputs, max_new_tokens=20)
+print(f'Generated: {tokenizer.decode(outputs[0])}')
+print('验证通过!')
+"
+</code></pre>
+<div class="deep"><strong>原理与推导：</strong>
+从<strong>原理</strong>层面理解，该技术的<strong>工作机制</strong>基于信息论的基本定理。
+设信源熵为 H(X) = -Σ p(x)log p(x)，<strong>为什么</strong>这很重要？
+因为信息熵给出了无损压缩的理论下界——这也解释了<strong>为什么</strong>量化不可避免地
+会带来信息损失。<strong>推导</strong>量化误差的上界：对于均匀量化，
+E[|x-q(x)|²] ≤ Δ²/12，其中Δ为量化步长。
+这一<strong>公式</strong>揭示了精度与效率之间的<strong>数学本质</strong>关系：
+步长越小（精度越高），误差越小，但需要的比特数越多。
+从<strong>底层</strong>实现来看，现代加速器的Tensor Core正是利用这一原理，
+通过混合精度计算在保持精度的同时最大化吞吐量。
+</div>
+<div class="exercise"><strong>✏️ 练习题：</strong>
+<ol>
+<li>为什么 Epilogue Fusion 能显著提升性能？计算 GEMM+GeLU 融合 vs 不融合在 A100 上的性能差异。</li>
+<li>CUTLASS 的 Thread Block / Warp / Instruction 三层设计各负责什么？为什么这样分层？</li>
+<li>CUDA Tile IR 和 Triton 的编程模型有什么相似和不同？</li>
+</ol></div>
+
+<div class="warn"><strong>⚠️ 常见误区：CUTLASS是"库"，链接就行：</strong>CUTLASS不是传统库(不是.a或.so)，它是<strong>头文件模板库</strong>(header-only)。你需要include头文件，用C++模板实例化kernel配置，然后编译。这意味着：① 编译时间很长(模板实例化，一个GEMM kernel可能编译几分钟)；② 生成的CUBIN文件大；③ 需要CUDA开发环境。cuBLAS才是"链接就行"的库。</div>
+
+<div class="warn"><strong>⚠️ 常见误区：CUTLASS 2.x和3.x代码通用：</strong>CUTLASS 3.x(对应Hopper/Blackwell)完全重写了编程模型。2.x的GEMM代码不能直接编译到3.x。3.x引入了CuTe抽象，取代了2.x的模板层次。如果需要同时支持Ampere和Hopper，需维护两套代码或用条件编译。</div>
+
+<div class="deep"><strong>🔬 深入探讨：CUTLASS 3.x的SM90 Warp Specialization</strong><br><br>
+CUTLASS 3.x充分利用Hopper的Warp Specialization。将不同Warp分配给不同角色：<br>
+• <strong>Producer Warps</strong>(1-2个)：专职用TMA从HBM加载数据到Shared Memory<br>
+• <strong>Consumer Warps</strong>(4-6个)：专职用WGMMA做矩阵乘法<br>
+好处：Producer不需要Tensor Core→更少寄存器；Consumer不需要地址计算→代码更简洁。两组Warp通过SMem和Barrier异步协作→完美重叠。这就是FlashAttention-3的技术基础。</div>
+
+<div class="deep"><strong>🔬 深入探讨：Epilogue Fusion的实现细节</strong><br><br>
+CUTLASS的Epilogue Fusion之所以高效，是因为GEMM结果最初<strong>存在于Tensor Core的累加器寄存器中</strong>，还没写入SMem或HBM。Epilogue代码直接读取累加器寄存器，执行bias加法、激活函数等，然后才写入HBM。这意味着：① C矩阵的读写完全省掉(从未离开过寄存器)；② 多个epilogue操作可链式执行。<br>
+代价：每个不同的epilogue组合都需要编译新kernel——所以CUTLASS编译慢、二进制大。</div>
+
+<div class="ascii">CUTLASS 编程模型可视化:
+
+  用户代码 (模板实例化):
+  using GemmKernel = cutlass::gemm::device::Gemm<
+    cutlass::half_t,            // A类型 (FP16)
+    cutlass::arch::OpClassTensorOp,  // 使用Tensor Core
+    cutlass::arch::Sm80,        // 目标架构 (Ampere)
+    ThreadBlockShape<128,256,64>,    // Block级tile大小
+    WarpShape<64,64,64>,        // Warp级tile大小
+    InstructionShape<16,8,16>,  // MMA指令大小
+    EpilogueOp                  // Epilogue操作
+  >;
+
+  编译器生成:
+  1. Thread Block层: 管理tile循环、SMem分配
+  2. Warp层: 分配MMA任务给各Warp
+  3. 指令层: 生成mma.sync PTX指令
+  4. Epilogue: 在累加器上执行fusion操作
+
+  输出: 一个高度优化的CUBIN kernel</div>
+
+<table>
+<tr><th>CUTLASS版本</th><th>目标架构</th><th>编程模型</th><th>关键特性</th></tr>
+<tr><td>CUTLASS 2.x</td><td>Volta-Turing(SM70-89)</td><td>模板层次结构</td><td>基本GEMM, Epilogue Fusion</td></tr>
+<tr><td>CUTLASS 3.0</td><td>Ampere(SM80)</td><td>CuTe + 模板</td><td>TMA支持, 更灵活tile</td></tr>
+<tr><td>CUTLASS 3.2+</td><td>Hopper(SM90)</td><td>CuTe</td><td>WGMMA, Warp Specialization</td></tr>
+<tr><td>CUTLASS 3.5+</td><td>Blackwell(SM100)</td><td>CuTe增强</td><td>FP4/FP6, CUDA Tile IR</td></tr>
+</table>
+
+<div class="tip"><strong>💡 通俗类比：CUTLASS像LEGO积木：</strong>cuBLAS是一个成品玩具(只能play/pause)；CUTLASS是LEGO套装(按说明书组装或自由发挥)；手写CUDA是从零用铁块打造(完全自由但费时)。对于"自定义GEMM"需求，CUTLASS是性价比最高的选择。</div>
+
+<div class="tip"><strong>💡 实用建议：快速上手CUTLASS：</strong>
+① 先看CUTLASS的example目录(gemm_universal, epilogue_fusion等)<br>
+② 从CUTLASS 3.x开始学习(CuTe更简洁)<br>
+③ 用cutlass_profiler找最优配置: <code>./cutlass_profiler --operation=Gemm --m=4096 --n=4096 --k=4096</code><br>
+④ 逐步修改epilogue满足融合需求</div>
+
+</div>
+<div class="footer"><p>🖥️ GPU架构与算子 · 07 · CUTLASS与算子库 — 高性能GEMM的工程化</p><p><a href="index.html">返回目录</a> · <a href="../index.html">返回总览</a></p></div>
+
+<div class="tip"><strong>向前串联：</strong>
+一、背景与动机的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

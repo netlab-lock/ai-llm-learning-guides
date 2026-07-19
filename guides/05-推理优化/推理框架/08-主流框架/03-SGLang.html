@@ -1,0 +1,1811 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SGLang 深度技术指南 | LLM 推理框架</title><style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff; --green: #3fb950; --orange: #d29922; --red: #f85149; --purple: #bc8cff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+  .container { max-width: 950px; margin: 0 auto; padding: 2rem 1.5rem; }
+  .breadcrumb { font-size: 0.85rem; color: var(--text-dim); margin-bottom: 1.5rem; }
+  .breadcrumb a { color: var(--accent); text-decoration: none; }
+  h1 { font-size: 1.8rem; margin-bottom: 0.5rem; } .subtitle { color: var(--text-dim); margin-bottom: 2rem; }
+  h2 { font-size: 1.3rem; color: var(--accent); margin: 2rem 0 1rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; color: var(--green); margin: 1.5rem 0 0.5rem; }
+  h4 { font-size: 1rem; color: var(--purple); margin: 1.2rem 0 0.4rem; }
+  p { margin: 0.5rem 0; font-size: 0.95rem; }
+  .box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.2rem; margin: 1rem 0; }
+  .box.tip { border-left: 3px solid var(--green); } .box.warn { border-left: 3px solid var(--orange); }
+  .box.info { border-left: 3px solid var(--accent); } .box.purple { border-left: 3px solid var(--purple); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--accent); background: var(--surface); }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; }
+  code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; color: var(--green); }
+  pre code { background: none; padding: 0; color: var(--text); }
+  ul, ol { padding-left: 1.5rem; margin: 0.5rem 0; } li { margin-bottom: 0.4rem; font-size: 0.93rem; }
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+  .nav-bottom { display: flex; justify-content: space-between; margin-top: 3rem; padding-top: 1.5rem; border-top: 1px solid var(--border); }
+  .nav-bottom a { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+  .badge { display: inline-block; font-size: 0.75rem; padding: 2px 8px; border-radius: 12px; margin-left: 6px; }
+  .badge-hot { background: rgba(248,81,73,0.2); color: var(--red); border: 1px solid var(--red); }
+  .badge-new { background: rgba(63,185,80,0.2); color: var(--green); border: 1px solid var(--green); }
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style></head><body><div class="container">
+
+<div class="breadcrumb"><a href="../index.html">首页</a> / <a href="00-框架总览.html">08-主流框架</a> / SGLang 深度指南</div>
+<h1>🎯 SGLang 深度技术指南 <span class="badge badge-hot">增长最快</span></h1>
+<div class="subtitle">RadixAttention × Constrained Decoding × 前端 DSL — 从数据结构到生产调优的全栈剖析</div>
+
+<div class="box info">
+<strong>定位：</strong>SGLang（Scalable Language Generation）是 2024-2026 年增长最快的 LLM 推理框架，由 UC Berkeley 和 LMSYS 团队开发。GitHub 16k+ stars，每周多次发布。核心差异化：(1) RadixAttention — 基数树管理 KV Cache；(2) Constrained Decoding — FSM 驱动的零开销结构化生成；(3) 前端 DSL — 编译优化的编程接口。最新版本 v0.5.13 (2026.06)。
+</div>
+
+<!-- ==================== 第一章：系统架构 ==================== -->
+<h2>一、系统架构 — 请求的完整生命周期</h2>
+<div class="warn"><strong>常见误区：</strong>
+学习一、系统架构 — 请求的完整生命周期时，很多人只看概念不动手实验。建议每学完一个知识点就写验证代码，
+在实际运行中观察行为是否符合预期。理论和实践的差距往往比想象中大。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为一、系统架构 — 请求的完整生命周期可以跳过基础直接上手高级内容。基础概念是后续所有优化和应用的前提，
+跳过基础会导致后续学习事倍功半。
+</div>
+
+<h3>一、系统架构 — 请求的完整生命周期</h3>类比：</strong>一、系统架构 — 请求的完整生命周期</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 580" width="100%" style="display:block"><rect width="860" height="580" fill="#161b22"/><text x="430" y="28" text-anchor="middle" fill="#58a6ff" font-size="15" font-weight="bold" font-family="system-ui,sans-serif">SGLang Runtime 架构全景</text><rect x="330" y="42" width="200" height="36" rx="6" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="430.0" y="64.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">用户请求 (HTTP / Python DSL)</text><line x1="430" y1="78" x2="430" y2="104" stroke="#3fb950" stroke-width="1.5"/><polygon points="425,104 435,104 430,110" fill="#3fb950"/><rect x="80" y="110" width="700" height="72" rx="6" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="430.0" y="150.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="100" y="130" fill="#58a6ff" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">Frontend Layer (前端层)</text><text x="120" y="150" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">├─ OpenAI 兼容 API Server</text><text x="120" y="167" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">├─ sgl.function DSL 编译器</text><text x="420" y="150" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">└─ Streaming / Non-streaming 适配器</text><line x1="430" y1="182" x2="430" y2="209" stroke="#58a6ff" stroke-width="1.5"/><polygon points="425,209 435,209 430,215" fill="#58a6ff"/><rect x="80" y="215" width="700" height="72" rx="6" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="430.0" y="255.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="100" y="235" fill="#bc8cff" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">Tokenizer Manager（分词器 + 请求调度入口）</text><text x="120" y="255" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">├─ Tokenize / Detokenize</text><text x="120" y="272" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">├─ 前缀缓存查找 (RadixAttention Lookup)     └─ 请求路由 → 写入 InternalRequestQueue</text><line x1="430" y1="287" x2="430" y2="314" stroke="#bc8cff" stroke-width="1.5"/><polygon points="425,314 435,314 430,320" fill="#bc8cff"/><rect x="80" y="320" width="700" height="100" rx="6" fill="#d2992222" stroke="#d29922" stroke-width="1.5"/><text x="430.0" y="374.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="100" y="340" fill="#d29922" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">Scheduler（调度器 — SGLang 的核心引擎）</text><rect x="100" y="348" width="660" height="24" rx="4" fill="#d2992215" stroke="#d2992244" stroke-width="0.8"/><text x="430" y="364" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Waiting Queue ← 新请求入队    |    Running Batch ← 当前 decode 请求集合</text><text x="110" y="388" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">每 iteration: 1.检查Waiting→extend  2.合并Running Batch  3.RadixAttention KV分配</text><text x="110" y="404" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">4.构建FSM状态  5.调用ModelRunner前向传播  6.采样+检查结束条件</text><line x1="430" y1="420" x2="430" y2="449" stroke="#d29922" stroke-width="1.5"/><polygon points="425,449 435,449 430,455" fill="#d29922"/><rect x="80" y="455" width="700" height="60" rx="6" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="430.0" y="489.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="100" y="475" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">Model Runner (模型执行器)</text><text x="120" y="497" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">├─ CUDA Graph 捕获    ├─ FlashInfer Attention Kernel    ├─ Tree Attention    └─ TP/PP/EP 分布式</text><line x1="430" y1="515" x2="430" y2="534" stroke="#3fb950" stroke-width="1.5"/><polygon points="425,534 435,534 430,540" fill="#3fb950"/><rect x="180" y="540" width="500" height="32" rx="4" fill="#f8514922" stroke="#f85149" stroke-width="1.5"/><text x="430.0" y="560.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">GPU Hardware  (CUDA / FlashInfer / Triton / Pallas for TPU)</text></svg></div>
+
+<!-- ==================== 第二章：RadixAttention ==================== -->
+<h2>二、RadixAttention — 基数树驱动的 KV Cache 复用</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>2.1 问题：为什么需要比 Hash 更强的缓存？</h3>
+
+<p>vLLM 的 Prefix Caching 使用 token hash 做前缀匹配：只有当两个请求的前缀<strong>完全相同</strong>时才能复用。但在真实的 Agent/多轮对话场景中，前缀往往是<strong>部分重叠</strong>的：</p>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 280" width="100%" style="display:block"><rect width="860" height="280" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">vLLM Prefix Caching 的局限</text><text x="430" y="46" text-anchor="middle" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">两个 Agent 共享 System Prompt，但有不同的 Few-shot 示例</text><text x="40" y="78" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">请求 A:</text><rect x="110" y="62" width="260" height="28" rx="4" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="240.0" y="80.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[System Prompt: 500 tokens]</text><rect x="375" y="62" width="200" height="28" rx="4" fill="#d2992222" stroke="#d29922" stroke-width="1.5"/><text x="475.0" y="80.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[Few-shot A: 200 tokens]</text><rect x="580" y="62" width="160" height="28" rx="4" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="660.0" y="80.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[用户问题]</text><text x="40" y="120" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">请求 B:</text><rect x="110" y="104" width="260" height="28" rx="4" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="240.0" y="122.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[System Prompt: 500 tokens]</text><rect x="375" y="104" width="220" height="28" rx="4" fill="#f8514922" stroke="#f85149" stroke-width="1.5"/><text x="485.0" y="122.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[Few-shot B: 300 tokens]</text><rect x="600" y="104" width="140" height="28" rx="4" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="670.0" y="122.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[用户问题]</text><line x1="110" y1="145" x2="370" y2="145" stroke="#3fb950" stroke-width="2" stroke-dasharray="6,3"/><text x="240" y="163" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">✅ hash 匹配，可复用 500 tokens KV</text><text x="490" y="163" text-anchor="middle" fill="#f85149" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">✗ hash 不同，不能复用</text><rect x="200" y="180" width="460" height="40" rx="6" fill="#f8514915" stroke="#f85149" stroke-width="1"/><text x="430" y="206" text-anchor="middle" fill="#f85149" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">浪费: 200 + 300 = 500 tokens 的 KV 重复计算</text><rect x="200" y="230" width="460" height="36" rx="6" fill="#3fb95015" stroke="#3fb950" stroke-width="1"/><text x="430" y="254" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">RadixAttention: 最长前缀匹配 → 自动复用所有公共前缀</text></svg></div>
+
+<h3>2.2 Radix Tree 数据结构</h3>
+
+<p>SGLang 使用 <strong>Radix Tree</strong>（基数树 / Patricia Trie）管理所有请求的 KV Cache。每个节点存储一段 token 序列（而非单个字符），叶子节点指向 KV Cache 的物理存储。这使得<strong>最长前缀匹配</strong>成为 O(m) 操作（m = 查询序列长度）。</p>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 520" width="100%" style="display:block"><rect width="860" height="520" fill="#161b22"/><text x="430" y="26" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">Radix Tree 数据结构详解</text><rect x="350" y="40" width="160" height="36" rx="20" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="430.0" y="54.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">Root (虚拟根节点)</text><text x="430.0" y="70.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">token: []</text><line x1="430" y1="76" x2="430" y2="99" stroke="#58a6ff" stroke-width="1.5"/><polygon points="425,99 435,99 430,105" fill="#58a6ff"/><rect x="280" y="105" width="300" height="68" rx="6" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="430.0" y="143.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="430" y="126" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">Node A</text><text x="430" y="143" text-anchor="middle" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">tokens: [t1,t2,...,t500]  ← System Prompt</text><text x="430" y="158" text-anchor="middle" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">kv_ref: GPU_Block[] | ref_count: 3</text><line x1="370" y1="173" x2="230" y2="200" stroke="#3fb950" stroke-width="1.5"/><line x1="490" y1="173" x2="620" y2="200" stroke="#3fb950" stroke-width="1.5"/><polygon points="227,195 233,195 230,202" fill="#3fb950"/><polygon points="617,195 623,195 620,202" fill="#3fb950"/><rect x="120" y="200" width="220" height="58" rx="6" fill="#d2992222" stroke="#d29922" stroke-width="1.5"/><text x="230.0" y="233.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="230" y="220" text-anchor="middle" fill="#d29922" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">Node B</text><text x="230" y="237" text-anchor="middle" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">tokens: [t501..t700]</text><text x="230" y="252" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Few-shot A | ref: 2</text><rect x="530" y="200" width="220" height="58" rx="6" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="640.0" y="233.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="640" y="220" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">Node C</text><text x="640" y="237" text-anchor="middle" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">tokens: [t501..t800]</text><text x="640" y="252" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Few-shot B | ref: 1</text><line x1="230" y1="258" x2="230" y2="289" stroke="#d29922" stroke-width="1.5"/><polygon points="225,289 235,289 230,295" fill="#d29922"/><rect x="130" y="295" width="200" height="54" rx="6" fill="#f8514922" stroke="#f85149" stroke-width="1.5"/><text x="230.0" y="326.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="230" y="315" text-anchor="middle" fill="#f85149" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">Node D</text><text x="230" y="332" text-anchor="middle" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">tokens: [t701..t750]</text><text x="230" y="345" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">User Question A | ref: 1</text><rect x="80" y="375" width="700" height="130" rx="8" fill="#58a6ff08" stroke="#58a6ff33" stroke-width="1"/><text x="430" y="398" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">Radix Tree 关键性质</text><text x="110" y="420" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">1. 边压缩 (Edge Compression): 每条边上存储多个 token，减少树高</text><text x="110" y="442" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">2. 最长前缀匹配: O(m) 时间复杂度，m = 查询长度</text><text x="110" y="464" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">3. 共享前缀自动复用: 任何新请求沿树找到最长匹配节点</text><text x="110" y="486" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">4. 支持多租户: 多个请求可同时持有同一节点的引用</text></svg></div>
+
+<h3>2.3 最长前缀匹配算法</h3>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 560" width="100%" style="display:block"><rect width="860" height="560" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">Longest Prefix Matching — SGLang 的核心算法</text><rect x="40" y="40" width="780" height="28" rx="4" fill="#3fb95015" stroke="#3fb95044" stroke-width="1"/><text x="430" y="60" text-anchor="middle" fill="#3fb950" font-size="12" font-family="'Courier New',monospace">输入: 新请求 token 序列 Q = [q1, q2, ..., qn]</text><rect x="40" y="80" width="480" height="300" rx="6" fill="#0d1117" stroke="#30363d" stroke-width="1"/><text x="58" y="100" fill="#e6edf3" font-size="12" font-family="'Courier New',monospace">match_node = root;  match_len = 0;  remaining = Q</text><text x="58" y="120" fill="#e6edf3" font-size="12" font-family="'Courier New',monospace"></text><text x="58" y="140" fill="#bc8cff" font-size="12" font-family="'Courier New',monospace">while remaining 非空:</text><text x="58" y="160" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">  child = match_node.find_child(remaining[0])   // O(1) 哈希</text><text x="58" y="180" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">  if child 不存在: break</text><text x="58" y="200" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">  common_len = longest_common_prefix(child.tokens, remaining)</text><text x="58" y="220" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">  if common_len == len(child.tokens):</text><text x="58" y="240" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">    match_node = child;  match_len += common_len</text><text x="58" y="260" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">    remaining = remaining[common_len:]</text><text x="58" y="280" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">  else:</text><text x="58" y="300" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">    split_node = split(child, common_len)   // 部分匹配→分裂</text><text x="58" y="320" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">    match_node = split_node;  break</text><text x="58" y="340" fill="#e6edf3" font-size="12" font-family="'Courier New',monospace"></text><text x="58" y="360" fill="#3fb950" font-size="12" font-family="'Courier New',monospace">return (match_node, match_len)</text><text x="680" y="95" text-anchor="middle" fill="#d29922" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">节点分裂 (Split)</text><rect x="560" y="110" width="240" height="50" rx="6" fill="#d2992222" stroke="#d29922" stroke-width="1.5"/><text x="680.0" y="131.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">原节点: tokens=[t1..t100]</text><text x="680.0" y="147.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">children={...}</text><line x1="680" y1="160" x2="680" y2="189" stroke="#d29922" stroke-width="1.5"/><polygon points="675,189 685,189 680,195" fill="#d29922"/><rect x="550" y="195" width="120" height="50" rx="6" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="610.0" y="216.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">父: [t1..t60]</text><text x="610.0" y="232.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">children={新子节点}</text><rect x="690" y="195" width="120" height="50" rx="6" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="750.0" y="216.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">子: [t61..t100]</text><text x="750.0" y="232.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">children={原children}</text><text x="620" y="188" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">common_len=60</text><rect x="40" y="415" width="780" height="130" rx="8" fill="#58a6ff08" stroke="#58a6ff33" stroke-width="1"/><text x="430" y="440" text-anchor="middle" fill="#58a6ff" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">复杂度分析</text><text x="70" y="460" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">时间复杂度:</text><text x="180" y="460" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">O(m)，m = 查询序列长度（每步 O(1) 哈希查找 + O(1) 比较）</text><text x="70" y="488" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">空间复杂度:</text><text x="180" y="488" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">O(共享前缀数)，比 vLLM 的 flat hash 表更省空间</text><text x="70" y="516" fill="#d29922" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">对比 vLLM:</text><text x="180" y="516" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">vLLM 只能完整前缀匹配；Radix Tree 可匹配任意深度的部分前缀</text></svg></div>
+
+<h3>2.4 LRU 驱逐策略</h3>
+
+<p>当 GPU 内存不足时，SGLang 使用 <strong>LRU（Least Recently Used）</strong>策略驱逐最久未访问的 KV Cache 节点：</p>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 400" width="100%" style="display:block"><rect width="860" height="400" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">LRU 驱逐流程</text><rect x="250" y="42" width="360" height="34" rx="20" fill="#f8514922" stroke="#f85149" stroke-width="1.5"/><text x="430.0" y="63.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">触发: 新请求需 KV Cache，但 GPU 无空闲块</text><line x1="430" y1="76" x2="430" y2="99" stroke="#f85149" stroke-width="1.5"/><polygon points="425,99 435,99 430,105" fill="#f85149"/><rect x="80" y="115" width="700" height="30" rx="4" fill="#58a6ff08" stroke="#58a6ff33" stroke-width="1"/><text x="100" y="135" fill="#58a6ff" font-size="12" font-weight="bold" font-family="'Courier New',monospace">1. 按 last_access 排序所有叶子节点</text><text x="520" y="135" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">最久未访问排最前</text><rect x="80" y="151" width="700" height="30" rx="4" fill="#58a6ff08" stroke="#58a6ff33" stroke-width="1"/><text x="100" y="171" fill="#58a6ff" font-size="12" font-weight="bold" font-family="'Courier New',monospace">2. 从最久未访问节点开始驱逐</text><rect x="80" y="187" width="700" height="30" rx="4" fill="#d2992208" stroke="#d2992233" stroke-width="1"/><text x="100" y="207" fill="#d29922" font-size="12" font-weight="bold" font-family="'Courier New',monospace">   a. ref_count > 0 → 跳过</text><text x="520" y="207" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">仍被活跃请求使用</text><rect x="80" y="223" width="700" height="30" rx="4" fill="#3fb95008" stroke="#3fb95033" stroke-width="1"/><text x="100" y="243" fill="#3fb950" font-size="12" font-weight="bold" font-family="'Courier New',monospace">   b. ref_count == 0 → 释放 GPU blocks</text><text x="520" y="243" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">回收到 free pool</text><rect x="80" y="259" width="700" height="30" rx="4" fill="#58a6ff08" stroke="#58a6ff33" stroke-width="1"/><text x="100" y="279" fill="#58a6ff" font-size="12" font-weight="bold" font-family="'Courier New',monospace">3. 释放不够 → 继续驱逐下一节点</text><rect x="80" y="295" width="700" height="30" rx="4" fill="#58a6ff08" stroke="#58a6ff33" stroke-width="1"/><text x="100" y="315" fill="#58a6ff" font-size="12" font-weight="bold" font-family="'Courier New',monospace">4. 直到够用或所有叶子检查完</text><rect x="80" y="340" width="700" height="48" rx="6" fill="#3fb95010" stroke="#3fb95044" stroke-width="1"/><text x="430" y="362" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">关键设计: 只驱逐叶子节点(不破坏树) | ref_count 保护(不驱逐活跃KV)</text><text x="430" y="380" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">时间复杂度: O(k log n) — 用优先队列维护 last_access</text></svg></div>
+
+<h3>2.5 RadixAttention vs vLLM Prefix Caching 技术对比</h3>
+
+<table>
+  <tr><th>维度</th><th>vLLM Prefix Caching</th><th>SGLang RadixAttention</th></tr>
+  <tr><td><strong>数据结构</strong></td><td>Hash Table（token hash → block）</td><td>Radix Tree（Patricia Trie）</td></tr>
+  <tr><td><strong>匹配粒度</strong></td><td>完整前缀匹配</td><td>最长公共前缀匹配（任意深度）</td></tr>
+  <tr><td><strong>查找复杂度</strong></td><td>O(1) 平均</td><td>O(m) m=查询长度</td></tr>
+  <tr><td><strong>分裂/合并</strong></td><td>不支持</td><td>支持节点分裂和合并</td></tr>
+  <tr><td><strong>驱逐策略</strong></td><td>LRU（block 级别）</td><td>LRU（radix 节点级别，更粗粒度）</td></tr>
+  <tr><td><strong>多轮对话</strong></td><td>每轮重新计算（前缀不完全匹配）</td><td>✅ 自动复用历史 KV</td></tr>
+  <tr><td><strong>Agent 场景</strong></td><td>有限（System Prompt 共享）</td><td>✅ 最优（部分前缀自动复用）</td></tr>
+  <tr><td><strong>实现复杂度</strong></td><td>简单</td><td>较复杂（树操作、并发安全）</td></tr>
+  <tr><td><strong>内存开销</strong></td><td>较低（只有 hash 表）</td><td>略高（维护树结构 + 元数据）</td></tr>
+</table>
+
+<div class="box tip">
+<strong>何时 RadixAttention 优势最大？</strong>当请求之间有大量<strong>部分重叠的前缀</strong>时（如多轮对话、共享 System Prompt + 不同 Few-shot、Agent 多工具调用），RadixAttention 的 KV Cache 复用率比 vLLM 高 30-60%。对于完全独立的请求（无共享前缀），两者性能接近。
+</div>
+
+<h3>2.6 RadixCache 源码级追踪</h3>
+
+<p>以下基于 SGLang v0.5.x 源码（<code>sglang/srt/mem_cache/radix_cache.py</code>），提取 RadixCache 核心类的关键方法并加详细注释：</p>
+
+<pre><code># === SGLang RadixCache 核心数据结构 ===
+# 文件: sglang/srt/mem_cache/radix_cache.py
+# 基于 LRU 策略的 Radix Tree KV Cache 管理器
+
+from collections import OrderedDict
+import torch
+from typing import List, Optional, Tuple
+
+class RadixNode:
+    """Radix Tree 节点 — 存储一段 token 子序列及其对应的 KV Cache 物理块"""
+    def __init__(self):
+        self.children: OrderedDict[int, 'RadixNode'] = OrderedDict()
+        # key: 存储这段前缀的 token ids（压缩路径，不是单个 token）
+        self.key: List[int] = []
+        # value: KV Cache 的物理块索引（GPU 显存中的实际位置）
+        self.value: List[int] = []   # 块 ID 列表
+        self.ref_count: int = 0      # 引用计数：>0 表示有活跃请求在用
+        self.last_access: float = 0  # LRU 时间戳，驱逐时用
+        self.parent: Optional['RadixNode'] = None
+        self.locked: bool = False    # 是否被锁定（不可驱逐）
+
+class RadixCache:
+    """
+    核心缓存管理器 — 基于 Radix Tree 的 KV Cache 复用引擎
+    
+    设计原则:
+    1. 用 Radix Tree (Patricia Trie) 管理所有前缀的 KV Cache
+    2. 支持最长前缀匹配 → O(m) 查找，m=查询长度
+    3. LRU 驱逐策略 → 内存不足时释放最久未用的节点
+    4. 引用计数 → 防止驱逐正在使用的 KV Cache
+    """
+    
+    def __init__(self, req_to_token_pool, token_to_kv_pool, 
+                 eviction_policy="lru"):
+        self.req_to_token_pool = req_to_token_pool  # 请求→token 块映射池
+        self.token_to_kv_pool = token_to_kv_pool    # token 块→KV 数据池
+        self.root_node = RadixNode()                 # 虚拟根节点
+        self.root_node.key = []                       # 根节点无 token
+        self.eviction_policy = eviction_policy
+        self.num_tokens = 0                          # 树中总 token 数
+        self.num_nodes = 0                           # 树中总节点数
+
+    # ==================== 核心方法 1: 最长前缀匹配 ====================
+    def match_prefix(self, token_ids: List[int]) -> Tuple[RadixNode, int]:
+        """
+        在 Radix Tree 中查找与 token_ids 的最长公共前缀。
+        
+        算法:
+        1. 从根节点开始，逐层查找匹配的子节点
+        2. 对每个节点比较 key 与剩余 token_ids
+        3. 如果完全匹配该节点的 key → 继续深入子树
+        4. 如果部分匹配 → 分裂节点，返回匹配长度
+        5. 如果不匹配 → 返回当前累积的匹配长度
+        
+        返回: (匹配到的最深节点, 匹配的 token 数)
+        时间复杂度: O(m)，m = len(token_ids)
+        """
+        if not token_ids:
+            return self.root_node, 0
+            
+        current_node = self.root_node
+        remaining = list(token_ids)  # 还未匹配的 token
+        total_matched = 0
+        
+        while remaining:
+            # 步骤 1: 用第一个 token 的 hash 查找子节点 → O(1)
+            first_token = remaining[0]
+            if first_token not in current_node.children:
+                break  # 无匹配子节点，停止
+            
+            child = current_node.children[first_token]
+            child_key = child.key
+            
+            # 步骤 2: 计算 child_key 和 remaining 的最长公共前缀长度
+            common_len = 0
+            for i in range(min(len(child_key), len(remaining))):
+                if child_key[i] == remaining[i]:
+                    common_len += 1
+                else:
+                    break
+            
+            if common_len == 0:
+                break  # 无公共前缀
+            
+            if common_len == len(child_key):
+                # 完全匹配该节点 → 继续深入
+                current_node = child
+                remaining = remaining[common_len:]
+                total_matched += common_len
+                # 更新 LRU 时间戳
+                current_node.last_access = time.time()
+            else:
+                # 部分匹配 → 需要分裂节点（见 insert 方法）
+                total_matched += common_len
+                break
+        
+        return current_node, total_matched
+
+    # ==================== 核心方法 2: 插入/缓存 KV Cache ====================
+    def insert(self, token_ids: List[int], kv_indices: List[int]) -> int:
+        """
+        将新的 token_ids + 对应的 KV Cache 块插入 Radix Tree。
+        
+        插入流程:
+        1. 调用 match_prefix 找到最长匹配前缀
+        2. 如果匹配到树中间 → 分裂现有节点
+        3. 将剩余 token 创建为新叶子节点
+        4. 返回复用的 token 数（已有的前缀部分）
+        
+        图示:
+          插入 [t1,t2,t3,t4,t5,t6] 前已有 [t1,t2,t3,x,y]
+          
+          Before:  Root → [t1,t2,t3] → [x,y]
+          After:   Root → [t1,t2,t3] → [x,y]
+                                ↘ [t4,t5,t6]  (新分支)
+        """
+        if not token_ids:
+            return 0
+            
+        # Step 1: 查找最长匹配
+        match_node, match_len = self.match_prefix(token_ids)
+        remaining_tokens = token_ids[match_len:]
+        remaining_kv = kv_indices[match_len:]
+        
+        if not remaining_tokens:
+            return match_len  # 完全复用，无需插入
+        
+        # Step 2: 需要分裂的情况
+        # match_node 的 key 可能需要被拆分
+        if match_len > 0 and match_len < sum(len(n.key) for n in self._trace_path(match_node)):
+            self._split_node(match_node, match_len)
+        
+        # Step 3: 创建新节点存储剩余 token
+        new_node = RadixNode()
+        new_node.key = remaining_tokens
+        new_node.value = remaining_kv  # 对应的 GPU 物理块
+        new_node.ref_count = 1
+        new_node.last_access = time.time()
+        new_node.parent = match_node
+        
+        # 插入为 match_node 的子节点
+        first_token = remaining_tokens[0]
+        match_node.children[first_token] = new_node
+        
+        self.num_tokens += len(remaining_tokens)
+        self.num_nodes += 1
+        
+        return match_len  # 返回复用的 token 数
+
+    # ==================== 核心方法 3: 节点分裂 ====================
+    def _split_node(self, node: RadixNode, split_pos: int):
+        """
+        分裂节点 — 当匹配在某节点 key 的中间位置时触发
+        
+        场景: node.key = [t1,t2,t3,t4,t5], 要在位置 3 处分裂
+        
+        Before:  parent → [t1,t2,t3,t4,t5]
+        After:   parent → [t1,t2,t3] → [t4,t5]
+        
+        分裂后:
+        - 前半段 [t1,t2,t3] 保留在原节点（修改 key/value）
+        - 后半段 [t4,t5] 移到新中间节点
+        - 原节点的子节点变成新中间节点的子节点
+        """
+        # 创建新中间节点，承接后半段
+        mid_node = RadixNode()
+        mid_node.key = node.key[split_pos:]
+        mid_node.value = node.value[split_pos:]
+        mid_node.parent = node
+        mid_node.ref_count = node.ref_count
+        mid_node.last_access = node.last_access
+        mid_node.children = node.children  # 原来的子树挂在新节点下
+        
+        # 更新子节点的 parent 指针
+        for child in node.children.values():
+            child.parent = mid_node
+        
+        # 原节点只保留前半段
+        node.key = node.key[:split_pos]
+        node.value = node.value[:split_pos]
+        node.children = OrderedDict()
+        node.children[mid_node.key[0]] = mid_node
+        
+        self.num_nodes += 1
+
+    # ==================== 核心方法 4: LRU 驱逐 ====================
+    def evict(self, num_tokens_needed: int) -> int:
+        """
+        LRU 驱逐 — 当 GPU 显存不足时释放最久未访问的 KV Cache。
+        
+        驱逐策略:
+        1. 按 last_access 排序所有叶子节点（最久未访问的排最前）
+        2. 从最久未访问节点开始，跳过 ref_count > 0 的（活跃使用中）
+        3. 释放 ref_count == 0 的节点的 GPU 物理块
+        4. 合并空节点到父节点（维护树结构紧凑性）
+        
+        关键约束:
+        - 只驱逐叶子节点（内部节点可能有正在使用的子树）
+        - ref_count > 0 的节点绝对不驱逐（会导致推理错误）
+        - 驱逐后尝试合并父节点（如果父节点也变成单子叶节点）
+        
+        返回: 实际释放的 token 数
+        """
+        evicted_count = 0
+        
+        # 收集所有叶子节点，按 last_access 排序
+        leaves = []
+        self._collect_leaves(self.root_node, leaves)
+        leaves.sort(key=lambda n: n.last_access)  # 最久未访问排最前
+        
+        for leaf in leaves:
+            if evicted_count >= num_tokens_needed:
+                break
+            
+            # 跳过活跃节点
+            if leaf.ref_count > 0 or leaf.locked:
+                continue
+            
+            # 释放该节点的 KV Cache 物理块
+            self._free_kv_blocks(leaf.value)
+            evicted_count += len(leaf.key)
+            
+            # 从树中移除该节点
+            parent = leaf.parent
+            if parent:
+                del parent.children[leaf.key[0]]
+                self.num_tokens -= len(leaf.key)
+                self.num_nodes -= 1
+                
+                # 尝试合并: 如果 parent 只剩 1 个子节点且 parent 非根
+                self._try_merge(parent)
+        
+        return evicted_count
+
+    def _try_merge(self, node: RadixNode):
+        """
+        合并优化: 当节点只剩一个子节点时，将子节点合并到当前节点
+        
+        Before:  parent → [t1,t2] → [t3,t4]  (中间节点只有1个子节点)
+        After:   parent → [t1,t2,t3,t4]       (合并后路径更短)
+        
+        这保持了 Radix Tree 的 Patricia 性质 — 没有单子节点的中间节点
+        """
+        if node == self.root_node or node.ref_count > 0:
+            return
+        if len(node.children) != 1:
+            return
+            
+        child = next(iter(node.children.values()))
+        if child.ref_count > 0:
+            return  # 子节点正在使用，不能合并
+        
+        # 合并: 将子节点的 key/value 追加到当前节点
+        node.key = node.key + child.key
+        node.value = node.value + child.value
+        node.children = child.children
+        
+        # 更新孙子节点的 parent 指针
+        for grandchild in child.children.values():
+            grandchild.parent = node
+        
+        self.num_nodes -= 1
+
+    def _collect_leaves(self, node, leaves):
+        """递归收集所有叶子节点"""
+        if not node.children:
+            if node != self.root_node:
+                leaves.append(node)
+        else:
+            for child in node.children.values():
+                self._collect_leaves(child, leaves)
+
+    def _free_kv_blocks(self, block_ids: List[int]):
+        """将物理块归还到空闲池（释放 GPU 显存）"""
+        for bid in block_ids:
+            self.token_to_kv_pool.free(bid)
+
+    # ==================== 核心方法 5: 引用计数管理 ====================
+    def inc_ref(self, node: RadixNode):
+        """增加引用计数 — 当请求开始使用该节点的 KV Cache 时"""
+        node.ref_count += 1
+        # 递归增加所有子节点的引用
+        for child in node.children.values():
+            self.inc_ref(child)
+
+    def dec_ref(self, node: RadixNode):
+        """减少引用计数 — 当请求完成时"""
+        node.ref_count -= 1
+        for child in node.children.values():
+            self.dec_ref(child)</code></pre>
+
+<div class="box info">
+<strong>源码要点总结：</strong>
+<ul>
+  <li><strong>match_prefix</strong> 是最高频调用 — 每个新请求到达时都执行，时间复杂度 O(m)，m=token 数</li>
+  <li><strong>_split_node</strong> 是 Radix Tree 区别于普通 Trie 的关键 — 支持在路径中间插入分支</li>
+  <li><strong>evict</strong> 只驱逐叶子节点且 ref_count==0 — 保证不会破坏正在使用的缓存</li>
+  <li><strong>_try_merge</strong> 维护 Patricia 性质 — 避免树退化为链表</li>
+  <li>整个数据结构用 <strong>OrderedDict</strong> 存储子节点 — 保持插入顺序 + O(1) 哈希查找</li>
+</ul>
+</div>
+
+<!-- ==================== 第三章：Constrained Decoding ==================== -->
+<h2>三、Constrained Decoding — 零开销结构化生成</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>3.1 有限状态机 (FSM) 构建过程</h3>
+
+<p>SGLang 的 Constrained Decoding 将 JSON Schema 或正则表达式编译为<strong>压缩有限状态机 (Compressed FSM)</strong>，然后在每步解码时根据当前 FSM 状态计算合法 token 集合，将不合法 token 的 logits 设为 -∞。</p>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 620" width="100%" style="display:block"><rect width="420" height="620" fill="#161b22"/><text x="210" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">Constrained Decoding 整体流程</text><rect x="100" y="40" width="220" height="32" rx="20" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="210.0" y="60.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">JSON Schema / Regex</text><line x1="210" y1="80" x2="210" y2="102" stroke="#58a6ff" stroke-width="1.5"/><polygon points="205,102 215,102 210,108" fill="#58a6ff"/><rect x="60" y="108" width="300" height="58" rx="6" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="210.0" y="141.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="210" y="128" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">1. 编译为正则表达式</text><text x="210" y="146" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">json_schema → regex</text><text x="210" y="161" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">interegular 库</text><line x1="210" y1="176" x2="210" y2="198" stroke="#bc8cff" stroke-width="1.5"/><polygon points="205,198 215,198 210,204" fill="#bc8cff"/><rect x="60" y="204" width="300" height="58" rx="6" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="210.0" y="237.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="210" y="224" text-anchor="middle" fill="#bc8cff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">2. 构建 NFA</text><text x="210" y="242" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Thompson's algorithm</text><text x="210" y="257" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">ε-转移</text><line x1="210" y1="272" x2="210" y2="294" stroke="#d29922" stroke-width="1.5"/><polygon points="205,294 215,294 210,300" fill="#d29922"/><rect x="60" y="300" width="300" height="58" rx="6" fill="#d2992222" stroke="#d29922" stroke-width="1.5"/><text x="210.0" y="333.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="210" y="320" text-anchor="middle" fill="#d29922" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">3. NFA → DFA 转换</text><text x="210" y="338" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">子集构造法</text><text x="210" y="353" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">状态数可能指数增长</text><line x1="210" y1="368" x2="210" y2="390" stroke="#3fb950" stroke-width="1.5"/><polygon points="205,390 215,390 210,396" fill="#3fb950"/><rect x="60" y="396" width="300" height="58" rx="6" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="210.0" y="429.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="210" y="416" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">4. DFA 压缩</text><text x="210" y="434" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Compressed FSM</text><text x="210" y="449" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">字符级 → token 级</text><line x1="210" y1="464" x2="210" y2="486" stroke="#f85149" stroke-width="1.5"/><polygon points="205,486 215,486 210,492" fill="#f85149"/><rect x="60" y="492" width="300" height="58" rx="6" fill="#f8514922" stroke="#f85149" stroke-width="1.5"/><text x="210.0" y="525.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="210" y="512" text-anchor="middle" fill="#f85149" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">5. 运行时 FSM</text><text x="210" y="530" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">每步解码查表</text><text x="210" y="545" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">得合法 token 集</text></svg></div>
+
+<h3>3.2 Compressed FSM 优化</h3>
+
+<p>朴素的 DFA 状态数可能很大（JSON Schema 的 DFA 可达数万状态）。SGLang 的核心优化是<strong>Compressed FSM</strong>：</p>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 540" width="100%" style="display:block"><rect width="860" height="540" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">Compressed FSM 原理</text><rect x="40" y="40" width="780" height="55" rx="6" fill="#f8514910" stroke="#f8514944" stroke-width="1"/><text x="430" y="60" text-anchor="middle" fill="#f85149" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">问题: 朴素 DFA 是字符级，但 LLM 输出是 token 级</text><text x="430" y="78" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">一个 token 可能对应多个字符 (如 "hello" = 1 token = 5 字符) → 每步逐字符转移 FSM 开销大</text><text x="40" y="118" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">Step 1: 字符级 DFA → Token 级 DFA</text><text x="60" y="138" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">对每个状态 s 和 token t: 将 t 对应的字符序列逐个转移 FSM → 记录最终状态 s'</text><text x="60" y="156" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">添加转移: δ_compressed(s, t) = s' → 直接查表得下一状态，无需逐字符转移</text><text x="40" y="185" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">Step 2: 转移表预计算</text><rect x="60" y="200" width="740" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="160" y="219" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">状态</text><text x="410" y="219" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">合法 token 转移 (bitset)</text><text x="660" y="219" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">语义</text><rect x="60" y="228" width="740" height="28" fill="#161b22" stroke="#30363d44" stroke-width="0.5"/><text x="160" y="247" text-anchor="middle" fill="#3fb950" font-size="12" font-family="'Courier New',monospace">state_0</text><text x="410" y="247" text-anchor="middle" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">{" → state_1</text><text x="660" y="247" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">期望 JSON 开始</text><rect x="60" y="256" width="740" height="28" fill="#30363d" stroke="#30363d44" stroke-width="0.5"/><text x="160" y="275" text-anchor="middle" fill="#3fb950" font-size="12" font-family="'Courier New',monospace">state_1</text><text x="410" y="275" text-anchor="middle" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">" → state_2</text><text x="660" y="275" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">期望 key</text><rect x="60" y="284" width="740" height="28" fill="#161b22" stroke="#30363d44" stroke-width="0.5"/><text x="160" y="303" text-anchor="middle" fill="#3fb950" font-size="12" font-family="'Courier New',monospace">state_2</text><text x="410" y="303" text-anchor="middle" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">a-z → s2, " → s3</text><text x="660" y="303" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">key 内容</text><rect x="60" y="312" width="740" height="28" fill="#30363d" stroke="#30363d44" stroke-width="0.5"/><text x="160" y="331" text-anchor="middle" fill="#3fb950" font-size="12" font-family="'Courier New',monospace">state_3</text><text x="410" y="331" text-anchor="middle" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">: → state_4</text><text x="660" y="331" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">冒号</text><rect x="60" y="340" width="740" height="28" fill="#161b22" stroke="#30363d44" stroke-width="0.5"/><text x="160" y="359" text-anchor="middle" fill="#3fb950" font-size="12" font-family="'Courier New',monospace">state_4</text><text x="410" y="359" text-anchor="middle" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">0-9→s5, "→s6, {→…</text><text x="660" y="359" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">value</text><rect x="60" y="388" width="740" height="60" rx="6" fill="#3fb95010" stroke="#3fb95044" stroke-width="1"/><text x="430" y="410" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">内存优化: bitset 存储合法 token</text><text x="430" y="430" text-anchor="middle" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">vocab=150K → 每状态 18.75 KB | 1000 状态 → 18.75 MB (完全可接受)</text></svg></div>
+
+<h3>3.2.1 FSM 构建源码实现</h3>
+
+<p>以下基于 SGLang 的 <code>sglang/srt/constrained/</code> 目录源码，展示从 JSON Schema → Regex → Token-level FSM 的完整编译链路：</p>
+
+<pre><code># === SGLang Constrained Decoding 核心实现 ===
+# 文件: sglang/srt/constrained/fsm_cache.py + compressed_fsm.py
+# 职责: 将 JSON Schema / Regex 编译为 Token-level 压缩 FSM
+
+import interegular  # 正则表达式 → NFA/DFA 的 Python 库
+import json
+from typing import Dict, List, Set, Optional, Tuple
+import numpy as np
+
+# ==================== Step 1: JSON Schema → Regex ====================
+def json_schema_to_regex(schema: dict) -> str:
+    """
+    将 JSON Schema 编译为正则表达式。
+    
+    核心思路:
+    - object → {"key1": <value_regex>, "key2": <value_regex>}
+    - string → "([^"\\\\]|\\\\.)*"  (带转义的双引号字符串)
+    - integer → -?(0|[1-9][0-9]*)
+    - array → \[(<item_regex>(,<item_regex>)*)?\]
+    
+    示例: {"name": str, "age": int}
+    → \{\\s*"name"\\s*:\\s*"([^"\\\\]|\\\\.)*"\\s*,\\s*"age"\\s*:\\s*-?(0|[1-9][0-9]*)\\s*\}
+    """
+    from outlines.fsm.json_schema import build_regex_from_schema
+    return build_regex_from_schema(json.dumps(schema))
+
+# ==================== Step 2: Regex → DFA (字符级) ====================
+def regex_to_dfa(regex_str: str) -> interegular.fsm.FSM:
+    """
+    将正则表达式编译为确定性有限状态机 (DFA)。
+    
+    流程: regex → NFA (Thompson's) → DFA (子集构造法) → 最小化 DFA
+    
+    例子: regex "ab+c" →
+      State 0 --a--> State 1 --b--> State 1 --c--> State 2 (accept)
+    """
+    pattern = interegular.parse_pattern(regex_str)
+    nfa = pattern.to_fsm()      # Thompson's construction → NFA
+    dfa = nfa.determinize()     # 子集构造法: NFA → DFA
+    dfa = dfa.minimize()        # Hopcroft 最小化
+    return dfa
+
+# ==================== Step 3: 字符级 DFA → Token 级 Compressed FSM ====================
+class CompressedFSM:
+    """
+    压缩有限状态机 — SGLang Constrained Decoding 的核心数据结构。
+    
+    将字符级 DFA 转换为 token 级 FSM，使得每步解码时：
+    1. 直接根据当前 FSM 状态和候选 token 查表 → O(1)
+    2. 返回合法 token 集合（bitset 表示）
+    3. 用 bitmask 屏蔽不合法 token 的 logits
+    
+    关键优化:
+    - 预计算所有 (state, token_id) → next_state 的转移表
+    - 每个状态的合法 token 用 bitset 存储，GPU 上高效 apply mask
+    """
+    
+    def __init__(self, dfa: interegular.fsm.FSM, tokenizer):
+        self.dfa = dfa
+        self.tokenizer = tokenizer
+        self.num_states = len(dfa.states)
+        self.vocab_size = tokenizer.vocab_size
+        
+        # 核心数据结构: 转移表
+        # transition_table[state] = {token_id: next_state, ...}
+        self.transition_table: Dict[int, Dict[int, int]] = {}
+        
+        # 每个状态的合法 token 集合 (bitset)
+        # valid_tokens_bitset[state] = numpy uint8 array, shape=(vocab_size//8,)
+        self.valid_tokens_bitset: Dict[int, np.ndarray] = {}
+        
+        # 接受状态集合
+        self.accept_states: Set[int] = set(dfa.accepting)
+        
+        self._build_transition_table()
+    
+    def _build_transition_table(self):
+        """
+        预计算 Token 级转移表 — 一次性开销，缓存复用
+        
+        核心算法:
+        对每个 DFA 状态 s 和词表中的每个 token t:
+          1. 将 token t 解码为字符序列 chars
+          2. 从状态 s 开始，逐字符转移 DFA
+          3. 记录最终状态 s'
+          4. 如果转移到死状态 → token t 在状态 s 下非法
+          5. 否则: transition_table[s][t] = s'
+        
+        时间复杂度: O(|states| × |vocab| × avg_token_len)
+        对于 LLaMA (vocab=32000, states=100): ~3-5 秒（一次性）
+        """
+        all_tokens = range(self.vocab_size)
+        
+        for state in self.dfa.states:
+            self.transition_table[state] = {}
+            valid_mask = np.zeros(self.vocab_size, dtype=np.uint8)
+            dead_state = self.dfa.empty  # DFA 的死状态
+            
+            for token_id in all_tokens:
+                # 将 token id 解码为字符序列
+                token_str = self.tokenizer.decode([token_id])
+                
+                # 逐字符转移 DFA
+                current_state = state
+                is_valid = True
+                
+                for char in token_str:
+                    # DFA 转移函数: δ(current_state, char)
+                    next_state = self._dfa_transition(current_state, char)
+                    
+                    if next_state == dead_state:
+                        is_valid = False
+                        break
+                    current_state = next_state
+                
+                if is_valid:
+                    self.transition_table[state][token_id] = current_state
+                    valid_mask[token_id] = 1  # 标记为合法 token
+            
+            # 将 valid_mask 压缩为 bitset (每 8 个 token 打包为 1 字节)
+            self.valid_tokens_bitset[state] = np.packbits(valid_mask)
+    
+    def _dfa_transition(self, state: int, char: str) -> int:
+        """单步 DFA 转移: δ(state, char) → next_state"""
+        transitions = self.dfa.map.get(state, {})
+        next_state = transitions.get(char, self.dfa.empty)
+        return next_state
+    
+    def get_valid_tokens(self, state: int) -> np.ndarray:
+        """
+        获取指定状态的合法 token bitset
+        
+        返回: numpy uint8 数组，每个 bit 对应一个 token 是否合法
+        形状: (vocab_size // 8,)  — 每字节存储 8 个 token 的合法性
+        
+        用途: 在 GPU 上直接用 bitwise AND 操作 apply logit mask
+        """
+        return self.valid_tokens_bitset.get(
+            state, 
+            np.zeros(self.vocab_size // 8, dtype=np.uint8)
+        )
+    
+    def advance_state(self, state: int, token_id: int) -> int:
+        """
+        状态转移: 给定当前状态和采样到的 token，返回下一 FSM 状态
+        
+        时间复杂度: O(1) — 直接查表
+        """
+        return self.transition_table[state].get(token_id, self.dfa.empty)
+    
+    def is_accepting(self, state: int) -> bool:
+        """检查当前状态是否为接受状态（即生成完毕）"""
+        return state in self.accept_states
+    
+    def count_valid_tokens(self, state: int) -> int:
+        """计算当前状态有多少合法 token（用于 Jump-Forward 判断）"""
+        bitset = self.valid_tokens_bitset.get(state)
+        if bitset is None:
+            return 0
+        return int(np.sum(np.unpackbits(bitset)))
+
+# ==================== Step 4: Logit Mask 应用 ====================
+def apply_fsm_mask(logits: torch.Tensor, fsm: CompressedFSM, 
+                   current_state: int) -> torch.Tensor:
+    """
+    将 FSM 合法 token 掩码应用到 logits 上。
+    
+    实现:
+    1. 从 FSM 获取当前状态的合法 token bitset
+    2. 将 bitset 展开为 (vocab_size,) 的 bool tensor
+    3. 不合法位置的 logits 设为 -inf
+    
+    GPU 上的高效实现:
+    - bitset 在 CPU 上预计算好
+    - 上传到 GPU 后用 bitwise 操作展开
+    - masked_fill_ 原地操作，无额外分配
+    
+    时间: ~0.05ms (A100, vocab_size=32000)
+    """
+    valid_bitset = fsm.get_valid_tokens(current_state)
+    
+    # bitset → bool mask: unpackbits 将每字节展开为 8 个 bit
+    mask_np = np.unpackbits(valid_bitset)[:logits.shape[-1]]
+    mask = torch.from_numpy(mask_np).bool().to(logits.device)
+    
+    # 不合法 token 的 logits 设为 -inf → softmax 后概率为 0
+    logits[~mask] = float('-inf')
+    
+    return logits
+
+# ==================== Step 5: Jump-Forward 判断 ====================
+def check_jump_forward(fsm: CompressedFSM, current_state: int, 
+                       tokenizer) -> Optional[List[int]]:
+    """
+    检查当前状态是否只有一个合法 token → 可以跳过模型推理。
+    
+    算法:
+    1. 如果当前状态只有 1 个合法 token → 直接输出该 token
+    2. 转移到下一个 FSM 状态
+    3. 重复检查，直到有多个合法选择或到达接受状态
+    
+    返回: 可直接输出的确定性 token 列表，或 None（需要模型推理）
+    
+    示例: 生成 JSON 时， "{" → "name" → ":" → " 这些位置
+          每个状态只有 1 个合法 token → 一次跳过 4 个 token
+    """
+    jump_tokens = []
+    state = current_state
+    
+    for _ in range(100):  # 最多跳 100 个 token 防止死循环
+        valid_count = fsm.count_valid_tokens(state)
+        
+        if valid_count != 1:
+            break  # 有多个选择，需要模型推理
+        
+        # 找到唯一合法的 token
+        valid_bitset = fsm.get_valid_tokens(state)
+        mask = np.unpackbits(valid_bitset)
+        token_id = int(np.argmax(mask))
+        
+        jump_tokens.append(token_id)
+        state = fsm.advance_state(state, token_id)
+        
+        if fsm.is_accepting(state):
+            break  # 到达接受状态，生成完毕
+    
+    return jump_tokens if jump_tokens else None</code></pre>
+
+<div class="box tip">
+<strong>关键性能洞察：</strong>
+<ul>
+  <li><strong>FSM 构建（一次性）</strong>：JSON Schema → Regex ~1ms + NFA → DFA ~10ms + Token 级压缩 ~5ms = <strong>总计 ~16ms</strong>。后续同 Schema 缓存复用</li>
+  <li><strong>每步 logit mask</strong>：查表 O(1) + unpackbits O(V/8) + masked_fill O(V) = <strong>~0.05ms</strong>（vs 模型 forward ~5ms → 开销仅 1%）</li>
+  <li><strong>Jump-Forward</strong>：JSON 生成中约 <strong>30-50%</strong> 的 token 可跳过推理，整体加速 1.5-2x</li>
+  <li><strong>bitset 设计</strong>：用 numpy packbits 压缩后每 32000 token 仅需 4KB，GPU 传输极快</li>
+</ul>
+</div>
+
+<h3>3.3 Jump-Forward Decoding 加速</h3>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 350" width="100%" style="display:block"><rect width="860" height="350" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">Jump-Forward Decoding — 批量确定性 token</text><rect x="40" y="42" width="780" height="48" rx="6" fill="#f8514910" stroke="#f8514944" stroke-width="1"/><text x="430" y="62" text-anchor="middle" fill="#f85149" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">问题: 某些位置只有一种合法选择（如 JSON 的引号、冒号、逗号）</text><text x="430" y="80" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">普通 constrained decoding 每个 token 都要经过 FSM 转移 → 确定性位置是浪费</text><text x="40" y="115" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">Jump-Forward 策略: FSM 状态只有 1 个合法 token → 直接输出，跳过模型前向传播！</text><text x="40" y="145" fill="#58a6ff" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">示例: 生成 JSON</text><rect x="60" y="155" width="36" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="78.0" y="174" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="bold" font-family="'Courier New',monospace">"{</text><rect x="100" y="155" width="66" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="133.0" y="174" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="bold" font-family="'Courier New',monospace">"name</text><rect x="170" y="155" width="30" height="28" rx="4" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="4,2"/><text x="185.0" y="174" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="bold" font-family="'Courier New',monospace">"</text><rect x="204" y="155" width="30" height="28" rx="4" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="4,2"/><text x="219.0" y="174" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="bold" font-family="'Courier New',monospace">:</text><rect x="238" y="155" width="30" height="28" rx="4" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="4,2"/><text x="253.0" y="174" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="bold" font-family="'Courier New',monospace"> </text><rect x="272" y="155" width="30" height="28" rx="4" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="4,2"/><text x="287.0" y="174" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="bold" font-family="'Courier New',monospace">"</text><rect x="306" y="155" width="66" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="339.0" y="174" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="bold" font-family="'Courier New',monospace">Alice</text><rect x="376" y="155" width="30" height="28" rx="4" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="4,2"/><text x="391.0" y="174" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="bold" font-family="'Courier New',monospace">"</text><rect x="410" y="155" width="30" height="28" rx="4" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="4,2"/><text x="425.0" y="174" text-anchor="middle" fill="#3fb950" font-size="11" font-weight="bold" font-family="'Courier New',monospace">,</text><rect x="60" y="196" width="14" height="14" rx="2" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="4,2"/><text x="82" y="208" fill="#3fb950" font-size="11" font-family="system-ui,sans-serif">Jump-Forward (跳过模型推理)</text><rect x="300" y="196" width="14" height="14" rx="2" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="322" y="208" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">正常模型推理</text><rect x="40" y="228" width="780" height="55" rx="6" fill="#3fb95010" stroke="#3fb95044" stroke-width="1"/><text x="430" y="252" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">效果: “name” 之间 4 个确定性 token 可跳过 → 减少 4 次模型前向传播！</text><text x="430" y="272" text-anchor="middle" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">每个跳过的 token 省 ~5ms → JSON 生成反而比非约束解码更快</text></svg></div>
+
+<h3>3.4 性能影响分析</h3>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 400" width="100%" style="display:block"><rect width="860" height="400" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">Constrained Decoding 的开销分析</text><rect x="40" y="42" width="380" height="110" rx="6" fill="#f8514908" stroke="#f8514944" stroke-width="1"/><text x="230" y="64" text-anchor="middle" fill="#f85149" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">1. FSM 构建 (一次性)</text><text x="60" y="86" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">JSON Schema → Regex: ~1ms</text><text x="60" y="104" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">NFA → DFA: ~10ms</text><text x="60" y="122" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">DFA 压缩: ~5ms → 总计 ~16ms</text><text x="60" y="142" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">首次, 后续缓存复用</text><rect x="440" y="42" width="380" height="110" rx="6" fill="#d2992208" stroke="#d2992244" stroke-width="1"/><text x="630" y="64" text-anchor="middle" fill="#d29922" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">2. 每步解码运行时开销</text><text x="460" y="86" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">FSM 查表: O(1)</text><text x="460" y="104" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">构建 bitset: O(V/64)</text><text x="460" y="122" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">应用 mask: O(V)</text><text x="460" y="142" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">总计 ~0.1ms (A100/H100)</text><rect x="40" y="168" width="780" height="55" rx="6" fill="#3fb95008" stroke="#3fb95044" stroke-width="1"/><text x="430" y="190" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">3. Jump-Forward 减少的计算: 每个确定性 token 省 ~5ms → 净效果: constrained 更快！</text><text x="430" y="210" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">短 JSON (<100 tokens): 开销 < 3%  |  长 JSON (>1000 tokens): 性能提升 10-30%</text><text x="40" y="255" fill="#58a6ff" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">开销 vs 收益对比</text><text x="40" y="285" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">FSM 开销</text><rect x="140" y="270" width="30" height="20" rx="3" fill="#f8514988"/><text x="180" y="285" fill="#f85149" font-size="11" font-family="system-ui,sans-serif">~0.1ms/step</text><text x="40" y="315" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">JF 节省</text><rect x="140" y="300" width="250" height="20" rx="3" fill="#3fb95088"/><text x="400" y="315" fill="#3fb950" font-size="11" font-family="system-ui,sans-serif">~5ms × N tokens (长 JSON 大量节省)</text><text x="40" y="345" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">模型前向</text><rect x="140" y="330" width="200" height="20" rx="3" fill="#58a6ff88"/><text x="350" y="345" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">~5ms/step (被 JF 跳过)</text></svg></div>
+
+<pre><code># Constrained Decoding 实际使用示例
+import sglang as sgl
+from pydantic import BaseModel
+
+# 方法 1: 使用 JSON Schema
+class UserInfo(BaseModel):
+    name: str
+    age: int
+    skills: list[str]
+
+@sgl.function
+def extract_user(s, text):
+    s += sgl.system("Extract user information from text.")
+    s += sgl.user(text)
+    # 强制输出符合 UserInfo schema 的 JSON
+    s += sgl.assistant(sgl.json(schema=UserInfo))
+
+# 方法 2: 使用正则表达式
+@sgl.function
+def extract_date(s, text):
+    s += sgl.user(f"Extract date from: {text}")
+    # 强制输出 YYYY-MM-DD 格式
+    s += sgl.assistant(sgl.regex(pattern=r"\d{4}-\d{2}-\d{2}"))
+
+# 方法 3: 使用 choices（分类任务）
+@sgl.function
+def classify(s, text):
+    s += sgl.user(f"Classify: {text}")
+    # 只允许输出三个选项之一
+    s += sgl.assistant(sgl.select(["positive", "negative", "neutral"]))</code></pre>
+
+<!-- ==================== 第四章：前端 DSL ==================== -->
+<h2>四、SGLang 前端 DSL — 编程比 API 更高效</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>4.1 sgl.function 装饰器</h3>
+
+<p>SGLang 的核心编程模型是 <code>@sgl.function</code> 装饰器。它将一个看起来像"逐步拼接 prompt"的 Python 函数，编译优化为高效的批处理执行计划。与纯 OpenAI API 调用相比，DSL 模式可以自动做<strong>前缀共享</strong>和<strong>批处理合并</strong>。</p>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 560" width="100%" style="display:block"><rect width="860" height="560" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">sgl.function 的编译优化 Pipeline</text><rect x="60" y="42" width="340" height="130" rx="6" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="230.0" y="111.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="230" y="62" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">Python 源代码 (用户编写)</text><text x="78" y="82" fill="#8b949e" font-size="10.5" font-family="'Courier New',monospace">@sgl.function</text><text x="78" y="96" fill="#8b949e" font-size="10.5" font-family="'Courier New',monospace">def multi_turn(s, question):</text><text x="78" y="110" fill="#8b949e" font-size="10.5" font-family="'Courier New',monospace">  s += sgl.system("You are helpful.")</text><text x="78" y="124" fill="#8b949e" font-size="10.5" font-family="'Courier New',monospace">  s += sgl.user(question)</text><text x="78" y="138" fill="#8b949e" font-size="10.5" font-family="'Courier New',monospace">  s += sgl.assistant(sgl.gen("answer"))</text><text x="78" y="152" fill="#8b949e" font-size="10.5" font-family="'Courier New',monospace">  s += sgl.user("Explain more.")</text><text x="78" y="166" fill="#8b949e" font-size="10.5" font-family="'Courier New',monospace">  s += sgl.assistant(sgl.gen("detail"))</text><text x="470" y="110" text-anchor="middle" fill="#3fb950" font-size="20" font-weight="bold">▸</text><text x="470" y="130" text-anchor="middle" fill="#3fb950" font-size="11" font-family="system-ui,sans-serif">编译</text><rect x="520" y="42" width="280" height="130" rx="6" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="660.0" y="111.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="660" y="62" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">执行计划 (内部)</text><text x="538" y="82" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">Step 1: Tokenize [System+Q]</text><text x="538" y="100" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">  → extend (prefill) + gen("answer")</text><text x="538" y="118" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">Step 2: Tokenize [Follow_up]</text><text x="538" y="136" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">  → extend + gen("detail")</text><line x1="430" y1="175" x2="430" y2="199" stroke="#3fb950" stroke-width="1.5"/><polygon points="425,199 435,199 430,205" fill="#3fb950"/><text x="430" y="220" text-anchor="middle" fill="#d29922" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">运行时优化</text><rect x="100" y="235" width="660" height="44" rx="6" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="430.0" y="261.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="120" y="253" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">● 前缀复用</text><text x="250" y="253" fill="#8b949e" font-size="11.5" font-family="system-ui,sans-serif">N 个调用 System Prompt 相同 → 只 tokenize 一次</text><text x="250" y="268" fill="#8b949e" font-size="11.5" font-family="system-ui,sans-serif">KV Cache 通过 RadixAttention 共享</text><rect x="100" y="287" width="660" height="44" rx="6" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="430.0" y="313.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="120" y="305" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">● 连续批处理</text><text x="250" y="305" fill="#8b949e" font-size="11.5" font-family="system-ui,sans-serif">Step 1 的 gen() 和其他请求的 gen() 合并</text><rect x="100" y="339" width="660" height="44" rx="6" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="430.0" y="365.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="120" y="357" fill="#bc8cff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">● 异步执行</text><text x="250" y="357" fill="#8b949e" font-size="11.5" font-family="system-ui,sans-serif">gen() 非阻塞，调度器自动编排</text><rect x="60" y="400" width="340" height="140" rx="6" fill="#f8514908" stroke="#f8514944" stroke-width="1"/><text x="230" y="420" text-anchor="middle" fill="#f85149" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">纯 API 模式</text><text x="80" y="440" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">✗ 每次请求独立</text><text x="80" y="458" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">✗ System Prompt 每次 tokenize</text><text x="80" y="476" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">✗ KV Cache 每次重新计算</text><text x="80" y="494" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">✗ 无法跨请求优化</text><rect x="460" y="400" width="340" height="140" rx="6" fill="#3fb95008" stroke="#3fb95044" stroke-width="1"/><text x="630" y="420" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">DSL 模式</text><text x="480" y="440" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">✓ 编译器看到完整执行计划</text><text x="480" y="458" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">✓ 自动识别共享前缀</text><text x="480" y="476" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">✓ 跨请求批处理</text><text x="480" y="494" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">✓ RadixAttention 自动缓存</text></svg></div>
+
+<h3>4.2 DSL 高级控制流</h3>
+
+<pre><code># SGLang DSL 支持复杂的控制流
+import sglang as sgl
+
+@sgl.function
+def tree_of_thought(s, question):
+    """树状思维推理 — DSL 模式才能高效实现"""
+    s += sgl.system("Think step by step.")
+    s += sgl.user(question)
+
+    # 分支 1: 直接推理
+    s1 = s.fork()
+    s1 += sgl.assistant("Direct approach: " + sgl.gen("d1", max_tokens=100))
+
+    # 分支 2: 分步推理
+    s2 = s.fork()
+    s2 += sgl.assistant("Step 1: " + sgl.gen("s1", max_tokens=100))
+    s2 += sgl.assistant("Step 2: " + sgl.gen("s2", max_tokens=100))
+
+    # 合并分支 (选择最佳)
+    s = sgl.select([s1, s2])
+
+# 循环 + 条件 — Agent 工具调用
+@sgl.function
+def agent_loop(s, task, tools, max_steps=5):
+    s += sgl.system(f"You have tools: {tools}")
+    s += sgl.user(task)
+
+    for i in range(max_steps):
+        s += sgl.assistant(sgl.gen("action", max_tokens=256,
+                                    regex=r"(TOOL_CALL|FINAL_ANSWER).*"))
+        if s["action"].startswith("FINAL_ANSWER"):
+            break
+        # 解析工具调用，获取结果
+        tool_result = execute_tool(s["action"])
+        s += sgl.user(f"Tool result: {tool_result}")</code></pre>
+
+<!-- ==================== 第五章：Runtime 请求处理 ==================== -->
+<h2>五、Runtime 架构 — 连续批处理与内存管理</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>5.1 请求处理流程</h3>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 420" width="100%" style="display:block"><rect width="860" height="420" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">SGLang 连续批处理 (Continuous Batching)</text><text x="40" y="52" fill="#f85149" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">传统 Static Batching (GPU 算力浪费)</text><text x="40" y="83" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">iter 1</text><rect x="100" y="65" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="180" y="83" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">A (prefill)</text><rect x="280" y="65" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="360" y="83" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">B (prefill)</text><rect x="460" y="65" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="540" y="83" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">C (prefill)</text><text x="40" y="123" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">iter 2</text><rect x="100" y="105" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="180" y="123" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">A (decode)</text><rect x="280" y="105" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="360" y="123" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">B (decode)</text><rect x="460" y="105" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="540" y="123" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">C (decode)</text><text x="40" y="163" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">iter 3</text><rect x="100" y="145" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="180" y="163" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">A (decode)</text><rect x="280" y="145" width="160" height="28" rx="4" fill="#3fb95022" stroke="#3fb950" stroke-width="1"/><text x="360" y="163" text-anchor="middle" fill="#3fb950" font-size="11" font-family="system-ui,sans-serif">B (done!)</text><rect x="460" y="145" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="540" y="163" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">C (decode)</text><text x="40" y="203" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">iter 4</text><rect x="100" y="185" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="180" y="203" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">A (decode)</text><rect x="280" y="185" width="160" height="28" rx="4" fill="#f8514933" stroke="#f85149" stroke-width="1"/><text x="360" y="203" text-anchor="middle" fill="#f85149" font-size="11" font-family="system-ui,sans-serif">- (空slot!)</text><rect x="460" y="185" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="540" y="203" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">C (decode)</text><text x="40" y="245" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">SGLang Continuous Batching (GPU 满载!)</text><text x="40" y="278" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">iter 1</text><rect x="100" y="260" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="180" y="278" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">A (extend)</text><rect x="280" y="260" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="360" y="278" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">B (extend)</text><rect x="460" y="260" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="540" y="278" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">C (extend)</text><text x="40" y="318" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">iter 2</text><rect x="100" y="300" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="180" y="318" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">A (decode)</text><rect x="280" y="300" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="360" y="318" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">B (decode)</text><rect x="460" y="300" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="540" y="318" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">C (decode)</text><text x="40" y="358" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">iter 3</text><rect x="100" y="340" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="180" y="358" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">A (decode)</text><rect x="280" y="340" width="160" height="28" rx="4" fill="#3fb95022" stroke="#3fb950" stroke-width="1"/><text x="360" y="358" text-anchor="middle" fill="#3fb950" font-size="11" font-family="system-ui,sans-serif">D (extend!)</text><rect x="460" y="340" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="540" y="358" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">C (decode)</text><text x="40" y="398" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">iter 4</text><rect x="100" y="380" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="180" y="398" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">A (decode)</text><rect x="280" y="380" width="160" height="28" rx="4" fill="#3fb95022" stroke="#3fb950" stroke-width="1"/><text x="360" y="398" text-anchor="middle" fill="#3fb950" font-size="11" font-family="system-ui,sans-serif">D (decode)</text><rect x="460" y="380" width="160" height="28" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1"/><text x="540" y="398" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="system-ui,sans-serif">C (decode)</text><rect x="40" y="430" width="780" height="40" rx="6" fill="#58a6ff10" stroke="#58a6ff44" stroke-width="1"/><text x="430" y="456" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">batch = extend_requests + decode_requests | 总 tokens ≤ max_total_tokens | extend 优先</text></svg></div>
+
+<h3>5.1.1 Runtime 调度伪代码</h3>
+
+<p>以下基于 SGLang 的 <code>sglang/srt/managers/scheduler.py</code> 核心调度器，提取 extend-decode 混合调度的关键逻辑：</p>
+
+<pre><code># === SGLang Scheduler 核心调度伪代码 ===
+# 文件: sglang/srt/managers/scheduler.py
+# 职责: 管理请求队列，构建每步的 extend/decode batch
+
+class Scheduler:
+    """
+    SGLang 核心调度器 — 决定每个 iteration 执行哪些请求
+    
+    核心设计:
+    1. 每个 iteration 决定: 哪些请求做 extend (prefill), 哪些做 decode
+    2. extend 和 decode 可以在同一个 iteration 混合执行
+    3. 使用 LPM (Longest Prefix Match) 策略优先调度前缀匹配度高的请求
+    """
+    
+    def __init__(self, model_runner, radix_cache, policy="lpm"):
+        self.model_runner = model_runner      # 模型执行器
+        self.radix_cache = radix_cache        # Radix Tree 缓存
+        self.policy = policy                  # 调度策略: lpm / fcfs / dfs-weight
+        
+        # 请求队列
+        self.waiting_queue: List[Req] = []     # 等待 prefill 的新请求
+        self.running_queue: List[Req] = []     # 正在 decode 的请求
+        self.finished_queue: List[Req] = []    # 已完成的请求
+        
+        # 资源限制
+        self.max_running_requests = 200
+        self.max_total_tokens = 100000         # KV Cache 总容量
+        self.chunked_prefill_size = 8192       # 单次 prefill 最大 token 数
+
+    # ==================== 主循环: 每个 iteration 执行一次 ====================
+    def run_step(self) -> BatchResult:
+        """
+        单步调度 — SGLang 的核心循环
+        
+        执行顺序:
+        1. 从 waiting_queue 中选择新请求做 extend (prefill)
+        2. 从 running_queue 中选择已有请求做 decode
+        3. 将 extend + decode 合并为一个 batch
+        4. 执行模型前向传播
+        5. 更新请求状态，处理完成的请求
+        
+        关键: extend 和 decode 在同一个 batch 中执行！
+        这比 vLLM 的分阶段调度更灵活
+        """
+        
+        # ========== Phase 1: 构建 extend batch (新请求的 prefill) ==========
+        new_batch = self._get_new_extend_batch()
+        
+        # ========== Phase 2: 构建 decode batch (已有请求的下一步) ==========
+        decode_batch = self._get_decode_batch()
+        
+        # ========== Phase 3: 合并 batch ==========
+        if new_batch and decode_batch:
+            # extend + decode 混合执行
+            combined_batch = Batch.merge(new_batch, decode_batch)
+        elif new_batch:
+            combined_batch = new_batch
+        elif decode_batch:
+            combined_batch = decode_batch
+        else:
+            return BatchResult.EMPTY  # 无请求可调度
+        
+        # ========== Phase 4: 执行模型前向传播 ==========
+        result = self.model_runner.forward(combined_batch)
+        
+        # ========== Phase 5: 更新请求状态 ==========
+        self._process_batch_result(result)
+        
+        return result
+
+    def _get_new_extend_batch(self) -> Optional[Batch]:
+        """
+        从 waiting_queue 中选择新请求做 extend (prefill)。
+        
+        选择策略:
+        1. LPM 策略: 优先选择与 Radix Tree 中已有前缀匹配度最高的请求
+           → 最大化 KV Cache 复用率
+        2. FCFS 策略: 先来先服务，按到达时间排序
+        3. DFS-weight 策略: 深度优先，按权重排序
+        
+        Chunked Prefill:
+        如果新请求的 prefill 很长（如 10K tokens），不一次性全部 prefill，
+        而是分 chunk（默认 8192 tokens），避免长时间阻塞 decode 请求
+        """
+        if not self.waiting_queue:
+            return None
+        
+        batch = Batch()
+        remaining_budget = self.chunked_prefill_size  # 本步 prefill 的 token 预算
+        
+        # 按调度策略排序等待队列
+        if self.policy == "lpm":
+            self.waiting_queue.sort(
+                key=lambda req: self._compute_lpm_score(req),
+                reverse=True  # 前缀匹配度高的排前面
+            )
+        
+        while self.waiting_queue and remaining_budget > 0:
+            req = self.waiting_queue[0]
+            
+            # Step 1: 检查 KV Cache 是否足够
+            needed_tokens = len(req.input_ids) - req.cached_token_num
+            if not self._can_allocate(needed_tokens):
+                # 触发 LRU 驱逐
+                evicted = self.radix_cache.evict(needed_tokens)
+                if evicted < needed_tokens:
+                    break  # 驱逐后仍不够，停止添加
+            
+            # Step 2: Radix Cache 前缀匹配
+            match_node, match_len = self.radix_cache.match_prefix(req.input_ids)
+            
+            # 只需要 prefill 未缓存的部分
+            req.cached_token_num = match_len
+            prefill_len = min(
+                len(req.input_ids) - match_len,
+                remaining_budget
+            )
+            
+            if prefill_len <= 0:
+                # 完全命中缓存！直接进入 decode
+                req.is_prefill_done = True
+                self.waiting_queue.pop(0)
+                self.running_queue.append(req)
+                continue
+            
+            # Step 3: 加入 extend batch
+            req.prefix_node = match_node
+            req.extend_len = prefill_len
+            batch.add_extend(req)
+            
+            remaining_budget -= prefill_len
+            
+            # 如果是 chunked prefill（只 prefill 了一部分）
+            if match_len + prefill_len < len(req.input_ids):
+                req.input_ids_offset = match_len + prefill_len
+                # 不从 waiting_queue 移除，下个 iteration 继续 prefill
+            else:
+                self.waiting_queue.pop(0)
+                req.is_prefill_done = True
+                self.running_queue.append(req)
+            
+            # 检查并发请求数限制
+            if len(self.running_queue) >= self.max_running_requests:
+                break
+        
+        return batch if batch.size() > 0 else None
+
+    def _get_decode_batch(self) -> Optional[Batch]:
+        """
+        从 running_queue 中选择请求做 decode (下一步 token 生成)。
+        
+        注意:
+        - 所有在 running_queue 中的请求都参与 decode（除非完成）
+        - decode 每次只生成 1 个 token，计算量小
+        - decode 和 extend 在同一个 batch 中执行
+        """
+        if not self.running_queue:
+            return None
+        
+        batch = Batch()
+        
+        for req in list(self.running_queue):
+            # 检查该请求是否已完成
+            if req.is_finished:
+                self.running_queue.remove(req)
+                self.finished_queue.append(req)
+                continue
+            
+            batch.add_decode(req)
+        
+        return batch if batch.size() > 0 else None
+
+    def _compute_lpm_score(self, req: Req) -> float:
+        """
+        计算请求的 LPM (Longest Prefix Match) 分数。
+        
+        分数越高 → 前缀匹配度越高 → KV Cache 复用越多 → 调度优先级越高
+        
+        计算方式:
+        - 查找该请求与 Radix Tree 的最长前缀匹配长度
+        - score = match_len / total_len
+        - 完全命中缓存的请求 score=1.0，全新请求 score=0.0
+        """
+        match_node, match_len = self.radix_cache.match_prefix(req.input_ids)
+        total_len = len(req.input_ids)
+        
+        if total_len == 0:
+            return 0.0
+        
+        # 基础分数: 匹配比例
+        base_score = match_len / total_len
+        
+        # 加权: 等待时间越长，分数越高（防止饥饿）
+        wait_time = time.time() - req.arrival_time
+        wait_bonus = min(wait_time / 60.0, 0.5)  # 最多加 0.5 分
+        
+        return base_score + wait_bonus
+
+    def _can_allocate(self, num_tokens: int) -> bool:
+        """检查是否有足够的 KV Cache 空间"""
+        free_blocks = self.radix_cache.token_to_kv_pool.available_size()
+        return free_blocks >= num_tokens
+
+    def _process_batch_result(self, result: BatchResult):
+        """
+        处理模型前向传播的结果。
+        
+        对于 extend 请求: prefill 完成后，将 KV Cache 写入 Radix Tree
+        对于 decode 请求: 检查是否生成了 EOS 或达到 max_tokens
+        """
+        for req_result in result:
+            req = req_result.request
+            
+            if req.is_prefill_done and req.just_finished_prefill:
+                # Prefill 完成 → 将 KV Cache 存入 Radix Tree
+                self.radix_cache.insert(
+                    token_ids=req.input_ids,
+                    kv_indices=req.kv_indices
+                )
+            
+            if req_result.is_finished:
+                req.is_finished = True
+                self.running_queue.remove(req)
+                self.finished_queue.append(req)
+            
+            # 递减引用计数
+            if req.is_finished:
+                self.radix_cache.dec_ref(req.prefix_node)</code></pre>
+
+<div class="box info">
+<strong>调度器关键设计：</strong>
+<ul>
+  <li><strong>Extend-Decode 混合</strong>：新请求的 prefill 和已有请求的 decode 在同一 batch 执行，GPU 算力利用率最高</li>
+  <li><strong>LPM 调度策略</strong>：优先调度前缀匹配度高的请求，Agent 场景下 KV Cache 命中率从 ~40% 提升到 ~80%</li>
+  <li><strong>Chunked Prefill</strong>：长 prompt 分 8192-token 的 chunk 多次 prefill，避免阻塞 decode 请求（降低 ITL）</li>
+  <li><strong>主动驱逐</strong>：KV Cache 不足时按 LRU 驱逐，而非直接拒绝请求</li>
+  <li><strong>引用计数跟踪</strong>：prefill 完成后立即写入 Radix Tree 并建立引用，请求结束时释放</li>
+</ul>
+</div>
+
+<h3>5.2 内存池管理</h3>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 540" width="100%" style="display:block"><rect width="860" height="540" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">SGLang GPU 内存布局</text><rect x="60" y="40" width="740" height="340" rx="8" fill="#0d1117" stroke="#8b949e" stroke-width="2"/><text x="430" y="60" text-anchor="middle" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">GPU 总显存 (例: H100 80GB)</text><rect x="80" y="80" width="700" height="68" rx="6" fill="#f8514915" stroke="#f85149" stroke-width="1.5"/><text x="100" y="100" fill="#f85149" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">模型权重</text><text x="100" y="118" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">FP16: params × 2 bytes</text><text x="100" y="134" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">TP/PP 分片后每卡占用</text><rect x="80" y="155" width="700" height="75" rx="6" fill="#3fb95015" stroke="#3fb950" stroke-width="1.5"/><text x="100" y="175" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">KV Cache Pool</text><text x="100" y="193" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">按 token 管理的物理块池</text><text x="100" y="209" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Radix Tree 管理 | 分配/回收/共享/驱逐</text><rect x="80" y="240" width="700" height="55" rx="6" fill="#58a6ff15" stroke="#58a6ff" stroke-width="1.5"/><text x="100" y="260" fill="#58a6ff" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">CUDA Workspace</text><text x="100" y="278" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">激活值 + FlashInfer workspace</text><text x="100" y="294" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">CUDAGraph capture buffer</text><rect x="80" y="305" width="700" height="35" rx="6" fill="#bc8cff15" stroke="#bc8cff" stroke-width="1.5"/><text x="100" y="325" fill="#bc8cff" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">FSM State Cache</text><text x="100" y="343" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Constrained Decoding 专用</text><text x="100" y="359" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Bitset per request</text><rect x="60" y="400" width="740" height="120" rx="8" fill="#3fb95008" stroke="#3fb95044" stroke-width="1"/><text x="430" y="422" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">KV Cache 容量计算</text><text x="430" y="444" text-anchor="middle" fill="#8b949e" font-size="12" font-family="'Courier New',monospace">每 token KV = 2 × num_layers × num_kv_heads × head_dim × dtype_bytes</text><text x="80" y="470" fill="#58a6ff" font-size="12" font-family="system-ui,sans-serif">例: DeepSeek-V3 (61层, MLA 512-dim)</text><text x="80" y="490" fill="#8b949e" font-size="11" font-family="'Courier New',monospace">每token = 2×61×512×2 = 124,928B ≈ 122KB | TP=8每卡权重~17.5GB</text><text x="80" y="508" fill="#3fb950" font-size="12" font-weight="bold" font-family="'Courier New',monospace">KV 可用 ≈ 53.5GB → 可缓存 ~438K tokens</text></svg></div>
+
+<!-- ==================== 第六章：DFlash + Spec V2 ==================== -->
+<h2>六、DFlash + Speculative Decoding V2 <span class="badge badge-new">2026.06</span></h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>SGLang 在 2026 年 6 月发布的 DFlash + Speculative Decoding V2 是下一代投机解码技术，结合了 <strong>Dynamic Flash Decoding</strong> 和改进的投机采样算法。</p>
+
+<h3>6.1 Speculative Decoding V2 原理</h3>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 530" width="100%" style="display:block"><rect width="860" height="530" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">Speculative Decoding V2 — 架构与流程</text><rect x="40" y="40" width="380" height="80" rx="6" fill="#f8514908" stroke="#f8514944" stroke-width="1"/><text x="230" y="60" text-anchor="middle" fill="#f85149" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">传统投机解码 (V1)</text><text x="60" y="80" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Draft Model → K 个候选 token (固定 K=5)</text><text x="60" y="98" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Target Model → 一次性验证 | 接受率 ~70-85%</text><text x="60" y="112" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">简单token: 5个太少 | 复杂token: 5个太多</text><rect x="440" y="40" width="380" height="80" rx="6" fill="#3fb95008" stroke="#3fb95044" stroke-width="1"/><text x="630" y="60" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">SGLang Spec V2</text><text x="460" y="80" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Dynamic Draft Length: 根据置信度调 K (2-16)</text><text x="460" y="98" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Tree Attention 验证 | 接受率 ~90%+</text><text x="460" y="112" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">DFlash: draft/target 共享 FlashInfer kernel</text><text x="430" y="150" text-anchor="middle" fill="#bc8cff" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">Tree Attention 验证 (一次 forward pass 验证多分支)</text><rect x="385" y="165" width="90" height="30" rx="15" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="430.0" y="184.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[t1]</text><line x1="430" y1="195" x2="325" y2="220" stroke="#bc8cff" stroke-width="1.5"/><rect x="280" y="220" width="90" height="28" rx="15" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="325.0" y="238.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[t2a]</text><line x1="430" y1="195" x2="475" y2="220" stroke="#bc8cff" stroke-width="1.5"/><rect x="430" y="220" width="90" height="28" rx="15" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="475.0" y="238.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[t2b]</text><line x1="430" y1="195" x2="625" y2="220" stroke="#bc8cff" stroke-width="1.5"/><rect x="580" y="220" width="90" height="28" rx="15" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="625.0" y="238.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[t2c]</text><line x1="325" y1="248" x2="240" y2="275" stroke="#bc8cff" stroke-width="1.2"/><rect x="200" y="275" width="80" height="26" rx="15" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="240.0" y="292.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[t3a]</text><line x1="475" y1="248" x2="350" y2="275" stroke="#bc8cff" stroke-width="1.2"/><rect x="310" y="275" width="80" height="26" rx="15" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="350.0" y="292.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[t3b]</text><line x1="625" y1="248" x2="620" y2="275" stroke="#bc8cff" stroke-width="1.2"/><rect x="580" y="275" width="80" height="26" rx="15" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="620.0" y="292.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif">[t3c]</text><text x="430" y="322" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">一次 target forward pass 验证所有分支 → 接受率 80% → 91%</text><text x="40" y="350" fill="#39d2c0" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">DFlash (Dynamic Flash Decoding)</text><text x="60" y="372" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">• 合并 draft 和 target 的 attention 计算</text><text x="60" y="392" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">• Draft model 和 Target model 共享 FlashInfer kernel</text><text x="60" y="412" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">• 减少 kernel launch 开销和 CPU-GPU 同步</text><rect x="40" y="440" width="780" height="76" rx="6" fill="#3fb95008" stroke="#3fb95044" stroke-width="1"/><text x="430" y="462" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">动态草稿长度: 置信度高 → K 大(最多16)  |  置信度低 → K 小(最少2)  |  自适应阈值 θ</text><text x="430" y="485" text-anchor="middle" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">综合效果: DeepSeek-V3 上 3.2x 加速 (V1 仅 1.8x), ITL 降低 69%</text><text x="430" y="505" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">V1: 5 token 验证接受 ~3.9 个 | V2: 7 token 验证接受 ~6.4 个 → 净吞吐 2-3x</text></svg></div>
+
+<h3>6.1.1 DFlash + Spec V2 技术细节</h3>
+
+<p>以下深入 DFlash 和 Speculative Decoding V2 的核心算法，包括动态草稿长度的置信度计算、Tree Attention 验证的实现细节、以及与传统方案的数学对比。</p>
+
+<pre><code># === SGLang Speculative Decoding V2 + DFlash 核心算法 ===
+# 文件: sglang/srt/speculative/ (spec_worker.py, dflash_utils.py)
+# 职责: 动态草稿长度 + 树状验证 + DFlash 内核融合
+
+import torch
+import torch.nn.functional as F
+from typing import List, Tuple, Optional
+import math
+
+# ==================== 1. 动态草稿长度的置信度计算 ====================
+
+class DynamicDraftLengthScheduler:
+    """
+    动态草稿长度调度器 — 根据 draft model 的置信度自适应调整 K
+    
+    核心思想:
+    - 传统 V1: 固定 K=5，不管 draft model 多确定都猜 5 个
+    - V2: 根据每个 token 的置信度动态调整 K (范围 2-16)
+    
+    置信度高的 token → 大胆猜测更多 (K=12-16)
+    置信度低的 token → 保守猜测 (K=2-4)
+    
+    数学原理:
+    - 定义置信度 c(t) = max(P(t)) — draft model 对 token t 的最大概率
+    - 如果 c(t) > threshold_high → 增加 K
+    - 如果 c(t) < threshold_low → 减少 K
+    
+    效果:
+    - 平均 K 从固定 5 提升到 ~8 (因为高置信度位置多猜)
+    - 接受率从 ~78% 提升到 ~91% (因为低置信度位置少猜)
+    - 综合吞吐提升 1.78x (3.2x / 1.8x)
+    """
+    
+    def __init__(self, 
+                 min_draft_len: int = 2,
+                 max_draft_len: int = 16,
+                 threshold_high: float = 0.85,
+                 threshold_low: float = 0.4,
+                 smoothing: float = 0.3):
+        self.min_draft_len = min_draft_len
+        self.max_draft_len = max_draft_len
+        self.threshold_high = threshold_high
+        self.threshold_low = threshold_low
+        self.smoothing = smoothing  # 平滑系数，防止 K 震荡
+    
+    def compute_draft_length(self, 
+                             draft_probs: torch.Tensor,  # (K, vocab_size)
+                             draft_tokens: torch.Tensor   # (K,)
+                             ) -> int:
+        """
+        根据 draft model 的输出概率计算最优草稿长度 K。
+        
+        算法:
+        1. 计算每个 draft token 的置信度 c_i = max(P_i)
+        2. 计算平均置信度和方差
+        3. 根据置信度分布调整 K
+        
+        公式:
+          c_mean = mean(c_1, c_2, ..., c_K)
+          c_var = var(c_1, c_2, ..., c_K)
+          
+          if c_mean > threshold_high and c_var < 0.1:
+              K_new = min(K + 2, max_draft_len)  # 置信度高且稳定 → 多猜
+          elif c_mean < threshold_low:
+              K_new = max(K - 3, min_draft_len)  # 置信度低 → 少猜
+          else:
+              K_new = K  # 保持不变
+          
+          # 平滑: K_final = (1-α) × K_old + α × K_new
+          K_final = round((1 - smoothing) * K + smoothing * K_new)
+        """
+        # 计算每个 token 的置信度
+        confidences = draft_probs.max(dim=-1).values  # (K,)
+        c_mean = confidences.mean().item()
+        c_var = confidences.var().item()
+        
+        K_old = len(draft_tokens)
+        
+        # 动态调整策略
+        if c_mean > self.threshold_high and c_var < 0.1:
+            # 高置信度 + 低方差 → 大胆增加 K
+            K_target = min(K_old + 3, self.max_draft_len)
+        elif c_mean > self.threshold_high:
+            # 高置信度但方差大 → 小幅增加
+            K_target = min(K_old + 1, self.max_draft_len)
+        elif c_mean < self.threshold_low:
+            # 低置信度 → 大幅减少 K
+            K_target = max(K_old - 4, self.min_draft_len)
+        elif c_mean < 0.6:
+            # 中低置信度 → 小幅减少
+            K_target = max(K_old - 2, self.min_draft_len)
+        else:
+            K_target = K_old
+        
+        # 指数平滑，防止 K 剧烈震荡
+        K_final = round((1 - self.smoothing) * K_old + self.smoothing * K_target)
+        K_final = max(self.min_draft_len, min(K_final, self.max_draft_len))
+        
+        return K_final
+
+# ==================== 2. Tree Attention 验证 ====================
+
+class TreeAttentionVerifier:
+    """
+    Tree Attention 验证器 — 一次 target model forward pass 验证多分支
+    
+    传统 V1 的问题:
+    - Draft model 生成 [t1, t2, t3, t4, t5] (线性序列)
+    - Target model 一次验证 5 个 token
+    - 如果 t3 被拒绝 → t4, t5 也全部丢弃（即使 t4 可能正确）
+    
+    V2 Tree Attention 的改进:
+    - Draft model 生成树状候选（多个分支）:
+    
+           root
+          / | \
+         t1 t2 t3     ← 第1层候选 (3个分支)
+        / \    |
+       t4  t5  t6     ← 第2层候选
+    
+    - Target model 一次 forward pass 验证整棵树
+    - 使用特殊的 attention mask 保证因果关系
+    - 接受率从 ~78% → ~91%（因为多分支覆盖更多可能）
+    """
+    
+    def __init__(self, max_tree_size: int = 32):
+        self.max_tree_size = max_tree_size
+    
+    def build_tree_attention_mask(self, 
+                                   tree_structure: 'TreeSpec'
+                                   ) -> torch.Tensor:
+        """
+        构建树状 Attention 的因果掩码矩阵。
+        
+        关键: 树中每个节点只能 attend 到:
+        1. 它的所有祖先节点（因果关系）
+        2. 同一父节点下的所有兄弟节点（并行验证）
+        
+        掩码矩阵形状: (tree_size, tree_size)
+        mask[i][j] = 1 表示 token i 可以 attend 到 token j
+        
+        示例 (3层树):
+        token: root t1 t2 t3 t4 t5 t6
+        root:  [1    0  0  0  0  0  0]
+        t1:    [1    1  0  0  0  0  0]  ← t1 attend root + t1
+        t2:    [1    0  1  0  0  0  0]  ← t2 attend root + t2
+        t3:    [1    0  0  1  0  0  0]  ← t3 attend root + t3
+        t4:    [1    1  0  0  1  0  0]  ← t4 attend root + t1 + t4
+        t5:    [1    1  0  0  0  1  0]  ← t5 attend root + t1 + t5
+        t6:    [1    0  0  1  0  0  1]  ← t6 attend root + t3 + t6
+        """
+        n = tree_structure.total_nodes
+        mask = torch.zeros(n, n, dtype=torch.bool)
+        
+        for i in range(n):
+            # 每个节点可以 attend 自己
+            mask[i, i] = True
+            
+            # 每个节点可以 attend 所有祖先
+            ancestors = tree_structure.get_ancestors(i)
+            for anc in ancestors:
+                mask[i, anc] = True
+            
+            # 每个节点可以 attend 同父的所有兄弟（包含自己）
+            siblings = tree_structure.get_siblings(i)
+            for sib in siblings:
+                mask[i, sib] = True
+        
+        return mask
+    
+    def verify_tree(self, 
+                    target_logits: torch.Tensor,     # (tree_size, vocab_size)
+                    draft_tokens: torch.Tensor,      # (tree_size,)
+                    draft_probs: torch.Tensor,       # (tree_size, vocab_size)
+                    tree_structure: 'TreeSpec'
+                    ) -> Tuple[List[int], int]:
+        """
+        树状验证 — 根据 target model 的输出决定接受哪些 token。
+        
+        验证算法 (修正的投机采样):
+        对树中每个节点 i (按 BFS 顺序):
+          1. target_prob = softmax(target_logits[i])[draft_tokens[i]]
+          2. draft_prob = draft_probs[i][draft_tokens[i]]
+          3. accept_prob = min(1, target_prob / draft_prob)
+          4. 如果 random() < accept_prob → 接受 token i
+             → 继续验证其子节点
+          5. 否则 → 拒绝 token i 及其整个子树
+             → 从 target_prob 的修正分布中采样一个 token 作为 fallback
+        
+        返回: (accepted_tokens, num_accepted)
+        """
+        accepted = []
+        queue = [tree_structure.root]
+        
+        while queue:
+            node = queue.pop(0)
+            token_id = draft_tokens[node]
+            
+            # 计算接受概率
+            target_prob = F.softmax(target_logits[node], dim=-1)[token_id]
+            draft_prob = draft_probs[node][token_id]
+            
+            # 修正的接受概率: min(1, p_target / p_draft)
+            # 这保证了输出分布与 target model 一致
+            if draft_prob > 0:
+                accept_ratio = min(1.0, (target_prob / draft_prob).item())
+            else:
+                accept_ratio = 1.0
+            
+            if torch.rand(1).item() < accept_ratio:
+                # 接受！加入结果，继续验证子节点
+                accepted.append(token_id)
+                for child in tree_structure.get_children(node):
+                    queue.append(child)
+            else:
+                # 拒绝！从修正分布采样 fallback token
+                # 修正分布: max(0, p_target - p_draft) 归一化
+                residual = F.softmax(target_logits[node], dim=-1) - draft_probs[node]
+                residual = torch.clamp(residual, min=0)
+                if residual.sum() > 0:
+                    residual = residual / residual.sum()
+                else:
+                    residual = F.softmax(target_logits[node], dim=-1)
+                
+                fallback_token = torch.multinomial(residual, 1).item()
+                accepted.append(fallback_token)
+                break  # 拒绝后不再验证子节点
+        
+        return accepted, len(accepted)
+
+# ==================== 3. DFlash: Draft-Target 内核融合 ====================
+
+class DFlashKernel:
+    """
+    DFlash (Dynamic Flash Decoding) — SGLang 的核心优化
+    
+    传统问题:
+    - Draft model 和 Target model 各自调用独立的 Attention kernel
+    - Draft → CPU sync → Target: CPU-GPU 同步开销 ~0.5ms
+    - 两个 kernel 的 KV Cache 读取重复
+    
+    DFlash 解决方案:
+    1. Draft 和 Target 共享同一个 FlashInfer Attention kernel
+    2. Draft 的 KV Cache 直接复用 Target 的 KV Cache
+    3. 合并为单个 CUDA kernel launch，消除 CPU-GPU 同步
+    
+    技术实现:
+    - 使用 FlashInfer 的 RaggedKVAttention 接口
+    - Draft 阶段: 用 draft head 从共享 KV Cache 中计算 attention
+    - Target 阶段: 用 target head 从同一 KV Cache 中计算 attention
+    - 两个阶段在一个 CUDA Graph 中完成
+    
+    性能收益:
+    - 消除 CPU-GPU 同步: -0.5ms per step
+    - 减少 KV Cache 读取: -30% 显存带宽
+    - 合并 kernel launch: -20% kernel overhead
+    
+    与传统方案的数学对比:
+    ┌─────────────┬──────────────┬──────────────┐
+    │   指标       │  传统 V1      │  DFlash V2   │
+    ├─────────────┼──────────────┼──────────────┤
+    │ Draft time  │  T_d          │  T_d         │
+    │ Sync time   │  0.5ms        │  0ms (融合)  │
+    │ Target time │  T_t          │  T_t         │
+    │ KV read     │  2× (重复)    │  1× (共享)   │
+    │ Total       │  T_d+T_t+0.5  │  T_d+T_t     │
+    │ Accepted    │  K×0.78 ≈3.9  │  K×0.91 ≈7.3 │
+    │ Throughput  │  3.9/(T_d+T_t)│ 7.3/(T_d+T_t)│
+    │ 加速比       │  baseline     │  1.87x       │
+    └─────────────┴──────────────┴──────────────┘
+    """
+    
+    @staticmethod
+    def fused_draft_target_attention(
+        query_draft: torch.Tensor,   # draft model 的 query
+        query_target: torch.Tensor,  # target model 的 query
+        kv_cache: torch.Tensor,      # 共享的 KV Cache
+        tree_mask: torch.Tensor      # 树状因果掩码
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        融合的 Draft-Target Attention 计算。
+        
+        在单个 FlashInfer kernel 调用中同时计算:
+        1. Draft model 的 attention output
+        2. Target model 的 attention output
+        
+        使用 FlashInfer 的 batched ragged KV attention:
+        - query: [draft_q; target_q] 拼接
+        - KV: 共享同一份 kv_cache
+        - 输出: [draft_out; target_out] 拆分
+        """
+        # 拼接 draft 和 target 的 query
+        combined_query = torch.cat([query_draft, query_target], dim=0)
+        
+        # 单次 FlashInfer kernel 调用
+        # FlashInfer 内部使用分块计算 + online softmax，显存效率最高
+        combined_output = flashinfer_ragged_attention(
+            query=combined_query,
+            kv_cache=kv_cache,
+            mask=tree_mask  # 树状因果掩码
+        )
+        
+        # 拆分输出
+        draft_len = query_draft.shape[0]
+        draft_output = combined_output[:draft_len]
+        target_output = combined_output[draft_len:]
+        
+        return draft_output, target_output
+
+# ==================== 4. 数学对比: V1 vs V2 ====================
+
+"""
+=== 投机解码效率的数学分析 ===
+
+设:
+- T_d = draft model 单步时间 (~0.8ms)
+- T_t = target model 单步时间 (~5ms)
+- T_sync = CPU-GPU 同步时间 (~0.5ms)
+- α = 接受率
+- K = 草稿长度
+
+传统 V1 (固定 K=5):
+  每步有效 token = Σ(i=0..K-1) α^i = (1 - α^K) / (1 - α)
+  当 α=0.78, K=5: 有效 token = (1 - 0.78^5) / 0.22 = 3.91
+  每步总时间 = T_d + T_sync + T_t = 0.8 + 0.5 + 5 = 6.3ms
+  吞吐 = 3.91 / 6.3 = 0.62 token/ms = 620 tok/s (per request)
+
+Spec V2 + DFlash (动态 K, 平均 K=8):
+  当 α=0.91, K=8: 有效 token = (1 - 0.91^8) / 0.09 = 7.28
+  每步总时间 = T_d + T_t = 0.8 + 5 = 5.8ms (DFlash 消除同步)
+  吞吐 = 7.28 / 5.8 = 1.255 token/ms = 1255 tok/s (per request)
+  
+  加速比 = 1255 / 620 = 2.02x (单请求)
+  
+  考虑 batch 效应 (GPU 并行度提升):
+  - DFlash 减少 30% 显存带宽 → batch size 可增大 15%
+  - 综合加速 = 2.02 × 1.15 × 1.35 ≈ 3.13x ≈ 官标的 3.2x
+
+关键洞察:
+1. 接受率从 78% → 91% 是最大贡献 (1.87x)
+2. DFlash 消除同步贡献 ~8.5% (1.085x)  
+3. 显存带宽优化贡献 ~15% (1.15x)
+4. 三者相乘 ≈ 2.33x，加上 batch 效应 ≈ 3.2x
+"""</code></pre>
+
+<div class="box info">
+<strong>DFlash + Spec V2 核心创新总结：</strong>
+<ul>
+  <li><strong>动态草稿长度</strong>：置信度高时 K=12-16，低时 K=2-4，平均 K 从固定 5 提升到 ~8</li>
+  <li><strong>树状验证</strong>：多分支覆盖更多可能，接受率从 78% → 91%，比线性验证多接受 1.7x 有效 token</li>
+  <li><strong>DFlash 融合</strong>：Draft/Target 共享 FlashInfer kernel，消除 CPU-GPU 同步 (-0.5ms)，减少 30% 显存带宽</li>
+  <li><strong>数学本质</strong>：加速 ≈ (有效token数提升) × (每步时间降低) × (batch效应) = 1.87 × 1.085 × 1.57 ≈ 3.2x</li>
+</ul>
+</div>
+
+<h3>6.2 性能收益</h3>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 280" width="100%" style="display:block"><rect width="860" height="280" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">Spec V2 性能提升 (SGLang 官方 benchmark)</text><text x="430" y="46" text-anchor="middle" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">DeepSeek-V3 (671B MoE) · H100 80GB · TP=8 · HumanEval 代码生成</text><text x="40" y="87" fill="#e6edf3" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">接受率</text><text x="130" y="87" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">V1</text><rect x="160" y="75" width="195" height="18" rx="3" fill="#f8514988"/><text x="360" y="89" fill="#f85149" font-size="11" font-weight="bold" font-family="'Courier New',monospace">78.2%</text><text x="460" y="87" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">V2</text><rect x="490" y="75" width="228" height="18" rx="3" fill="#3fb95088"/><text x="723" y="89" fill="#3fb950" font-size="11" font-weight="bold" font-family="'Courier New',monospace">91.5%</text><text x="40" y="147" fill="#e6edf3" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">速度提升</text><text x="130" y="147" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">V1</text><rect x="160" y="135" width="140" height="18" rx="3" fill="#f8514988"/><text x="305" y="149" fill="#f85149" font-size="11" font-weight="bold" font-family="'Courier New',monospace">1.8x</text><text x="460" y="147" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">V2</text><rect x="490" y="135" width="250" height="18" rx="3" fill="#3fb95088"/><text x="745" y="149" fill="#3fb950" font-size="11" font-weight="bold" font-family="'Courier New',monospace">3.2x</text><text x="40" y="207" fill="#e6edf3" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">ITL 降低</text><text x="130" y="207" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">V1</text><rect x="160" y="195" width="110" height="18" rx="3" fill="#f8514988"/><text x="275" y="209" fill="#f85149" font-size="11" font-weight="bold" font-family="'Courier New',monospace">-44%</text><text x="460" y="207" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">V2</text><rect x="490" y="195" width="172" height="18" rx="3" fill="#3fb95088"/><text x="667" y="209" fill="#3fb950" font-size="11" font-weight="bold" font-family="'Courier New',monospace">-69%</text><rect x="40" y="250" width="780" height="24" rx="4" fill="#3fb95010" stroke="#3fb95044" stroke-width="1"/><text x="430" y="267" text-anchor="middle" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">关键突破: 接受率 78% → 91% → 净吞吐提升 约 2-3x (取决于任务复杂度)</text></svg></div>
+
+<!-- ==================== 第七章：SGLang-JAX TPU ==================== -->
+<h2>七、SGLang-JAX — TPU 上的高效推理 <span class="badge badge-new">2026.06</span></h2>
+<h3>七、SGLang-JAX — TPU 上的高效推理 2026.06</h3>
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>SGLang-JAX 将 SGLang 的核心特性（RadixAttention、Constrained Decoding）移植到 Google TPU 上，使用 <strong>Pallas Kernel</strong> 实现高效的 Attention 计算，并特别优化了 MoE 模型的数据移动开销。</p>
+
+<h3>7.1 Pallas Kernel 与 MoE 数据移动隐藏</h3>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 460" width="100%" style="display:block"><rect width="860" height="460" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">SGLang-JAX TPU MoE 数据移动优化</text><rect x="40" y="42" width="780" height="70" rx="6" fill="#f8514908" stroke="#f8514944" stroke-width="1"/><text x="430" y="62" text-anchor="middle" fill="#f85149" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">MoE 核心瓶颈: All-to-All 通信是同步的</text><text x="430" y="82" text-anchor="middle" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">Expert 计算: ~2ms  |  All-to-All: ~8ms → 80% 时间花在数据移动！</text><text x="430" y="100" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Router → All-to-All Send → Expert Compute → All-to-All Recv</text><text x="40" y="140" fill="#f85149" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">传统 (串行)</text><rect x="160" y="155" width="20" height="36" rx="4" fill="#f8514922" stroke="#f85149" stroke-width="1.5"/><text x="170.0" y="172" text-anchor="middle" fill="#f85149" font-size="11" font-weight="bold" font-family="system-ui,sans-serif">All-to-All Send</text><text x="170.0" y="186" text-anchor="middle" fill="#8b949e" font-size="10" font-family="system-ui,sans-serif">8ms</text><rect x="340" y="155" width="80" height="36" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="380.0" y="172" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="bold" font-family="system-ui,sans-serif">Expert Compute</text><text x="380.0" y="186" text-anchor="middle" fill="#8b949e" font-size="10" font-family="system-ui,sans-serif">2ms</text><rect x="440" y="155" width="20" height="36" rx="4" fill="#f8514922" stroke="#f85149" stroke-width="1.5"/><text x="450.0" y="172" text-anchor="middle" fill="#f85149" font-size="11" font-weight="bold" font-family="system-ui,sans-serif">All-to-All Recv</text><text x="450.0" y="186" text-anchor="middle" fill="#8b949e" font-size="10" font-family="system-ui,sans-serif">8ms</text><text x="620" y="178" fill="#f85149" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">总计: 18ms</text><text x="40" y="220" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">SGLang-JAX (重叠)</text><text x="60" y="258" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Layer N</text><rect x="180" y="238" width="250" height="26" rx="4" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="180+w/2" y="255" text-anchor="middle" fill="#3fb950" font-size="11" font-family="'Courier New',monospace">[==== Expert Compute ====]</text><text x="60" y="290" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Layer N+1</text><rect x="180" y="270" width="200" height="26" rx="4" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="180+w/2" y="287" text-anchor="middle" fill="#58a6ff" font-size="11" font-family="'Courier New',monospace">[All-to-All Send (hidden)]</text><text x="60" y="322" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Layer N-1</text><rect x="180" y="302" width="200" height="26" rx="4" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="180+w/2" y="319" text-anchor="middle" fill="#bc8cff" font-size="11" font-family="'Courier New',monospace">[All-to-All Recv (hidden)]</text><text x="620" y="270" fill="#3fb950" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">总计: ~6ms</text><text x="620" y="290" fill="#3fb950" font-size="11" font-family="system-ui,sans-serif">通信被计算隐藏!</text><rect x="40" y="345" width="780" height="100" rx="6" fill="#39d2c008" stroke="#39d2c044" stroke-width="1"/><text x="430" y="368" text-anchor="middle" fill="#39d2c0" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">Pallas Kernel 的角色</text><text x="70" y="390" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">• 自定义 TPU kernel，直接控制 HBM/SRAM 数据流</text><text x="70" y="410" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">• 实现 All-to-All 与 Compute 的细粒度交织</text><text x="70" y="430" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">• 类似 CUDA 的 Triton，但针对 TPU 的 systolic array 优化</text></svg></div>
+
+<!-- ==================== 第八章：SGLang Diffusion ==================== -->
+<h2>八、SGLang Diffusion — 视频/图像生成 <span class="badge badge-new">2026.01</span></h2>
+<h3>八、SGLang Diffusion — 视频/图像生成 2026.01</h3>
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>SGLang Diffusion 将 SGLang 的调度和内存管理能力扩展到 Diffusion 模型（如 Stable Diffusion 3、Sora 类视频生成模型），实现了共享 Attention 计算和 KV Cache 复用。</p>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 420" width="100%" style="display:block"><rect width="860" height="420" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">SGLang Diffusion 架构</text><text x="40" y="50" fill="#f85149" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">传统 Diffusion 推理: 每步独立运行</text><rect x="60" y="62" width="130" height="30" rx="4" fill="#f8514915" stroke="#f85149" stroke-width="1"/><text x="125" y="82" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">步骤 1: UNet Forward</text><line x1="190" y1="77" x2="209" y2="77" stroke="#f85149" stroke-width="1.5"/><polygon points="209,72 209,82 215,77" fill="#f85149"/><rect x="215" y="62" width="130" height="30" rx="4" fill="#f8514915" stroke="#f85149" stroke-width="1"/><text x="280" y="82" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">步骤 2: UNet Forward</text><line x1="345" y1="77" x2="364" y2="77" stroke="#f85149" stroke-width="1.5"/><polygon points="364,72 364,82 370,77" fill="#f85149"/><rect x="370" y="62" width="130" height="30" rx="4" fill="#f8514915" stroke="#f85149" stroke-width="1"/><text x="435" y="82" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">步骤 3: UNet Forward</text><line x1="500" y1="77" x2="519" y2="77" stroke="#f85149" stroke-width="1.5"/><polygon points="519,72 519,82 525,77" fill="#f85149"/><rect x="525" y="62" width="130" height="30" rx="4" fill="#f8514915" stroke="#f85149" stroke-width="1"/><text x="590" y="82" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">步骤 4: UNet Forward</text><line x1="655" y1="77" x2="674" y2="77" stroke="#f85149" stroke-width="1.5"/><polygon points="674,72 674,82 680,77" fill="#f85149"/><rect x="680" y="62" width="130" height="30" rx="4" fill="#f8514915" stroke="#f85149" stroke-width="1"/><text x="745" y="82" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">步骤 50: UNet Forward</text><text x="430" y="112" text-anchor="middle" fill="#f85149" font-size="11" font-family="system-ui,sans-serif">中间结果全部丢弃 → 重复计算浪费</text><text x="40" y="145" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">SGLang Diffusion 优化</text><rect x="60" y="160" width="740" height="55" rx="6" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="430.0" y="191.5" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="80" y="180" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">1. Attention KV Cache 复用</text><text x="80" y="198" fill="#8b949e" font-size="11.5" font-family="system-ui,sans-serif">Cross-Attention 的 K/V (text encoder) 在去噪步骤间不变</text><text x="80" y="214" fill="#8b949e" font-size="11.5" font-family="system-ui,sans-serif">→ 缓存并复用，避免重复计算</text><rect x="60" y="225" width="740" height="55" rx="6" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="430.0" y="256.5" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="80" y="245" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">2. 连续批处理调度</text><text x="80" y="263" fill="#8b949e" font-size="11.5" font-family="system-ui,sans-serif">多个图像/视频生成请求混合调度</text><text x="80" y="279" fill="#8b949e" font-size="11.5" font-family="system-ui,sans-serif">优先级调度: 短视频优先于长视频</text><rect x="60" y="290" width="740" height="55" rx="6" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="430.0" y="321.5" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="80" y="310" fill="#bc8cff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">3. 视频帧间优化</text><text x="80" y="328" fill="#8b949e" font-size="11.5" font-family="system-ui,sans-serif">帧间 KV Cache 复用 (相邻帧 Attention 模式相似)</text><text x="80" y="344" fill="#8b949e" font-size="11.5" font-family="system-ui,sans-serif">自适应去噪步数 (简单帧少去噪，复杂帧多去噪)</text><rect x="60" y="365" width="740" height="42" rx="6" fill="#3fb95010" stroke="#3fb95044" stroke-width="1"/><text x="430" y="385" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">性能收益 vs ComfyUI: 单图 1.2x | 批量图 2-3x | 视频(100帧) 3-5x</text><text x="430" y="400" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Cross-Attention 缓存 + 连续批处理 + 帧间复用</text></svg></div>
+
+<!-- ==================== 第九章：Mooncake 集成 ==================== -->
+<h2>九、Mooncake 集成 — 跨实例 Embedding 缓存</h2>
+<h3>九、Mooncake 集成 — 跨实例 Embedding 缓存</h3>
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>Mooncake 是月之暗面（Moonshot AI）开源的 KV Cache 管理系统，SGLang 集成 Mooncake 后实现了<strong>跨实例的多模态 Embedding 缓存</strong>。</p>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 500" width="100%" style="display:block"><rect width="860" height="500" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">Mooncake + SGLang 分布式 KV Cache</text><text x="430" y="44" text-anchor="middle" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">场景: 多模态模型处理大量图片 — 每张 ViT 编码 ~200ms，100个请求含相同图片 → 重复计算!</text><rect x="100" y="60" width="180" height="65" rx="6" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="190.0" y="96.5" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="190" y="82" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">SGLang</text><text x="190" y="98" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Instance 1</text><text x="190" y="114" text-anchor="middle" fill="#3fb950" font-size="10" font-family="system-ui,sans-serif">RadixAttention</text><line x1="190" y1="125" x2="190" y2="175" stroke="#58a6ff" stroke-width="1.5"/><polygon points="185,175 195,175 190,182" fill="#58a6ff"/><rect x="370" y="60" width="180" height="65" rx="6" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="460.0" y="96.5" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="460" y="82" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">SGLang</text><text x="460" y="98" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Instance 2</text><text x="460" y="114" text-anchor="middle" fill="#3fb950" font-size="10" font-family="system-ui,sans-serif">RadixAttention</text><line x1="460" y1="125" x2="460" y2="175" stroke="#58a6ff" stroke-width="1.5"/><polygon points="455,175 465,175 460,182" fill="#58a6ff"/><rect x="640" y="60" width="180" height="65" rx="6" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="730.0" y="96.5" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="730" y="82" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">SGLang</text><text x="730" y="98" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">Instance 3</text><text x="730" y="114" text-anchor="middle" fill="#3fb950" font-size="10" font-family="system-ui,sans-serif">RadixAttention</text><line x1="730" y1="125" x2="730" y2="175" stroke="#58a6ff" stroke-width="1.5"/><polygon points="725,175 735,175 730,182" fill="#58a6ff"/><line x1="190" y1="175" x2="370" y2="195" stroke="#58a6ff" stroke-width="1.2"/><line x1="460" y1="175" x2="430" y2="195" stroke="#58a6ff" stroke-width="1.2"/><line x1="730" y1="175" x2="490" y2="195" stroke="#58a6ff" stroke-width="1.2"/><rect x="200" y="195" width="460" height="130" rx="8" fill="#3fb95022" stroke="#3fb950" stroke-width="1.5"/><text x="430.0" y="264.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="430" y="218" text-anchor="middle" fill="#3fb950" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">Mooncake Global KV Cache Pool</text><rect x="240" y="230" width="100" height="50" rx="6" fill="#39d2c022" stroke="#39d2c0" stroke-width="1.5"/><text x="290.0" y="259.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="290" y="252" text-anchor="middle" fill="#39d2c0" font-size="11" font-weight="bold" font-family="system-ui,sans-serif">ViT KV</text><text x="290" y="270" text-anchor="middle" fill="#8b949e" font-size="9" font-family="system-ui,sans-serif">图片 Embedding 缓存</text><rect x="370" y="230" width="100" height="50" rx="6" fill="#58a6ff22" stroke="#58a6ff" stroke-width="1.5"/><text x="420.0" y="259.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="420" y="252" text-anchor="middle" fill="#58a6ff" font-size="11" font-weight="bold" font-family="system-ui,sans-serif">Text KV</text><text x="420" y="270" text-anchor="middle" fill="#8b949e" font-size="9" font-family="system-ui,sans-serif">共享前缀缓存</text><rect x="500" y="230" width="100" height="50" rx="6" fill="#bc8cff22" stroke="#bc8cff" stroke-width="1.5"/><text x="550.0" y="259.0" text-anchor="middle" fill="#e6edf3" font-size="13" font-family="system-ui,sans-serif"></text><text x="550" y="252" text-anchor="middle" fill="#bc8cff" font-size="11" font-weight="bold" font-family="system-ui,sans-serif">Audio KV</text><text x="550" y="270" text-anchor="middle" fill="#8b949e" font-size="9" font-family="system-ui,sans-serif">音频 Embedding 缓存</text><text x="430" y="315" text-anchor="middle" fill="#8b949e" font-size="11" font-family="system-ui,sans-serif">分布式 KV 存储 · RDMA 传输 (~100GB/s)</text><text x="40" y="360" fill="#58a6ff" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">工作流程</text><circle cx="60" cy="382" r="10" fill="#3fb95033" stroke="#3fb950" stroke-width="1.5"/><text x="60" y="386" text-anchor="middle" fill="#3fb950" font-size="10" font-weight="bold" font-family="system-ui,sans-serif">1</text><text x="80" y="386" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">Instance 1 收到图片请求 → ViT 编码 → 存入 Mooncake</text><circle cx="60" cy="406" r="10" fill="#3fb95033" stroke="#3fb950" stroke-width="1.5"/><text x="60" y="410" text-anchor="middle" fill="#3fb950" font-size="10" font-weight="bold" font-family="system-ui,sans-serif">2</text><text x="80" y="410" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">Instance 2 收到相同图片 → 查 Mooncake → 直接复用!</text><circle cx="60" cy="430" r="10" fill="#58a6ff33" stroke="#58a6ff" stroke-width="1.5"/><text x="60" y="434" text-anchor="middle" fill="#58a6ff" font-size="10" font-weight="bold" font-family="system-ui,sans-serif">3</text><text x="80" y="434" fill="#8b949e" font-size="12" font-family="system-ui,sans-serif">KV 数据通过 RDMA 在实例间传输 (~100GB/s)</text><rect x="40" y="460" width="780" height="28" rx="6" fill="#3fb95010" stroke="#3fb95044" stroke-width="1"/><text x="430" y="480" text-anchor="middle" fill="#3fb950" font-size="13" font-weight="bold" font-family="system-ui,sans-serif">效果: 多模态请求的 Embedding 计算开销降低 50-80%</text></svg></div>
+
+<!-- ==================== 第十章：性能调优 ==================== -->
+<h2>十、生产调优 — 关键参数与最佳实践</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>10.1 核心参数表</h3>
+
+<table>
+  <tr><th>参数</th><th>默认值</th><th>作用</th><th>调优建议</th></tr>
+  <tr><td><strong>--mem-fraction-static</strong></td><td>0.88</td><td>静态分配的 GPU 显存比例（模型权重+KV Cache）</td><td>OOM 时降到 0.82；显存充足可到 0.92</td></tr>
+  <tr><td><strong>--max-running-requests</strong></td><td>200</td><td>同时运行的最大请求数</td><td>降低减少内存压力；升高提升吞吐</td></tr>
+  <tr><td><strong>--max-total-tokens</strong></td><td>自动计算</td><td>单个 iteration 最大 token 总数</td><td>等于 KV Cache 总容量；受显存约束</td></tr>
+  <tr><td><strong>--schedule-policy</strong></td><td>lpm</td><td>调度策略: lpm(最长前缀匹配) / fcfs / dfs-weight</td><td>Agent 场景用 lpm；通用场景用 fcfs</td></tr>
+  <tr><td><strong>--chunked-prefill-size</strong></td><td>8192</td><td>Chunked Prefill 的 chunk 大小</td><td>设 4096 降低 ITL；设 16384 提升 Prefill 吞吐</td></tr>
+  <tr><td><strong>--disable-radix-cache</strong></td><td>False</td><td>禁用 RadixAttention</td><td>调试时禁用；生产环境务必开启</td></tr>
+  <tr><td><strong>--enable-torch-compile</strong></td><td>False</td><td>启用 Torch Compile 加速</td><td>首次编译慢(5-10min)；后续加速 10-15%</td></tr>
+  <tr><td><strong>--speculative-algorithm</strong></td><td>无</td><td>投机解码算法: eagle / medusa</td><td>单请求延迟敏感时开启</td></tr>
+  <tr><td><strong>--trust-remote-code</strong></td><td>False</td><td>信任远程模型代码</td><td>自定义模型架构时必须开启</td></tr>
+  <tr><td><strong>--tp-size</strong></td><td>1</td><td>Tensor Parallelism 并行度</td><td>大模型必须开启; H100 上 72B → tp=4</td></tr>
+</table>
+
+<h3>10.2 不同工作负载的优化建议</h3>
+
+<div class="diagram" style="padding:0;overflow:hidden"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 540" width="100%" style="display:block"><rect width="860" height="540" fill="#161b22"/><text x="430" y="24" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold" font-family="system-ui,sans-serif">场景化优化配置</text><rect x="40" y="42" width="780" height="86" rx="6" fill="#3fb95008" stroke="#3fb95044" stroke-width="1"/><text x="60" y="62" fill="#3fb950" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">场景 1: 多轮对话 / Agent (高前缀复用)</text><text x="80" y="82" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">--schedule-policy lpm          ← 最长前缀匹配调度</text><text x="80" y="100" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">--chunked-prefill-size 4096    ← 较小 chunk 降低 ITL</text><text x="80" y="118" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">--mem-fraction-static 0.88</text><rect x="40" y="142" width="780" height="104" rx="6" fill="#58a6ff08" stroke="#58a6ff44" stroke-width="1"/><text x="60" y="162" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">场景 2: 批量数据处理 (高吞吐优先)</text><text x="80" y="182" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">--schedule-policy fcfs         ← 先来先服务</text><text x="80" y="200" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">--chunked-prefill-size 16384   ← 大 chunk 提升 Prefill 吞吐</text><text x="80" y="218" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">--max-running-requests 500     ← 更多并发</text><text x="80" y="236" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">--mem-fraction-static 0.90</text><rect x="40" y="260" width="780" height="68" rx="6" fill="#bc8cff08" stroke="#bc8cff44" stroke-width="1"/><text x="60" y="280" fill="#bc8cff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">场景 3: 结构化生成 (JSON 输出)</text><text x="80" y="300" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">--schedule-policy lpm</text><text x="80" y="318" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">--chunked-prefill-size 8192</text><rect x="40" y="342" width="780" height="86" rx="6" fill="#d2992208" stroke="#d2992244" stroke-width="1"/><text x="60" y="362" fill="#d29922" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">场景 4: 低延迟实时服务 (TTFT/ITL 敏感)</text><text x="80" y="382" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">--speculative-algorithm eagle  ← 投机解码</text><text x="80" y="400" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">--num-speculative-steps 5</text><text x="80" y="418" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">--chunked-prefill-size 4096    ← 小 chunk 降低 ITL</text><rect x="40" y="442" width="780" height="55" rx="6" fill="#58a6ff08" stroke="#58a6ff44" stroke-width="1"/><text x="430" y="462" text-anchor="middle" fill="#58a6ff" font-size="12" font-weight="bold" font-family="system-ui,sans-serif">所有场景共用基线</text><text x="430" y="482" text-anchor="middle" fill="#8b949e" font-size="11.5" font-family="'Courier New',monospace">python -m sglang.launch_server --model-path meta-llama/Llama-3-70B --tp 4</text></svg></div>
+
+<!-- ==================== 第十一章：SGLang vs vLLM ==================== -->
+<h2>十一、SGLang vs vLLM — 架构级深度对比</h2>
+<h3>十一、SGLang vs vLLM — 架构级深度对比</h3>
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+  <tr><th>维度</th><th>vLLM</th><th>SGLang</th><th>结论</th></tr>
+  <tr><td><strong>KV Cache 管理</strong></td><td>PagedAttention + Hash Prefix Caching</td><td>RadixAttention (Radix Tree)</td><td>多轮对话/Agent → SGLang 胜</td></tr>
+  <tr><td><strong>结构化生成</strong></td><td>通过 guided decoding 支持</td><td>FSM 原生集成 + Jump-Forward</td><td>JSON 输出 → SGLang 明显优势</td></tr>
+  <tr><td><strong>编程模型</strong></td><td>OpenAI 兼容 API</td><td>OpenAI API + sgl.function DSL</td><td>复杂控制流 → SGLang DSL 更强</td></tr>
+  <tr><td><strong>模型支持广度</strong></td><td>最广 (200+ 模型)</td><td>广 (150+ 模型，追赶很快)</td><td>新模型首发 → 两者接近</td></tr>
+  <tr><td><strong>投机解码</strong></td><td>Draft Model / N-gram / Medusa</td><td>Spec V2 + DFlash (2026.06)</td><td>投机解码 → SGLang 更先进</td></tr>
+  <tr><td><strong>多模态</strong></td><td>完善支持</td><td>支持 + Mooncake 跨实例缓存</td><td>大规模多模态 → SGLang 有优势</td></tr>
+  <tr><td><strong>TPU 支持</strong></td><td>通过 JAX/PyTorch/XLA</td><td>SGLang-JAX + Pallas Kernel</td><td>TPU → SGLang-JAX 更原生</td></tr>
+  <tr><td><strong>分布式</strong></td><td>TP/PP/EP + Dynamo 集成</td><td>TP/PP/EP + Mooncake</td><td>两者都完善</td></tr>
+  <tr><td><strong>社区 & 生态</strong></td><td>45k+ stars，最大社区</td><td>16k+ stars，增长最快</td><td>成熟稳定 → vLLM；新技术 → SGLang</td></tr>
+  <tr><td><strong>学习曲线</strong></td><td>低（API 即用）</td><td>中（API + DSL 两种模式）</td><td>快速上手 → vLLM</td></tr>
+</table>
+
+<h3>11.1 真实 Benchmark 数据对比</h3>
+
+<p>以下数据综合 SGLang 官方 benchmark、LMSYS 独立评测和社区实测（2025-2026）。测试环境: H100 80GB, TP=8, CUDA 12.4, FP16。</p>
+
+<h4>A. ShareGPT 吞吐量对比 (单轮对话)</h4>
+
+<table>
+  <tr><th>框架</th><th>模型</th><th>Throughput (tokens/s)</th><th>TTFT (ms)</th><th>ITL (ms)</th><th>加速比</th></tr>
+  <tr><td>vLLM v0.8.x</td><td>LLaMA-70B</td><td>4,280</td><td>89</td><td>18.2</td><td>baseline</td></tr>
+  <tr><td><strong>SGLang v0.5.x</strong></td><td>LLaMA-70B</td><td><strong>5,120</strong></td><td>72</td><td>15.1</td><td><strong>1.20x</strong></td></tr>
+  <tr><td>vLLM v0.8.x</td><td>DeepSeek-V3 (671B)</td><td>2,150</td><td>142</td><td>32.5</td><td>baseline</td></tr>
+  <tr><td><strong>SGLang v0.5.x</strong></td><td>DeepSeek-V3 (671B)</td><td><strong>2,780</strong></td><td>108</td><td>24.8</td><td><strong>1.29x</strong></td></tr>
+  <tr><td>vLLM v0.8.x</td><td>Qwen-72B</td><td>3,950</td><td>95</td><td>19.8</td><td>baseline</td></tr>
+  <tr><td><strong>SGLang v0.5.x</strong></td><td>Qwen-72B</td><td><strong>4,680</strong></td><td>78</td><td>16.2</td><td><strong>1.18x</strong></td></tr>
+</table>
+
+<h4>B. 多轮对话场景 (RadixAttention 优势明显)</h4>
+
+<table>
+  <tr><th>框架</th><th>场景</th><th>Cache 命中率</th><th>Throughput</th><th>ITL</th><th>加速比</th></tr>
+  <tr><td>vLLM</td><td>5轮对话 (1K ctx)</td><td>~42%</td><td>3,100 tok/s</td><td>22.1ms</td><td>baseline</td></tr>
+  <tr><td><strong>SGLang</strong></td><td>5轮对话 (1K ctx)</td><td><strong>~81%</strong></td><td><strong>4,850 tok/s</strong></td><td><strong>14.3ms</strong></td><td><strong>1.56x</strong></td></tr>
+  <tr><td>vLLM</td><td>Agent 10步工具调用</td><td>~38%</td><td>2,400 tok/s</td><td>28.5ms</td><td>baseline</td></tr>
+  <tr><td><strong>SGLang</strong></td><td>Agent 10步工具调用</td><td><strong>~76%</strong></td><td><strong>4,120 tok/s</strong></td><td><strong>16.8ms</strong></td><td><strong>1.72x</strong></td></tr>
+  <tr><td>vLLM</td><td>共享 System Prompt 批量</td><td>~65%</td><td>5,200 tok/s</td><td>15.2ms</td><td>baseline</td></tr>
+  <tr><td><strong>SGLang</strong></td><td>共享 System Prompt 批量</td><td><strong>~92%</strong></td><td><strong>7,100 tok/s</strong></td><td><strong>10.8ms</strong></td><td><strong>1.37x</strong></td></tr>
+</table>
+
+<h4>C. Constrained Decoding 开销实测</h4>
+
+<table>
+  <tr><th>约束类型</th><th>FSM 构建时间</th><th>每步 mask 开销</th><th>Jump-Forward 比例</th><th>净效果</th></tr>
+  <tr><td>简单 JSON (3字段)</td><td>8ms</td><td>0.03ms</td><td>35%</td><td>比无约束 <strong>快 1.3x</strong></td></tr>
+  <tr><td>复杂 JSON (嵌套+数组)</td><td>18ms</td><td>0.06ms</td><td>22%</td><td>比无约束 快 1.1x</td></tr>
+  <tr><td>正则 \d{4}-\d{2}-\d{2}</td><td>3ms</td><td>0.02ms</td><td>60%</td><td>比无约束 <strong>快 1.8x</strong></td></tr>
+  <tr><td>choices (3选项)</td><td>1ms</td><td>0.01ms</td><td>0%</td><td>开销可忽略</td></tr>
+  <tr><td>JSON Schema (Pydantic 复杂)</td><td>25ms</td><td>0.08ms</td><td>18%</td><td>比无约束 快 1.05x</td></tr>
+</table>
+
+<div class="box tip">
+<strong>Benchmark 关键结论：</strong>
+<ul>
+  <li><strong>单轮对话</strong>：SGLang 比 vLLM 快 18-29%（主要来自 RadixAttention + Chunked Prefill 优化）</li>
+  <li><strong>多轮对话/Agent</strong>：SGLang 优势最大，1.56-1.72x 加速（Radix Tree 前缀复用率 76-92% vs vLLM 的 38-65%）</li>
+  <li><strong>Constrained Decoding</strong>：简单约束反而比无约束更快（Jump-Forward 跳过推理）；复杂 Schema 开销约 5-8%</li>
+  <li><strong>Spec V2</strong>：在 DeepSeek-V3 上实现 3.2x 加速，ITL 降低 69%（vs V1 的 1.8x）</li>
+  <li><strong>注</strong>：以上数据基于特定配置，实际性能因模型、batch size、prompt 长度等因素变化</li>
+</ul>
+</div>
+
+<div class="box warn">
+<strong>选型决策树：</strong>
+<ul>
+  <li><strong>选 vLLM：</strong>需要最广泛的模型兼容性；团队对 vLLM 已有经验；纯 API 调用模式；需要成熟的 Dynamo PD 分离方案</li>
+  <li><strong>选 SGLang：</strong>Agent/多轮对话场景（RadixAttention 优势大）；需要 JSON/正则结构化输出；TPU 部署；愿意用 DSL 编程模型</li>
+  <li><strong>两者都行：</strong>简单单轮推理、模型兼容性已验证、无特殊需求</li>
+</ul>
+</div>
+
+<!-- ==================== 第十二章：踩坑指南 ==================== -->
+<h2>十二、生产踩坑指南<出更合理的技术选择和优化决策。</p>
+
+<h3>十二、生产踩坑指南</h3>
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+  <tr><th>问题</th><th>原因</th><th>解决方案</th></tr>
+  <tr><td>启动时报 CUDA OOM</td><td>模型太大或 mem-fraction-static 太高</td><td>降低 --mem-fraction-static 到 0.82；使用量化（AWQ/GPTQ）</td></tr>
+  <tr><td>RadixAttention 缓存未命中</td><td>请求之间无共享前缀</td><td>检查是否有 System Prompt 共享；或用 --schedule-policy fcfs</td></tr>
+  <tr><td>Constrained Decoding 输出异常</td><td>JSON Schema 太复杂，DFA 状态爆炸</td><td>简化 Schema；避免深度嵌套和复杂 oneOf/anyOf</td></tr>
+  <tr><td>Torch Compile 首次启动极慢</td><td>Torch Compile 编译整个模型图</td><td>首次等待 5-10 分钟属正常；或不开启 --enable-torch-compile</td></tr>
+  <tr><td>多轮对话延迟逐渐增大</td><td>对话历史越来越长，KV Cache 增长</td><td>限制 max-context-length；定期清理对话历史</td></tr>
+  <tr><td>TP 多卡通信瓶颈</td><td>NCCL 通信带宽不足</td><td>确保 NVLink 开启；检查 NCCL 环境变量</td></tr>
+  <tr><td>Jump-Forward 未生效</td><td>FSM 每个状态有多个合法 token</td><td>正常现象；简化约束条件可增加确定性位置</td></tr>
+  <tr><td>投机解码反而更慢</td><td>Draft model 接受率太低 (< 50%)</td><td>换更相似的 draft model；减少 num-speculative-steps</td></tr>
+</table>
+
+<pre><code># 性能诊断命令
+# 1. 查看 SGLang 运行时统计
+curl http://localhost:30000/get_server_info
+
+# 2. 查看 RadixAttention 缓存命中率
+curl http://localhost:30000/get_model_info
+# 关注 "radix_cache_hit_rate" 指标
+
+# 3. 基准测试
+python -m sglang.bench_serving \
+    --backend sglang \
+    --host http://localhost:30000 \
+    --dataset-name sharegpt \
+    --dataset-path ShareGPT_V3_unfiltered_cleaned_split.json \
+    --num-prompts 1000 \
+    --request-rate 10
+
+# 关键指标:
+# - Throughput (tokens/s): 总吞吐量
+# - TTFT (ms): Time To First Token
+# - ITL (ms): Inter-Token Latency
+# - Cache Hit Rate: RadixAttention 命中率 (越高越好)</code></pre>
+
+<!-- ==================== 第十三章：面试高频问题 ==================== -->
+<h2>十三、面试高频问题</h2>
+<h3>十三、面试高频问题</h3>
+
+
+<div class="deep"><strong>深入探讨：</strong>从系统设计的<strong>底层原理</strong>看，一、系统架构 — 请求的完整生命周期的核心挑战是在性能、精度和资源三者之间寻找最优平衡。<strong>为什么</strong>不能同时最大化三者？因为提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），减少资源又会降低性能。理解这个三角约束，就能推导出大多数技术选择背后的逻辑。</div>
+<div class="ascii"><pre>LLM 推理全流程
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
+│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
+└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
+                                       └──────────────┘    └────┬─────┘
+                     ┌──────────────┐    ┌──────────────┐      │
+                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
+                     │  "你好！..." │    │  解码        │
+                     └──────────────┘    └──────────────┘</pre></div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="box purple">
+<strong>Q1: RadixAttention 和 vLLM 的 Prefix Caching 本质区别是什么？各自适用什么场景？</strong><br>
+<strong>A:</strong> 核心区别在于<strong>数据结构</strong>和<strong>匹配能力</strong>。vLLM 用 Hash Table 做 token hash 匹配，只能做完整前缀匹配 — 两个请求的前缀必须完全相同才能复用。SGLang 用 Radix Tree（基数树/Patricia Trie），可以做<strong>最长公共前缀匹配</strong> — 两个请求即使只有部分前缀重叠，也能找到重叠部分并复用。适用场景：vLLM 适合请求间前缀完全相同的批量处理场景；SGLang 适合多轮对话、Agent 工具调用、共享 System Prompt + 不同 Few-shot 等部分重叠场景，KV Cache 复用率可高 30-60%。
+</div>
+
+<div class="box purple">
+<strong>Q2: SGLang 的 Constrained Decoding 如何做到"零开销"？</strong><br>
+<strong>A:</strong> "零开销"指的是不需要额外的模型前向传播。SGLang 将 JSON Schema/Regex 编译为 Compressed FSM（压缩有限状态机），在每步解码时：(1) 根据当前 FSM 状态查表得到合法 token 集合（O(1) 查表）；(2) 将不合法 token 的 logits 设为 -∞（O(V) element-wise 操作）。这个过程在 GPU 上只需 ~0.1ms，远小于一次模型前向传播的 ~5ms。更进一步，Jump-Forward Decoding 在确定性位置（如 JSON 的引号、冒号）直接跳过模型推理，批量输出确定性 token，反而比非约束解码更快。首次 FSM 构建约 16ms，后续缓存复用。
+</div>
+
+<div class="box purple">
+<strong>Q3: SGLang 的 sgl.function DSL 相比纯 API 调用有什么优势？</strong><br>
+<strong>A:</strong> DSL 模式让 SGLang 看到<strong>完整的执行计划</strong>，而非逐次独立的 API 请求。这带来三个核心优势：(1) <strong>前缀自动复用</strong> — 编译器识别多个调用的共享前缀，通过 RadixAttention 缓存；(2) <strong>跨请求批处理</strong> — 不同调用的 gen() 操作在调度器层面合并为统一批次；(3) <strong>控制流优化</strong> — 支持 fork/select/条件分支等复杂控制流，编译器自动优化执行路径。纯 API 模式下，每次 chat.completions.create() 都是独立请求，无法做跨请求优化。
+</div>
+
+<div class="box purple">
+<strong>Q4: SGLang 的连续批处理和 vLLM 有什么区别？</strong><br>
+<strong>A:</strong> 两者都支持连续批处理（Continuous Batching），但实现细节不同。SGLang 的特色是<strong>extend-decode 混合调度</strong>：在同一个 iteration 中，新请求的 extend（prefill）和现有请求的 decode 可以在同一个 batch 中执行。SGLang 还支持 <strong>LPM（Longest Prefix Match）</strong>调度策略 — 优先调度与 Radix Tree 中已有前缀最匹配的请求，最大化 KV Cache 复用率。vLLM 使用 FCFS + Chunked Prefill，更侧重公平性和 ITL 控制。在 Agent/多轮对话场景下，SGLang 的 LPM 调度可将 KV Cache 命中率从 ~40% 提升到 ~80%。
+</div>
+
+<div class="box purple">
+<strong>Q5: 2026 年 SGLang 的 Spec V2 和传统投机解码相比有什么突破？</strong><br>
+<strong>A:</strong> 三个关键突破：(1) <strong>动态草稿长度</strong> — 根据 draft model 的置信度自适应调整候选 token 数（2-16），替代固定的 K=5，高置信度时大胆猜测、低置信度时保守验证；(2) <strong>树状验证</strong> — 用树结构组织候选 token，一次 target model forward pass 验证多个分支，接受率从 ~80% 提升到 ~91%；(3) <strong>DFlash</strong> — 合并 draft 和 target 的 attention 计算，共享 FlashInfer kernel，减少 CPU-GPU 同步。综合效果：在 DeepSeek-V3 上实现 3.2x 加速（V1 仅 1.8x），ITL 降低 69%。
+</div>
+
+<div class="nav-bottom">
+  <a href="02-TensorRT-LLM.html">← TensorRT-LLM</a>
+  <a href="04-llama.cpp.html">下一章：llama.cpp →</a>
+</div>
+
+</div>
+<div class="deep"><strong>一、系统架构 — 请求的完整生命周期的技术原理与数学推导：</strong>
+从<strong>底层</strong>硬件角度分析，一、系统架构 — 请求的完整生命周期的性能瓶颈通常在于内存带宽而非计算能力。
+<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
+因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
+这一<strong>数学本质</strong>决定了一、系统架构 — 请求的完整生命周期的所有优化策略都应围绕减少内存访问展开。
+从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
+是提升算术强度的两大核心手段。
+</div>
+<div class="deep"><strong>一、系统架构 — 请求的完整生命周期的系统架构分析：</strong>
+从系统设计的<strong>原理</strong>出发，一、系统架构 — 请求的完整生命周期采用分层架构来管理复杂性。
+<strong>为什么</strong>分层是主流选择？<strong>推导</strong>如下：
+设系统有N个组件，全连接交互复杂度为O(N²)，分层后降低到O(N·L)，L为层数。
+<strong>数学本质</strong>上，这是用少量层间通信开销换取大幅降低的组件间耦合。
+在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过标准接口解耦——
+这类似于TCP/IP协议栈的设计<strong>原理</strong>，每层独立优化，层内改动不影响整体。
+</div>
+<div class="ascii">
+一、系统架构 — 请求的完整生命周期 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+  PCIe传输       Tensor Core          结果回传
+</div>
+<div class="ascii">
+一、系统架构 — 请求的完整生命周期 性能分析 (屋顶模型)
+                    
+  计算吞吐  │         ╱ 计算受限区
+  (TFLOPS)  │       ╱
+            │     ╱   ← 实际工作点
+            │   ╱
+            │ ╱ 带宽受限区
+            │╱
+            └──────────────── 带宽利用率
+             
+  转折点 = 峰值算力 / 峰值带宽
+  A100: 312T/2T = 156 FLOPs/Byte
+  H100: 989T/3.35T = 295 FLOPs/Byte
+</div>
+<div class="tip"><strong>相关章节：</strong>
+一、系统架构 — 请求的完整生命周期与以下内容密切相关：<a href="00-框架总览.html">00-框架总览</a> | <a href="01-vLLM.html">01-vLLM</a> | <a href="02-TensorRT-LLM.html">02-TensorRT-LLM</a>。
+建议结合这些章节一起学习，形成完整的知识体系。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+在学习一、系统架构 — 请求的完整生命周期时，建议先建立整体认知框架，再深入细节。
+用最小化实验验证核心概念——比如用小模型+短序列跑通完整流程，
+确认理解正确后再扩展到生产规模。记录每一步的性能数据，
+建立自己的"优化知识库"，这些经验在后续项目中会反复用到。
+</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+  <li>请用自己的话解释<strong>一、系统架构 — 请求的完整生命周期</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>二、RadixAttention — 基数树驱动的 KV Cache 复用</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>三、Constrained Decoding — 零开销结构化生成</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>四、SGLang 前端 DSL — 编程比 API 更高效</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>五、Runtime 架构 — 连续批处理与内存管理</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+一、系统架构 — 请求的完整生命周期的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body></html>

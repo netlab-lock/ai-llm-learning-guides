@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>推理并行策略 - 推理框架</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}body{background:#0f1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;line-height:1.8;padding:20px;max-width:1000px;margin:0 auto}h1{color:#58a6ff;font-size:1.8em;margin:20px 0 10px;border-bottom:2px solid #30363d;padding-bottom:10px}h2{color:#79c0ff;font-size:1.4em;margin:25px 0 10px}h3{color:#d2a8ff;font-size:1.2em;margin:20px 0 8px}p{margin:10px 0}.nav{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:25px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}.nav a{color:#58a6ff;text-decoration:none;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;overflow-x:auto;margin:15px 0;font-size:0.9em}code{background:#161b22;padding:2px 6px;border-radius:4px;font-size:0.9em;color:#e6edf3}table{border-collapse:collapse;width:100%;margin:15px 0}th,td{border:1px solid #30363d;padding:10px 12px;text-align:left}th{background:#161b22;color:#58a6ff}tr:nth-child(even){background:#161b22}.highlight{background:#1a2332;border-left:4px solid #58a6ff;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.ascii-art{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto}ul,ol{margin:10px 0 10px 25px}li{margin:5px 0}.warning{background:#2d1b00;border-left:4px solid #d29922;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.tip{background:#0d2818;border-left:4px solid #3fb950;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.footer{margin-top:40px;padding-top:20px;border-top:1px solid #30363d;font-size:0.85em;color:#8b949e}.svg-diagram{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;text-align:center;overflow-x:auto}.svg-diagram svg{max-width:100%;height:auto}
+
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<div class="nav">
+<a href="../../index.html">← 返回AI-LLM技术</a>
+<a href="../index.html">推理优化目录</a>
+</div>
+
+<h1>推理并行策略</h1>
+
+<h2>1. 为什么推理需要并行？</h2>
+<h3>为什么推理需要并行？</h3><div class="tip"><strong>💡 通俗类比：</strong>推理需要并行就像餐厅高峰期需要多个厨师——一个厨师(单GPU)再快也做不过来。张量并行相当于把一道菜的步骤拆分给不同厨师协作(切菜、炒菜、摆盘同时进行)，数据并行相当于开多个窗口同时处理不同顾客的订单。选择哪种方式取决于厨房布局(GPU互联)和菜品复杂度(模型大小)。</div>
+<div class="warn"><strong>⚠️ 常见误区：</strong>不要盲目追求最大并行度。张量并行(TP)每层都需要AllReduce通信，在NVLink带宽有限时通信开销可能超过计算收益。经验法则：TP不超过同一节点内的GPU数(通常4或8)。跨节点应该用流水线并行(PP)而非TP。</div>
+trong>通俗类比：</strong>为什么推理需要并行？</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>当模型太大无法放入单张GPU时，或者需要处理大量并发请求时，就需要并行策略。<strong>推理并行与训练并行的目标不同</strong>——训练追求吞吐量，推理追求低延迟和高并发。</p>
+
+<h2>2. 三种并行策略</h2>
+<h3>三种并行策略</h3>
+
+
+
+
+<div class="warn"><strong>⚠️ 常见误区：</strong>很多人认为数据并行(DP)在推理中没用——这是错的。当模型能放入单张GPU时，DP是最佳选择：每张GPU独立处理请求，无需通信，吞吐量线性扩展。DP不需要梯度同步(推理无反向传播)，比训练中的DDP更简单高效。</div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 780 620" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="title-grad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#58a6ff" stop-opacity="0.3"/>
+      <stop offset="100%" stop-color="#58a6ff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <style>
+    text { font-family: 'Cascadia Code','Fira Code',monospace; }
+  </style>
+  <!-- Outer container -->
+  <rect x="1" y="1" width="778" height="618" rx="8" fill="none" stroke="#30363d" stroke-width="1.5"/>
+  <!-- Title bar -->
+  <rect x="1" y="1" width="778" height="40" rx="8" fill="#1a2332"/>
+  <rect x="1" y="20" width="778" height="21" fill="#1a2332"/>
+  <text x="390" y="28" text-anchor="middle" fill="#58a6ff" font-size="16" font-weight="bold">推理并行策略对比</text>
+  <line x1="1" y1="41" x2="779" y2="41" stroke="#30363d" stroke-width="1"/>
+
+  <!-- Section 1: TP -->
+  <text x="20" y="72" fill="#d2a8ff" font-size="13" font-weight="bold">张量并行 (Tensor Parallelism, TP)</text>
+  <rect x="16" y="82" width="748" height="140" rx="6" fill="none" stroke="#30363d"/>
+  <text x="28" y="103" fill="#c9d1d9" font-size="12">将每一层的权重矩阵切分到多张GPU</text>
+  <!-- GPU boxes for TP -->
+  <rect x="60" y="118" width="200" height="44" rx="4" fill="#0d3320" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="160" y="145" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">GPU0: W的左半部分</text>
+  <!-- AllReduce arrows -->
+  <line x1="265" y1="140" x2="340" y2="140" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrow-amber)" marker-start="url(#arrow-amber-rev)"/>
+  <text x="303" y="132" text-anchor="middle" fill="#fbbf24" font-size="10">AllReduce</text>
+  <rect x="345" y="118" width="200" height="44" rx="4" fill="#0d3320" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="445" y="145" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">GPU1: W的右半部分</text>
+  <!-- Pros/Cons -->
+  <text x="28" y="190" fill="#3fb950" font-size="11">✓ 优点: 延迟最低 (每层计算都在多卡上并行)</text>
+  <text x="28" y="208" fill="#f85149" font-size="11">✗ 缺点: 通信频繁 (每层都需要AllReduce)</text>
+  <text x="400" y="190" fill="#8b949e" font-size="11">适用: 同一节点内的多GPU (NVLink互联)</text>
+
+  <!-- Section 2: PP -->
+  <text x="20" y="262" fill="#d2a8ff" font-size="13" font-weight="bold">流水线并行 (Pipeline Parallelism, PP)</text>
+  <rect x="16" y="272" width="748" height="140" rx="6" fill="none" stroke="#30363d"/>
+  <text x="28" y="293" fill="#c9d1d9" font-size="12">将模型的不同层分配到不同GPU</text>
+  <!-- GPU boxes for PP -->
+  <rect x="60" y="308" width="220" height="44" rx="4" fill="#0d3320" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="170" y="335" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">GPU0: Layer 0-15</text>
+  <!-- Arrow -->
+  <line x1="285" y1="330" x2="375" y2="330" stroke="#fbbf24" stroke-width="1.5" marker-end="url(#arrow-amber)"/>
+  <text x="330" y="322" text-anchor="middle" fill="#fbbf24" font-size="10">激活值</text>
+  <rect x="380" y="308" width="220" height="44" rx="4" fill="#0d3320" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="490" y="335" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">GPU1: Layer 16-31</text>
+  <!-- Pros/Cons -->
+  <text x="28" y="380" fill="#3fb950" font-size="11">✓ 优点: 通信量小 (只传激活值)</text>
+  <text x="28" y="398" fill="#f85149" font-size="11">✗ 缺点: GPU利用率低 (流水线气泡)</text>
+  <text x="400" y="380" fill="#8b949e" font-size="11">适用: 跨节点部署 (低带宽网络)</text>
+
+  <!-- Section 3: DP -->
+  <text x="20" y="452" fill="#d2a8ff" font-size="13" font-weight="bold">数据并行 (Data Parallelism, DP)</text>
+  <rect x="16" y="462" width="748" height="140" rx="6" fill="none" stroke="#30363d"/>
+  <text x="28" y="483" fill="#c9d1d9" font-size="12">每张GPU都有完整模型副本，处理不同的请求</text>
+  <!-- GPU boxes for DP -->
+  <rect x="60" y="498" width="260" height="44" rx="4" fill="#0d3320" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="190" y="525" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">GPU0: [完整模型] 处理请求A</text>
+  <rect x="380" y="498" width="260" height="44" rx="4" fill="#0d3320" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="510" y="525" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">GPU1: [完整模型] 处理请求B</text>
+  <!-- Pros/Cons -->
+  <text x="28" y="570" fill="#3fb950" font-size="11">✓ 优点: 无通信开销，线性扩展吞吐量</text>
+  <text x="28" y="588" fill="#f85149" font-size="11">✗ 缺点: 需要足够显存放完整模型</text>
+  <text x="400" y="570" fill="#8b949e" font-size="11">适用: 模型能放入单GPU，需要高并发</text>
+
+  <!-- Arrow markers -->
+  <defs>
+    <marker id="arrow-amber" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#fbbf24"/></marker>
+    <marker id="arrow-amber-rev" markerWidth="8" markerHeight="6" refX="0" refY="3" orient="auto"><path d="M8,0 L0,3 L8,6" fill="#fbbf24"/></marker>
+  </defs>
+</svg>
+</div>
+
+<h2>3. 推理并行 vs 训练并行</h2>
+原理，有助于在实际工程中做出更合理的技术选择和优化决策。</p>
+
+<h3>推理并行 vs 训练并行</h3>
+
+
+<div class="deep"><strong>深入探讨：</strong>从系统设计的<strong>底层原理</strong>看，为什么推理需要并行？的核心挑战是在性能、精度和资源三者之间寻找最优平衡。<strong>为什么</strong>不能同时最大化三者？因为提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），减少资源又会降低性能。理解这个三角约束，就能推导出大多数技术选择背后的逻辑。</div>
+<div class="ascii"><pre>LLM 推理全流程
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
+│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
+└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
+                                       └──────────────┘    └────┬─────┘
+                     ┌──────────────┐    ┌──────────────┐      │
+                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
+                     │  "你好！..." │    │  解码        │
+                     └──────────────┘    └──────────────┘</pre></div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+<thead>
+<tr>
+    <th>维度</th>
+    <th>训练并行</th>
+    <th>推理并行</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+    <td><strong>目标</strong></td>
+    <td>最大化吞吐量</td>
+    <td>最小化延迟 + 高并发</td>
+</tr>
+<tr>
+    <td><strong>梯度同步</strong></td>
+    <td>需要AllReduce梯度</td>
+    <td>不需要（无反向传播）</td>
+</tr>
+<tr>
+    <td><strong>批处理</strong></td>
+    <td>大batch训练</td>
+    <td>连续批处理（动态batch）</td>
+</tr>
+<tr>
+    <td><strong>显存</strong></td>
+    <td>需要存梯度+优化器状态</td>
+    <td>只需存权重+KV Cache</td>
+</tr>
+<tr>
+    <td><strong>通信</strong></td>
+    <td>梯度+权重同步</td>
+    <td>激活值+KV同步</td>
+</tr>
+</tbody>
+</table>
+
+<h2>4. 实际部署建议</h2>
+<h3>实际部署建议</h3>
+<div class="warn"><strong>⚠️ 常见误区：</strong>不要忽略MoE模型的并行特殊性。MoE模型(如Mixtral、DeepSeek-V2)需要额外的专家并行(EP)，不同专家放在不同GPU上，通过All-to-All通信交换token。EP的通信模式与TP/PP完全不同，配置不当会导致严重的负载不均衡——部分GPU忙于热门专家，其他GPU空闲。</div>
+<table>
+<thead>
+<tr>
+    <th>场景</th>
+    <th>推荐策略</th>
+    <th>配置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+    <td><strong>单卡能放下</strong></td>
+    <td>数据并行(DP)</td>
+    <td>每张GPU独立处理请求</td>
+</tr>
+<tr>
+    <td><strong>模型太大，单卡放不下</strong></td>
+    <td>张量并行(TP)</td>
+    <td>TP=2或4（同一节点内）</td>
+</tr>
+<tr>
+    <td><strong>跨节点部署</strong></td>
+    <td>TP + PP</td>
+    <td>节点内TP，节点间PP</td>
+</tr>
+<tr>
+    <td><strong>MoE模型</strong></td>
+    <td>专家并行(EP)</td>
+    <td>不同专家放不同GPU</td>
+</tr>
+</tbody>
+</table>
+
+<div class="tip">
+<strong>💡 关键原则：</strong>推理部署时，优先用张量并行(TP)解决单节点内的模型切分问题。TP的通信开销在NVLink互联下可以忽略。只有在跨节点部署时才考虑流水线并行(PP)。
+</div>
+
+<div class="footer">
+<p>📖 推理优化 · 推理并行策略</p>
+<p><a href="../index.html">推理优化目录</a></p>
+</div>
+
+
+
+<h2>并行策略的通信复杂度与最优切分原理</h2>
+
+<h3>张量并行的 AllReduce 通信数学推导</h3>
+<p>张量并行（Tensor Parallelism, TP）的核心<strong>原理</strong>是将权重矩阵按列或行切分到多张 GPU 上。
+从<strong>数学推导</strong>角度，设模型隐藏维度为 d，单层权重 W ∈ R^{d×d}，
+切分到 N 张 GPU 上，每张 GPU 持有 W/N 的子矩阵。
+前向传播的<strong>公式</strong>为：Y_i = X · W_i（本地计算），然后 Y = ΣY_i（AllReduce 归约）。</p>
+
+<p><strong>为什么</strong> TP 的通信开销是所有并行策略中最高的？
+从<strong>底层</strong>分析 AllReduce 的通信量<strong>推导</strong>：
+采用 Ring-AllReduce 算法，通信量 = 2·(N-1)/N · M，
+其中 M 为每层输出的激活值大小（M = B·S·d/N，B 为 batch size，S 为序列长度）。
+对于 L 层模型，总通信量 = 2L·(N-1)/N · B·S·d/N。
+<strong>数学本质</strong>：通信量与层数 L 线性相关，<strong>为什么</strong>每层都需要一次 AllReduce？
+因为每层的激活值计算都依赖于所有 GPU 的部分结果之和——这是矩阵分块乘法的<strong>底层原理</strong>决定的。</p>
+
+<p>TP 在 NVLink 互联下的实际延迟<strong>推导</strong>：以 A100 8 卡 NVLink 为例，
+NVLink 双向带宽为 600 GB/s，Ring-AllReduce 有效带宽 ≈ 600·(N-1)/N ≈ 525 GB/s。
+对于 d=12288 的模型（如 LLaMA-70B），单层 AllReduce 数据量 = 2·B·S·d ≈ 2·1·2048·12288·2B = 100MB
+（FP16），通信时间 = 100MB / 525GB/s ≈ 0.19ms。对比单层计算时间约 0.5ms，
+通信占比约 38%——这就是<strong>为什么</strong> TP 必须在高带宽互联下使用，
+且 N 通常不超过 8（同一节点内）的<strong>底层原理</strong>。</p>
+
+<h3>流水线并行的气泡率优化推导</h3>
+<p>流水线并行（Pipeline Parallelism, PP）将模型层按顺序分配到不同 GPU。
+其<strong>数学本质</strong>瓶颈是"流水线气泡"（Pipeline Bubble）——
+在流水线填充和排空阶段，部分 GPU 处于空闲状态。</p>
+
+<p><strong>推导</strong>气泡率<strong>公式</strong>：设模型分为 p 个阶段（p 张 GPU），
+每个 micro-batch 的前向计算时间为 t_f，反向传播时间为 t_b（推理时 t_b=0）。
+对于 M 个 micro-batch，总气泡时间为 (p-1)·(t_f + t_b)（训练）或 (p-1)·t_f（推理）。
+气泡率 = (p-1)·t_f / (M·t_f + (p-1)·t_f) = (p-1) / (M+p-1)。
+<strong>为什么</strong>增加 micro-batch 数量 M 能降低气泡率？
+从<strong>推导</strong>看，当 M → ∞ 时气泡率 → 0，因为流水线被充分填充。</p>
+
+<p>GPipe 和 1F1B 调度策略的<strong>原理</strong>差异：
+GPipe 采用先执行所有前向再执行所有反向的策略，<strong>数学本质</strong>是将气泡集中在中间。
+1F1B（one-forward-one-backward）交替执行前向和反向，<strong>底层</strong>优势是减少了峰值显存——
+因为激活值不需要同时保存所有 micro-batch 的中间结果。
+<strong>公式</strong>：GPipe 峰值显存 = M·A（A 为单个 micro-batch 的激活值大小），
+1F1B 峰值显存 = p·A。<strong>推导</strong>可知当 M >> p 时，1F1B 的显存优势显著。
+这就是<strong>为什么</strong> Megatron-LM 默认采用 1F1B 调度的<strong>底层原理</strong>。</p>
+
+<div class="deep"><strong>深层原理：混合并行策略的最优配置推导</strong>
+在大规模推理部署中，通常需要组合 TP + PP + DP 三种并行策略。
+从<strong>数学推导</strong>角度，设集群有 G 张 GPU，节点内 GPU 数为 g（NVLink 互联），
+模型参数量为 P，单个 token 的 KV Cache 大小为 K（与序列长度成正比）。
+
+最优配置<strong>公式</strong>：选择 TP=t, PP=p, DP=d，满足 t·p·d = G，
+目标是最小化端到端推理延迟 L = max(L_comp, L_comm)。
+
+<strong>推导</strong>计算时间：L_comp = P/(t·d·FLOPS_per_GPU)（TP 切分权重，DP 复制模型）。
+<strong>推导</strong>通信时间：L_comm = L_TP_comm + L_PP_comm，
+其中 L_TP_comm = 2·(t-1)/t · B·S·d_hidden/(BW_NVLink)（每层 AllReduce），
+L_PP_comm = B·S·d_hidden/t / (BW_network)（阶段间激活值传输）。
+
+<strong>为什么</strong>实践中推荐 TP ≤ g（节点内 GPU 数）？
+<strong>数学本质</strong>分析：当 TP 跨节点时，BW_network 比 BW_NVLink 低约 10-100 倍，
+导致 L_TP_comm 主导总延迟。从<strong>底层</strong>来看，这个<strong>原理</strong>决定了
+"节点内 TP、节点间 PP"的黄金法则。
+
+对于 MoE（Mixture of Experts）模型，还需要引入专家并行（EP）。
+EP 的<strong>数学本质</strong>是将不同专家分配到不同 GPU，通过 All-to-All 通信交换 token。
+<strong>推导</strong> EP 通信量 = 2·B·S·d_expert / N_experts（发送 + 接收），
+当专家数量 E 很大时，EP 通信量可能成为瓶颈——这就是<strong>为什么</strong>
+DeepSpeed-MoE 采用"专家+数据"混合并行的<strong>底层原理</strong>。
+
+序列并行（SP）和上下文并行（CP）的<strong>原理</strong>：
+SP 将 LayerNorm 和 Dropout 等非切分操作也分配到各 GPU，
+<strong>推导</strong>可节省 (1-1/t) 比例的激活值显存；
+CP 将长序列的 KV Cache 按序列维度切分，适用于超长上下文推理（>128K tokens）。
+这些策略的<strong>数学本质</strong>都是在通信量和显存之间寻找最优平衡点。
+</div>
+
+<div class="deep"><strong>为什么推理需要并行？的技术原理与数学推导：</strong>
+从<strong>底层</strong>硬件角度分析，为什么推理需要并行？的性能瓶颈通常在于内存带宽而非计算能力。
+<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
+因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
+这一<strong>数学本质</strong>决定了为什么推理需要并行？的所有优化策略都应围绕减少内存访问展开。
+从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
+是提升算术强度的两大核心手段。
+</div>
+<div class="deep"><strong>为什么推理需要并行？的系统架构分析：</strong>
+从系统设计的<strong>原理</strong>出发，为什么推理需要并行？采用分层架构来管理复杂性。
+<strong>为什么</strong>分层是主流选择？<strong>推导</strong>如下：
+设系统有N个组件，全连接交互复杂度为O(N²)，分层后降低到O(N·L)，L为层数。
+<strong>数学本质</strong>上，这是用少量层间通信开销换取大幅降低的组件间耦合。
+在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过标准接口解耦——
+这类似于TCP/IP协议栈的设计<strong>原理</strong>，每层独立优化，层内改动不影响整体。
+</div>
+<pre><code class="language-python"># 为什么推理需要并行？ - 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    """测量推理延迟和吞吐"""
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    print(f"Throughput: {1/elapsed:.0f} req/s")
+    return elapsed
+</code></pre>
+<pre><code class="language-python"># 为什么推理需要并行？ - 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    """测量推理延迟和吞吐"""
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    print(f"Throughput: {1/elapsed:.0f} req/s")
+    return elapsed
+</code></pre>
+<div class="ascii">
+为什么推理需要并行？ 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+  PCIe传输       Tensor Core          结果回传
+</div>
+<div class="ascii">
+为什么推理需要并行？ 性能分析 (屋顶模型)
+                    
+  计算吞吐  │         ╱ 计算受限区
+  (TFLOPS)  │       ╱
+            │     ╱   ← 实际工作点
+            │   ╱
+            │ ╱ 带宽受限区
+            │╱
+            └──────────────── 带宽利用率
+             
+  转折点 = 峰值算力 / 峰值带宽
+  A100: 312T/2T = 156 FLOPs/Byte
+  H100: 989T/3.35T = 295 FLOPs/Byte
+</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+  <li>请用自己的话解释<strong>为什么推理需要并行？</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>三种并行策略</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>推理并行 vs 训练并行</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>请用自己的话解释<strong>实际部署建议</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+
+<div class="tip"><strong>向前串联：</strong>
+为什么推理需要并行？的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习为什么推理需要并行？建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+
+<div class="tip"><strong>📚 前置知识：</strong>学习本章内容前，建议先掌握Transformer注意力机制原理、KV Cache的基本概念、GPU内存层次结构(HBM/L2/SRAM)。这些基础知识是理解后续优化策略的前提。</div>
+</body>
+</html>

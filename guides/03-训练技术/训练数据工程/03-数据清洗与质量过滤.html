@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 · 数据清洗与质量过滤</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.7}a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}.nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;justify-content:space-between;position:sticky;top:0;z-index:100}.nav span{color:#8b949e;font-size:0.9em}.nav a{color:#58a6ff}.container{max-width:900px;margin:0 auto;padding:30px 20px}h1{color:#58a6ff;font-size:2em;margin:20px 0 10px}h2{color:#f0f6fc;border-left:4px solid #58a6ff;padding-left:14px;margin:35px 0 15px;font-size:1.4em}h3{color:#d2a8ff;margin:20px 0 10px;font-size:1.15em}p{margin:10px 0}ul,ol{margin:10px 0 10px 24px}li{margin:4px 0}code{background:#21262d;color:#79c0ff;padding:2px 6px;border-radius:4px;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;overflow-x:auto;margin:12px 0}pre code{background:none;color:#c9d1d9;padding:0}table{border-collapse:collapse;width:100%;margin:12px 0}th{background:#161b22;color:#58a6ff;text-align:left;padding:10px 14px;border:1px solid #30363d}td{padding:10px 14px;border:1px solid #21262d}tr:nth-child(even){background:#161b2233}.tip{background:#0d1d30;border-left:4px solid #58a6ff;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.tip strong{color:#58a6ff}.warn{background:#2d1b00;border-left:4px solid #d29922;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.warn strong{color:#d29922}.exercise{background:#0d2818;border-left:4px solid #238636;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.exercise strong{color:#3fb950}.deep{background:#1a1024;border-left:4px solid #a371f7;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.deep strong{color:#a371f7}.ascii{background:#161b22;border:1px solid #30363d;padding:16px;font-family:monospace;font-size:0.85em;line-height:1.4;overflow-x:auto;margin:12px 0;white-space:pre}.formula{background:#161b22;border:1px solid #30363d;padding:14px 18px;border-radius:6px;margin:12px 0;text-align:center;font-size:1.1em;color:#d2a8ff}.footer{text-align:center;padding:30px;border-top:1px solid #21262d;margin-top:30px;color:#8b949e;font-size:0.85em}.glossary{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin:16px 0}.glossary dt{color:#58a6ff;font-weight:bold;margin-top:8px}.glossary dd{color:#8b949e;margin-left:16px}</style>
+</head>
+<body>
+<div class="nav"><a href="02-数据采集与来源.html">&larr; 02-数据采集与来源</a><span>模块 03/08 · 数据清洗</span><a href="04-数据去重.html">04-数据去重 &rarr;</a></div>
+<div class="container">
+
+<h1>🧹 03 · 数据清洗与质量过滤 — 从垃圾到黄金</h1>
+<p style="color:#8b949e;font-size:1.05em;">URL黑名单 · 语言检测 · 质量分类器 · Gopher规则 · FineWeb pipeline</p>
+
+<h2>一、背景与动机</h2>
+<p>Common Crawl 的原始数据中，约 90% 是低质量内容：广告、导航菜单、Cookie同意弹窗、SEO垃圾、自动生成的页面...直接用这些数据训练，模型效果极差。</p>
+<p>数据清洗的目标：<strong>从海量原始网页中提取出"像人写的、有价值的"文本</strong>。这是一个多层过滤的 pipeline，每层去掉一类垃圾。</p>
+
+<div class="tip"><strong>💡 核心挑战：</strong>过滤太多会丢失有价值数据(特别是非英语、小众领域)；过滤太少会让垃圾数据污染模型。FineWeb 的贡献在于找到了最佳平衡点。</div>
+
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>不同语言和领域的数据需要不同的清洗策略。直接套用英语的Gopher规则清洗中文数据会过滤掉大量有价值内容——中文没有空格分词，平均词长、停用词比例等规则需要重新设定阈值。建议先在小样本上测试每条规则的过滤效果。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>数据清洗的核心矛盾是"精度vs召回"——过滤掉所有低质量内容（高精度）可能误伤好数据（低召回），保留所有数据（高召回）又引入噪声。FineWeb的成功在于找到了最佳平衡点：通过多层漏斗式过滤，在每层平衡精度和召回，最终达到整体最优。</div>
+<h2>二、名字由来</h2>
+<p><strong>数据清洗(Data Cleaning)</strong>：去除数据中的噪声、错误、不一致内容。</p>
+<p><strong>质量过滤(Quality Filtering)</strong>：根据质量标准筛选数据。可以是启发式规则，也可以是训练的质量分类器。</p>
+<p><strong>Gopher Rules</strong>：DeepMind 在 Gopher(2021)论文中提出的一组启发式过滤规则，成为行业标准。</p>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>学习Gopher规则的最佳方式是阅读DeepMind的原始论文附录，其中列出了所有26条规则的详细定义。HuggingFace的datatrove库提供了Gopher规则的开源实现，可以直接调用并查看每条规则的过滤效果。建议逐条规则测试，理解每条规则的设计意图。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>Gopher规则中的停用词比例阈值（>0.06）仅适用于英语。中文、日语等语言需要单独定义停用词表和阈值。质量分类器的训练数据选择也存在语言偏差——用Wikipedia作为正例训练的分类器可能对学术化文本有偏好，对口语化但有价值的内容（如论坛讨论）产生偏见。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>启发式规则（Gopher）和模型分类器（Quality Classifier）代表了两种质量评估范式：规则是"人类先验知识的编码"，分类器是"从数据中学习质量标准"。两者互补——规则快速去除明显的垃圾（高精度），分类器精细筛选高质量内容（高召回）。FineWeb的成功在于将两者串联使用。</div>
+<h2>三、核心原理</h2>
+
+<h3>3.1 完整清洗 Pipeline</h3>
+<div class="svg-diagram"><svg viewBox="0 0 640 740" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="a03" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6" fill="#58a6ff"/></marker></defs>
+<text x="320" y="20" text-anchor="middle" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="12">数据清洗完整流程</text>
+<text x="320" y="46" text-anchor="middle" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="13" font-weight="bold">原始 WARC/WET 文件</text>
+<line x1="320" y1="54" x2="320" y2="70" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#a03)"/>
+<rect x="90" y="76" width="460" height="76" rx="6" fill="#0d1117" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="108" y="96" fill="#fbbf24" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5" font-weight="bold">1. URL/域名过滤</text>
+<text x="108" y="114" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">• 已知垃圾域名黑名单 • 成人/恶意/钓鱼网站</text>
+<text x="108" y="132" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">• 去掉非文本页面</text>
+<text x="550" y="110" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">~5%</text>
+<line x1="320" y1="152" x2="320" y2="170" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#a03)"/>
+<rect x="90" y="176" width="460" height="76" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="108" y="196" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5" font-weight="bold">2. HTML 清理</text>
+<text x="108" y="214" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">• 去除HTML标签 / JavaScript / CSS</text>
+<text x="108" y="232" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">• 规范化Unicode • 去除零宽字符</text>
+<line x1="320" y1="252" x2="320" y2="270" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#a03)"/>
+<rect x="90" y="276" width="460" height="76" rx="6" fill="#0d1117" stroke="#34d399" stroke-width="1.5"/>
+<text x="108" y="296" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5" font-weight="bold">3. 语言检测与过滤</text>
+<text x="108" y="314" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">• fastText langid 检测语言</text>
+<text x="108" y="332" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">• 保留目标语言 (如 en, zh) • 去掉乱码/混合语言</text>
+<text x="550" y="310" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">en~60%</text>
+<line x1="320" y1="352" x2="320" y2="370" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#a03)"/>
+<rect x="90" y="376" width="460" height="76" rx="6" fill="#0d1117" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="108" y="396" fill="#a78bfa" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5" font-weight="bold">4. 启发式规则过滤 (Gopher)</text>
+<text x="108" y="414" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">• 文本长度检查 • 重复 n-gram 比例</text>
+<text x="108" y="432" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">• 特殊字符比例 • "lorem ipsum" 等模板检测</text>
+<text x="550" y="410" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">~30%</text>
+<line x1="320" y1="452" x2="320" y2="470" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#a03)"/>
+<rect x="90" y="476" width="460" height="76" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="108" y="496" fill="#22d3ee" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5" font-weight="bold">5. 质量分类器过滤</text>
+<text x="108" y="514" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">• 训练质量评分模型 (Wikipedia=正例, 随机网页=负例)</text>
+<text x="108" y="532" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">• 过滤低分文档</text>
+<text x="550" y="510" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">top50%</text>
+<line x1="320" y1="552" x2="320" y2="570" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#a03)"/>
+<rect x="90" y="576" width="460" height="76" rx="6" fill="#0d1117" stroke="#f87171" stroke-width="1.5"/>
+<text x="108" y="596" fill="#f87171" font-family="'Cascadia Code','Fira Code',monospace" font-size="12.5" font-weight="bold">6. 有害内容过滤</text>
+<text x="108" y="614" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">• 毒性检测 (Perspective API)</text>
+<text x="108" y="632" fill="#c9d1d9" font-family="'Cascadia Code','Fira Code',monospace" font-size="11">• PII(个人信息)检测与脱敏 • 版权敏感内容过滤</text>
+<line x1="320" y1="652" x2="320" y2="676" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#a03)"/>
+<text x="320" y="700" text-anchor="middle" fill="#34d399" font-family="'Cascadia Code','Fira Code',monospace" font-size="14" font-weight="bold">✅ 高质量训练数据</text>
+<text x="320" y="722" text-anchor="middle" fill="#8b949e" font-family="'Cascadia Code','Fira Code',monospace" font-size="10">原始数据 ~10% 最终保留</text>
+</svg></div>
+
+<h3>3.2 Gopher 规则集详解</h3>
+<p>DeepMind 在 Gopher(2021)论文中定义了 26 条启发式规则，成为行业标准：</p>
+<table>
+<tr><th>规则</th><th>阈值</th><th>目的</th></tr>
+<tr><td>文档词数</td><td>50 &lt; words &lt; 100,000</td><td>太短无价值，太长可能是模板</td></tr>
+<tr><td>平均词长</td><td>3 &lt; avg_len &lt; 10</td><td>排除乱码</td></tr>
+<tr><td>行尾符号比例</td><td>&lt; 0.1</td><td>排除代码/日志</td></tr>
+<tr><td>重复行比例</td><td>&lt; 0.3</td><td>排除导航菜单/重复内容</td></tr>
+<tr><td>重复段落比例</td><td>&lt; 0.3</td><td>排除镜像站/抄袭</td></tr>
+<tr><td>重复 3-gram 比例</td><td>&lt; 0.18</td><td>排除高度重复文本</td></tr>
+<tr><td>特殊字符比例</td><td>&lt; 0.1</td><td>排除乱码/特殊格式</td></tr>
+<tr><td>数字比例</td><td>&lt; 0.15</td><td>排除表格/数据表</td></tr>
+<tr><td>"javascript" 检测</td><td>包含则过滤</td><td>排除未清理的JS</td></tr>
+<tr><td>停用词比例</td><td>&gt; 0.06(英语)</td><td>排除非自然语言</td></tr>
+</table>
+
+<h3>3.3 质量分类器</h3>
+<div class="ascii">质量分类器的训练方法:
+
+方法1: Wikipedia vs Random Web
+  正例: Wikipedia 文章 (高质量)
+  负例: 随机网页 (混合质量)
+  训练二分类器 → 对新文档打分
+
+方法2: Perplexity Filtering
+  用已训练的小型 LM 计算文档困惑度
+  困惑度太高 → 文本不自然 → 过滤
+  困惑度太低 → 文本太模板化 → 过滤
+  适中 → 可能是好的自然文本
+
+方法3: 参考模型打分
+  用已有的好模型(如 Llama)对文本打分
+  高分文本 = 质量高
+
+FineWeb 的做法:
+  1. 训练一个 fastText 质量分类器
+  2. 正例: 被至少一个教育网站引用的页面
+  3. 负例: 普通 Common Crawl 页面
+  4. 用分类器对所有页面打分
+  5. 保留高分页面</div>
+
+<h3>3.4 FineWeb 的质量过滤 Pipeline</h3>
+<p>HuggingFace 的 FineWeb 是当前最优秀的开源数据集之一，其 pipeline 是行业参考：</p>
+<table>
+<tr><th>步骤</th><th>方法</th><th>过滤比例</th></tr>
+<tr><td>URL 过滤</td><td>黑名单+成人内容检测</td><td>去掉 ~5%</td></tr>
+<tr><td>语言检测</td><td>fastText lid</td><td>保留英语 ~60%</td></tr>
+<tr><td>Gopher 规则</td><td>26条启发式规则</td><td>去掉 ~30%</td></tr>
+<tr><td>MinHash 去重</td><td>Jaccard &gt; 0.8</td><td>去掉 ~20%</td></tr>
+<tr><td>质量分类器</td><td>fastText + 教育网站正例</td><td>保留 top ~50%</td></tr>
+<tr><td>C4 规则</td><td>额外启发式</td><td>去掉 ~10%</td></tr>
+</table>
+
+<h3>3.5 代码数据的特殊过滤</h3>
+<table>
+<tr><th>规则</th><th>描述</th><th>目的</th></tr>
+<tr><td>语法检查</td><td>尝试解析代码，去掉语法错误的</td><td>保证代码质量</td></tr>
+<tr><td>注释比例</td><td>过滤注释比例过高(>50%)或过低(<1%)的文件</td><td>平衡可读性</td></tr>
+<tr><td>许可证过滤</td><td>只保留允许商用的许可证</td><td>合规</td></tr>
+<tr><td>自动生成检测</td><td>去掉 minified JS、auto-generated 代码</td><td>排除噪声</td></tr>
+<tr><td>重复度</td><td>文件级去重+函数级去重</td><td>避免记忆重复代码</td></tr>
+</table>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>实现质量分类器时，FineWeb的"教育网站引用"策略值得借鉴：用被至少一个.edu域名引用的页面作为正例。替代方案包括用Wikipedia文章或高star数的GitHub README作为正例。训练时注意正负例比例均衡，通常1:1到1:5效果较好。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>Perplexity Filtering的阈值选择非常关键：困惑度过高说明文本不自然（乱码/翻译质量差），困惑度过低说明文本太模板化（如导航菜单重复出现）。最佳区间通常在10-100之间（取决于基座LM的大小），建议先画出困惑度分布图再选阈值。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>质量分类器本质上是在学习"什么是好的文本"这一隐式定义。FineWeb用"教育网站引用"定义质量，这假设了"教育相关=高质量"。但这个假设不完全成立——技术博客、新闻报道、文学作品也可能是高质量的。更理想的做法是用多个独立的质量信号（如分类器分数、困惑度、引用数）做集成评估。</div>
+<h2>四、技术细节</h2>
+
+<h3>4.1 语言检测</h3>
+<table>
+<tr><th>工具</th><th>方法</th><th>速度</th><th>准确率</th></tr>
+<tr><td>fastText lid</td><td>n-gram + 线性分类器</td><td>极快(1M docs/min)</td><td>~98%</td></tr>
+<tr><td>CLD3</td><td>神经网络</td><td>快</td><td>~97%</td></tr>
+<tr><td>langdetect</td><td>朴素贝叶斯</td><td>中</td><td>~95%</td></tr>
+</table>
+
+<h3>4.2 去重算法的数学原理</h3>
+<p>MinHash 去重是大规模数据去重的核心算法，其数学原理基于 Jaccard 相似度的无偏估计。给定两个文档 A 和 B 的 n-gram 集合，Jaccard 相似度定义为 J(A,B) = |A∩B| / |A∪B|。直接计算 Jaccard 相似度需要 O(|A∪B|) 的时间复杂度，在十亿级文档上不可行。MinHash 的核心定理证明：Pr[h_min(A) = h_min(B)] = J(A,B)，即随机哈希函数对两个集合的最小值相同的概率恰好等于 Jaccard 相似度。通过使用 k 个独立的哈希函数生成 k 维签名向量，可以用 LSH（Locality-Sensitive Hashing）将相似文档映射到同一桶中，将时间复杂度从 O(n²) 降到 O(n)。在 FineWeb 中使用 k=112 个哈希函数，Jaccard 阈值设为 0.8，在 90 亿文档上去重效果优异。理解这一数学推导有助于合理调整哈希函数数量和相似度阈值，在去重精度和计算成本之间找到最优平衡。</p>
+
+<h3>4.3 质量分类器的工作机制</h3>
+<p>质量分类器的工作机制可以形式化为一个二分类问题：给定文本 x，分类器输出 P(quality|x)。FineWeb 使用 fastText 训练的 n-gram 分类器，其数学模型为 P(y=1|x) = σ(w^T · Φ(x) + b)，其中 Φ(x) 是文本的 n-gram 特征向量，w 和 b 是可学习参数，σ 是 sigmoid 函数。分类器的训练数据构建策略直接影响其过滤效果——正例来自被教育网站引用的页面，负例从 Common Crawl 随机采样。这种"远程监督"（distant supervision）策略的原理是利用外部知识（教育网站的链接结构）作为质量的代理信号，避免了人工标注的高昂成本。分类器在推理时的阈值选择需要通过 PR 曲线分析来确定——过高的阈值会导致精度高但召回率低（丢失有价值数据），过低的阈值则相反。</p>
+
+<h3>4.4 过滤的权衡</h3>
+<div class="ascii">过滤力度 vs 数据质量:
+
+  数据质量
+    ↑
+    │          ╱─── 最优点(FineWeb)
+    │        ╱
+    │      ╱
+    │    ╱────── 过滤过多: 丢失多样性
+    │  ╱           特别是非英语数据
+    │╱────────── 过滤不足: 垃圾数据污染
+    ├────────────────────→ 过滤力度
+
+过少过滤: 模型学到垃圾 → 质量差
+过多过滤: 数据太"干净" → 多样性差
+          英语偏见加重、小众领域缺失
+          模型可能过于"学术化"</div>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>语言检测工具推荐fastText lid：速度快（100万文档/分钟）、准确率高（~98%）、支持170+种语言。使用时建议置信度阈值设为0.8，低于此值的文档可能是混合语言或乱码。对于中文数据，fastText lid的准确率略低，可以考虑用langid.py做二次验证。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>调整过滤阈值时一次只改一个参数。例如只调整Gopher规则中的"重复3-gram比例"阈值从0.18改为0.15，观察对保留率和下游模型性能的影响。同时改多个阈值会导致无法归因效果变化。建议记录每组参数的保留率和抽样质量评分。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>数据清洗pipeline的演进路径：C4（2020，简单启发式）→ Gopher（2021，26条规则）→ FineWeb（2024，规则+分类器+去重）→ DCLM（2024，FastText分类器为主）。趋势是从"人工设计规则"到"学习过滤标准"，但启发式规则作为第一道防线仍然不可替代——它的速度是分类器的10倍以上。</div>
+<h2>五、使用场景</h2>
+<ul>
+<li><strong>预训练数据准备</strong>：从 Common Crawl 构建高质量训练集</li>
+<li><strong>领域数据清洗</strong>：对特定领域数据做质量过滤</li>
+<li><strong>多语言数据清洗</strong>：不同语言需要不同的过滤策略</li>
+<li><strong>代码数据处理</strong>：代码有特殊的质量标准</li>
+</ul>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>清洗工具推荐：datatrove（HuggingFace出品，集成Gopher规则+质量分类器）、dolma（AI2出品，模块化pipeline）、text-dedup（去重工具）。小规模实验可用Python + fastText快速原型，大规模生产建议用Spark/Ray分布式处理。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>多语言数据清洗时，不同语言需要独立的规则集和阈值。例如中文需要先做分词才能计算停用词比例，日语的特殊字符比例规则需要重新定义。建议为每种主要语言建立独立的清洗配置文件，而非用一套参数处理所有语言。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>代码数据的清洗与文本数据有本质区别：代码需要语法检查（确保可解析）、许可证过滤（确保合规）、自动生成检测（排除minified JS）。注释比例是代码质量的重要信号——注释过多（>50%）可能是模板文件，过少（<1%）可能是自动生成的代码。</div>
+<h2>六、相似技术对比</h2>
+<table>
+<tr><th>Pipeline</th><th>发布者</th><th>过滤方法</th><th>效果</th></tr>
+<tr><td>C4</td><td>Google(2020)</td><td>简单启发式</td><td>基线</td></tr>
+<tr><td>Gopher Rules</td><td>DeepMind(2021)</td><td>26条规则</td><td>显著提升</td></tr>
+<tr><td>FineWeb</td><td>HuggingFace(2024)</td><td>规则+分类器+去重</td><td>当前最优</td></tr>
+<tr><td>DCLM</td><td>Apple/UW(2024)</td><td>FastText分类器</td><td>接近FineWeb</td></tr>
+</table>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>选择清洗pipeline时的建议：如果追求最佳效果，参考FineWeb的完整pipeline（规则+分类器+去重）；如果追求简洁高效，DCLM的FastText分类器方案接近FineWeb效果但实现更简单；如果数据量不大，直接用Gopher规则过滤即可。不建议从零开始设计pipeline。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>过度过滤的风险比想象中更严重：过滤太激进会导致数据多样性严重下降，特别是对非英语语言和小众领域。建议在过滤后检查数据的语言分布和主题分布，如果某个重要领域的数据量大幅减少，需要放宽相应规则的阈值。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>C4到FineWeb的演进反映了数据工程的核心认知变化：早期认为"简单规则足够"（C4仅用几条规则），后来发现"精细过滤的回报率极高"（FineWeb的多层pipeline比C4提升6% MMLU）。这说明数据清洗是训练数据工程中投入产出比最高的环节。</div>
+<h2>七、关联技术</h2>
+<ul>
+<li><strong>数据去重(下一章)</strong>：去重和清洗通常交替进行</li>
+<li><strong>合成数据(模块05)</strong>：合成数据也需要质量过滤</li>
+<li><strong>数据配比(模块06)</strong>：不同质量层的数据可能需要不同权重</li>
+</ul>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>清洗和去重的执行顺序很重要：建议先做URL/域名过滤（最快），再做语言检测，然后做Gopher规则过滤，接着做MinHash去重，最后做质量分类器筛选。去重放在质量分类器之前是因为去重可以减少分类器需要处理的数据量，降低计算成本。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>清洗pipeline的可复现性至关重要：所有过滤规则和阈值应存储在配置文件（YAML/JSON）中而非硬编码在代码里。每批数据处理完成后生成处理报告（输入量、每层保留率、被过滤样本抽样），便于追踪和回滚。建议使用DVC等工具管理数据版本。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>清洗、去重、去污染三者的关系：清洗去除低质量内容，去重去除重复内容，去重通常在清洗流程中进行。去污染（去掉训练数据与评测集的重叠）是更严格的去重——去重用宽松阈值（Jaccard>0.8），去污染用严格阈值（任何匹配都检查）。三者层层递进，共同保证数据质量。</div>
+<h2>八、实际效果</h2>
+<table>
+<tr><th>数据集</th><th>过滤方法</th><th>1B模型 MMLU</th></tr>
+<tr><td>原始 CC</td><td>无过滤</td><td>~28%</td></tr>
+<tr><td>C4</td><td>简单规则</td><td>~32%</td></tr>
+<tr><td>Gopher 过滤</td><td>26条规则</td><td>~35%</td></tr>
+<tr><td>FineWeb</td><td>规则+分类器</td><td>~38%</td></tr>
+</table>
+
+<h3>📖 术语速查表</h3>
+<dl class="glossary">
+<dt>Gopher Rules</dt><dd>DeepMind 定义的26条数据过滤启发式规则</dd>
+<dt>Perplexity Filtering</dt><dd>用语言模型困惑度评估文本质量</dd>
+<dt>Quality Classifier</dt><dd>训练一个分类器区分高低质量文本</dd>
+<dt>fastText lid</dt><dd>fastText 语言检测模型，速度极快</dd>
+<dt>PII</dt><dd>Personally Identifiable Information，个人身份信息</dd>
+</dl>
+
+<div class="warn"><strong>常见误区：</strong>① 认为规则过滤太简单没用——实际上，基于规则的过滤（如 Gopher 规则）可以快速去除 30-50% 的低质量数据，是最高效的第一步；② 忽略"过度过滤"的风险——过滤太激进会丢失多样性，特别是对非英语语言和小众领域，可能过滤掉大量有价值的数据。</div>
+
+<div class="deep"><strong>深入探讨：</strong>数据清洗的核心矛盾是"精度 vs 召回"——过滤掉所有低质量数据（高精度）可能会误伤一些好数据（低召回），保留所有数据（高召回）又会引入大量噪声（低精度）。实践中的解决方案是"分层清洗"：先用简单规则快速过滤（高召回），再用模型打分精细筛选（高精度），最后用人工抽检验证（质量保证）。这种"漏斗式"清洗可以在效率和质量之间找到平衡。</div>
+
+<div class="tip"><strong>向前串联：</strong>
+一、背景与动机的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<pre><code class="language-python"># 一、背景与动机 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="tip"><strong>相关章节：</strong>
+一、背景与动机与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+一、背景与动机与以下内容密切相关：<a href="01-训练数据总览.html">01-训练数据总览</a> | <a href="02-数据采集与来源.html">02-数据采集与来源</a> | <a href="04-数据去重.html">04-数据去重</a>。建议结合学习。
+</div>
+<pre><code class="language-python"># 一、背景与动机 - 性能基准测试
+import torch, time
+def benchmark(model, x, n=100):
+    for _ in range(10): model(x)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(n): model(x)
+    torch.cuda.synchronize()
+    print(f"Latency: {(time.perf_counter()-t0)/n*1000:.2f}ms")
+</code></pre>
+<div class="exercise"><strong>✏️ 练习题：</strong>
+<ol>
+<li>为什么 Gopher 规则要检查重复 3-gram 比例？高重复率说明什么问题？</li>
+<li>FineWeb 为什么选择"被教育网站引用的页面"作为质量分类器的正例？这有什么假设？</li>
+<li>如果你要为中文网页设计一套质量过滤规则，需要和英语有什么不同？</li>
+</ol></div>
+
+</div>
+
+<div class="tip"><strong>💡 实用技巧：</strong>评估清洗效果时，建议训练一个1B参数的小模型作为快速proxy：分别用原始数据和清洗后数据训练，对比MMLU等基准测试结果。FineWeb的实验表明，从原始CC到FineWeb，1B模型的MMLU从28%提升到38%——10个百分点的差距完全来自数据清洗。
+<p>语言检测是数据清洗的第一道重要关卡。fastText lid是目前最常用的语言检测工具，基于n-gram特征和线性分类器，速度可达每分钟处理100万篇文档，准确率约98%。在实际使用中，需要为每种目标语言设定置信度阈值，通常要求置信度大于0.8才保留该文档。对于混合语言的文档，fastText lid可能只检测到占主导地位的语言，这类文档通常需要特殊处理或直接过滤。</p>
+
+<p>Gopher规则中的重复n-gram比例检查是一个非常有效的过滤手段。高重复率的文档通常是导航菜单重复出现、模板页面批量生成、自动翻译导致的重复或SEO垃圾内容。3-gram重复比例超过18%的文档几乎可以肯定是低质量的，这一阈值经过了大量实验验证。质量分类器的训练数据选择对过滤效果有决定性影响。FineWeb选择被至少一个教育网站引用的页面作为正例的策略非常巧妙，但也存在假设偏差：它倾向于学术化、正式的写作风格，可能会过滤掉口语化但有价值的内容。在实践中，建议使用多个正例来源训练多个分类器，然后取它们的交集或加权平均。</p>
+
+<p>有害内容过滤是一个需要特别谨慎的环节。过度过滤会导致模型对敏感话题缺乏了解，过滤不足又会让模型继承有害偏见。Perspective API等工具的毒性检测存在文化和语言偏差。PII检测也需要考虑不同语言和地区的特殊性。建议在有害内容过滤后进行多样性检查，确保过滤后的数据在敏感话题上仍有合理的覆盖。</p>
+
+<p>FineWeb pipeline的工程细节值得深入学习。其完整的处理流程包括URL过滤、HTML清理、语言检测、Gopher规则过滤、MinHash去重、质量分类器过滤等多个步骤。每一步都有详细的参数配置和过滤比例统计，这种系统化的方法论是数据工程的最佳实践。在实际的清洗pipeline中，需要特别关注不同语言的特殊性，中文等语言需要先做分词处理，停用词比例等规则也需要为每种语言单独设定阈值。此外，清洗pipeline的性能优化也很重要，分片并行处理、流式处理避免内存溢出、缓存中间结果方便断点续传等技术可以显著提升处理效率。每层过滤后都应该统计保留率和被过滤样本的特征分布，确保过滤效果符合预期。建议在小规模数据上手动实现简化版的清洗pipeline，亲身体验每层过滤的效果和影响。</p>
+
+<h2>九、学习路径与工程实践建议</h2>
+<p>数据清洗是数据工程中投入产出比最高的环节。掌握清洗技术后，下一步是学习去重方法，两者通常在同一个pipeline中交替执行。</p>
+
+<div class="ascii">清洗pipeline的工程实现要点:
+
+  ┌──────────────────────────────────────────────┐
+  │         数据清洗Pipeline 工程实践               │
+  ├──────────────────────────────────────────────┤
+  │                                              │
+  │  性能优化:                                    │
+  │  • 分片并行处理 (每个shard独立清洗)             │
+  │  • 流式处理避免内存溢出                        │
+  │  • 缓存中间结果方便断点续传                     │
+  │                                              │
+  │  质量保证:                                    │
+  │  • 每层过滤后统计保留率                        │
+  │  • 随机抽样人工验证过滤效果                     │
+  │  • 记录过滤规则和阈值到配置文件                  │
+  │                                              │
+  │  可复现性:                                    │
+  │  • 所有随机操作固定seed                        │
+  │  • 记录每步的输入输出统计                       │
+  │  • 版本化过滤规则和模型                        │
+  └──────────────────────────────────────────────┘</div>
+
+<p>Gopher规则的实际应用中需要注意不同语言的特殊性。原始的Gopher规则主要针对英语设计，直接应用于中文、日语等语言时效果会大打折扣。例如，停用词比例规则（英语阈值>0.06）需要为每种语言单独设定阈值和停用词表。平均词长规则（3-10个字符）对中文也不适用，因为中文没有空格分隔的"词"概念，需要先做分词处理。在为多语言数据设计清洗规则时，建议为每种主要语言建立独立的规则集和阈值参数。</p>
+
+<p>质量分类器的训练是数据清洗中最关键的技术环节。FineWeb选择"被教育网站引用的页面"作为正例的策略非常巧妙——教育网站通常链接到高质量、信息密度高的内容。但这种策略也存在假设偏差：它倾向于学术化、正式的写作风格，可能会过滤掉口语化但有价值的内容（如技术论坛的讨论、博客文章等）。在实践中，建议使用多个正例来源训练多个分类器，然后取它们的交集或加权平均，以减少单一分类器的偏差。</p>
+
+<p>有害内容过滤是一个需要特别谨慎的环节。过度过滤会导致模型对敏感话题缺乏了解（从而无法正确回答相关问题），过滤不足又会让模型继承有害偏见。Perspective API等工具的毒性检测存在文化和语言偏差——某些在一种文化中无害的表达在另一种文化中可能被视为冒犯。建议在有害内容过滤后进行多样性检查，确保过滤后的数据在敏感话题上仍有合理的覆盖。</p>
+
+<p>FineWeb pipeline的工程细节值得深入学习。其完整的处理流程包括URL过滤（去掉已知垃圾域名和成人网站）、HTML清理（去除标签、JavaScript、CSS等非文本内容）、语言检测（使用fastText lid模型，速度可达每分钟100万文档）、Gopher规则过滤（26条启发式规则）、MinHash去重（Jaccard阈值>0.8）、质量分类器过滤（保留top50%）等多个步骤。每一步都有详细的参数配置和过滤比例统计，这种系统化的方法论是数据工程的最佳实践。</p>
+
+<div class="tip"><strong>💡 实践建议：</strong>建议在小规模数据（如1GB的Common Crawl子集）上手动实现一个简化版的清洗pipeline。从URL过滤开始，逐步添加语言检测、Gopher规则、质量分类器等步骤，亲身体验每层过滤的效果和影响。这种动手实践对于理解数据清洗的核心原理至关重要。</div>
+
+<div class="warn"><strong>⚠️ 过度过滤警告：</strong>在为中文数据设计清洗pipeline时，需要特别注意过度过滤的问题。中文网页的格式和写作风格与英文网页差异很大，直接套用英文的过滤规则可能会过滤掉大量有价值的中文内容。建议先在小规模中文数据上测试每条规则的过滤效果，手动检查被过滤掉的样本，确认规则的合理性后再大规模应用。</div>
+
+<div class="deep"><strong>🔬 深入理解：</strong>数据清洗的本质是在"精度"和"召回"之间寻找平衡。高精度过滤（只保留最高质量的数据）可能导致数据多样性下降，特别是对非英语语言和小众领域的影响更大。高召回过滤（尽量保留更多数据）则可能引入噪声。FineWeb的成功在于找到了这个平衡点的最佳位置——通过多层漏斗式过滤，逐步提升数据质量，同时保持足够的多样性。这一方法论的核心思想可以概括为"宁可漏过一些好数据，也不要让大量垃圾数据污染模型"。</div>
+
+<p>数据清洗的可复现性是工程实践中容易被忽视但极其重要的方面，所有过滤规则和阈值应该存储在配置文件中而不是硬编码在代码里，这样可以方便地调整参数和复现历史结果，每批数据处理完成后应该生成处理报告包含输入数据量每层过滤的保留率被过滤样本的抽样检查结果等信息，这些报告不仅是质量保证的依据也是后续优化pipeline参数的参考，建议使用Great Expectations等数据质量验证框架来自动化质量检查当数据质量不达标时自动发出告警。</p>
+<p>数据清洗的性能基准测试也很重要，在大规模应用前应该在代表性样本上测试每条规则的执行时间和过滤效果，选择性价比最高的规则组合，一些复杂的规则可能过滤效果好但执行时间太长在大规模数据上不实用，而一些简单的规则执行速度极快但过滤效果一般，需要在效果和效率之间找到最佳平衡点。</p>
+<p>清洗规则的版本管理也很重要每次修改规则都应该记录变更内容和原因，这样可以追踪规则的演进历史并在出现问题时快速回滚到之前的版本，建议使用配置文件管理所有规则参数并纳入版本控制系统。</p>
+<p>清洗效果的持续监控可以通过对比不同版本清洗后的数据质量指标来实现，当指标出现异常时及时调整规则参数。</p>
+<p>数据清洗是整个数据工程流程中投入产出比最高的环节，值得投入足够的工程资源来完善。</p>
+</div>
+<pre><code># Gopher 质量规则 Python 实现示例
+
+import re
+from collections import Counter
+
+def gopher_quality_check(text: str) -> dict:
+    """实现 DeepMind Gopher 论文中的 26 条质量规则（核心子集）"""
+    words = text.split()
+    sentences = re.split(r'[.!?]+', text)
+    results = {}
+
+    # 规则1: 文档字数范围 (50 ~ 100,000)
+    results['word_count'] = 50 <= len(words) <= 100000
+
+    # 规则2: 平均词长 (3 ~ 10 字符)
+    avg_word_len = sum(len(w) for w in words) / max(len(words), 1)
+    results['avg_word_len'] = 3 <= avg_word_len <= 10
+
+    # 规则3: 停用词比例 (> 0.06，英语常用停用词)
+    stopwords = {'the','a','an','is','are','was','were','in','on','at'}
+    stop_ratio = sum(1 for w in words if w.lower() in stopwords) / max(len(words),1)
+    results['stopword_ratio'] = stop_ratio > 0.06
+
+    # 规则4: 以省略号结尾的行比例 (< 0.3)
+    lines = text.split('\n')
+    ellipsis_ratio = sum(1 for l in lines if l.strip().endswith('...')) / max(len(lines),1)
+    results['ellipsis_ratio'] = ellipsis_ratio < 0.3
+
+    # 规则5: 包含不良符号的行比例 (< 0.01)
+    bad_chars = set('{}|*#@$%^&')
+    bad_lines = sum(1 for l in lines if any(c in bad_chars for c in l))
+    results['bad_symbol_ratio'] = bad_lines / max(len(lines),1) < 0.01
+
+    passed = sum(results.values())
+    return {'passed': passed, 'total': len(results), 'details': results}</code></pre>
+
+<div class="footer"><p>📊 训练数据工程 · 03 · 数据清洗与质量过滤</p><p><a href="index.html">返回目录</a> · <a href="../index.html">返回总览</a></p></div>
+<p>在工程实践中，本节所述技术需要根据具体项目需求进行裁剪和组合。建议建立标准化的评估流程，通过A/B测试验证每个技术选型的实际效果，并持续跟踪关键指标的变化趋势。团队内部应定期复盘技术决策的执行情况，及时调整不适合的方案。</p>
+</body></html>
+</html>

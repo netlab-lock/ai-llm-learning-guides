@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04-多模型与Serverless推理 | 推理服务架构</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #58a6ff; text-decoration: none; }
+.nav span { color: #8b949e; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+h1 { color: #58a6ff; font-size: 2em; margin: 24px 0 16px; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 12px; margin: 32px 0 16px; font-size: 1.5em; }
+h3 { color: #d2a8ff; margin: 24px 0 12px; font-size: 1.2em; }
+h4 { color: #79c0ff; margin: 16px 0 8px; }
+p { margin: 8px 0; }
+code { background: #21262d; color: #79c0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; margin: 12px 0; font-size: 0.85em; line-height: 1.5; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th { background: #21262d; color: #f0f6fc; padding: 10px 14px; text-align: left; border: 1px solid #30363d; font-weight: 600; }
+td { padding: 8px 14px; border: 1px solid #30363d; }
+tr:nth-child(even) { background: #161b22; }
+.tip { background: #0d1d30; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.exercise { background: #0d2818; border-left: 4px solid #238636; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.svg-diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; text-align: center; }
+.svg-diagram svg { max-width: 100%; height: auto; }
+.ascii { background: #161b22; border: 1px solid #30363d; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82em; line-height: 1.5; padding: 16px; overflow-x: auto; margin: 16px 0; white-space: pre; border-radius: 6px; }
+ul, ol { margin: 8px 0 8px 24px; }
+li { margin: 4px 0; }
+a { color: #58a6ff; }
+.keyword { color: #ff7b72; } .string { color: #a5d6ff; } .comment { color: #8b949e; } .cmd { color: #79c0ff; }
+.footer { text-align: center; color: #484f58; margin-top: 48px; padding: 24px 0; border-top: 1px solid #21262d; font-size: 0.9em; }
+.footer a { color: #58a6ff; }
+.next-prev { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 16px; border-top: 1px solid #21262d; }
+.next-prev a { padding: 8px 16px; background: #21262d; border-radius: 6px; }
+.tag { display: inline-block; background: #388bfd22; color: #58a6ff; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+.badge-blue { background: #1f6feb33; color: #58a6ff; }
+.badge-green { background: #23863633; color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="03-KV-Cache调度与路由.html">&larr; 03-KV-Cache调度与路由</a><span>推理服务架构</span><a href="05-成本优化策略.html">05-成本优化策略 &rarr;</a></div>
+<div class="container">
+
+<h1>☁️ 多模型与 Serverless 推理</h1>
+
+<h2>1. 背景与动机</h2>
+<h3>背景与动机</h3><div class="tip"><strong>💡 通俗类比：</strong>多模型共享GPU就像合租公寓——MIG(硬件分区)相当于把大公寓隔成独立小房间(互不干扰但空间固定)，MPS(进程级共享)相当于共用客厅(灵活但可能互相打扰)，时间片共享相当于轮流使用(公平但有切换开销)。选择哪种方式取决于你的"室友"(模型)数量和"生活习惯"(请求模式)。</div>
+"><strong>通俗类比：</strong>背景与动机</div>
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p>生产环境中，一个推理服务通常需要支持 <strong>多个模型</strong>（不同版本、不同大小、不同用途），且请求量有明显的波峰波谷。如何高效利用 GPU 资源是核心挑战。</p>
+
+<h2>2. 多模型共享 GPU</h2>
+
+
+
+
+
+
+<div class="warn"><strong>⚠️ 常见误区：</strong>MIG(多实例GPU)的分区是静态的，一旦配置就不能动态调整。如果你把A100分成7个10GB实例，但某个模型需要20GB，你必须重新配置整个GPU。这意味着MIG适合模型大小和负载都很稳定的场景，不适合动态变化的多模型服务。</div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>2.1 GPU 分区技术</h3>
+<table>
+<tr><th>技术</th><th>原理</th><th>粒度</th><th>适用场景</th></tr>
+<tr><td>MIG (Multi-Instance GPU)</td><td>将一块 A100/H100 分为最多 7 个独立实例</td><td>硬件级</td><td>多模型固定分配</td></tr>
+<tr><td>MPS (Multi-Process Service)</td><td>多进程共享一块 GPU</td><td>进程级</td><td>小模型共享</td></tr>
+<tr><td>时间片共享</td><td>多个推理进程轮流使用 GPU</td><td>OS 级</td><td>开发测试</td></tr>
+<tr><td>容器级共享</td><td>K8s 中多个 pod 共享 GPU</td><td>调度级</td><td>云环境</td></tr>
+</table>
+
+<h3>2.2 MIG 详解</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 520 320" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <rect x="10" y="10" width="500" height="300" rx="8" fill="#161b22" stroke="#22d3ee" stroke-width="2"/>
+  <text x="260" y="35" text-anchor="middle" fill="#22d3ee" font-size="14" font-weight="bold">A100 80GB</text>
+  <!-- Row 1 -->
+  <rect x="25" y="50" width="145" height="70" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="97" y="72" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">MIG 0</text>
+  <text x="97" y="90" text-anchor="middle" fill="#8b949e" font-size="11">10GB · 7B 模型</text>
+  <rect x="185" y="50" width="145" height="70" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="257" y="72" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">MIG 1</text>
+  <text x="257" y="90" text-anchor="middle" fill="#8b949e" font-size="11">10GB · 7B 模型</text>
+  <rect x="345" y="50" width="145" height="70" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="417" y="72" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">MIG 2</text>
+  <text x="417" y="90" text-anchor="middle" fill="#8b949e" font-size="11">10GB · Embedding</text>
+  <!-- Row 2 -->
+  <rect x="25" y="135" width="145" height="70" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="97" y="157" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">MIG 3</text>
+  <text x="97" y="175" text-anchor="middle" fill="#8b949e" font-size="11">10GB · 7B 模型</text>
+  <rect x="185" y="135" width="145" height="70" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="257" y="157" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">MIG 4</text>
+  <text x="257" y="175" text-anchor="middle" fill="#8b949e" font-size="11">10GB · Reranker</text>
+  <rect x="345" y="135" width="145" height="70" rx="6" fill="#0d1117" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="417" y="157" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">MIG 5</text>
+  <text x="417" y="175" text-anchor="middle" fill="#8b949e" font-size="11">10GB · 小模型</text>
+  <!-- Row 3 -->
+  <rect x="25" y="220" width="145" height="70" rx="6" fill="#0d1117" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="97" y="242" text-anchor="middle" fill="#a78bfa" font-size="12" font-weight="bold">MIG 6</text>
+  <text x="97" y="260" text-anchor="middle" fill="#8b949e" font-size="11">20GB · 13B 模型</text>
+</svg>
+</div>
+
+<h3>2.3 模型复用策略</h3>
+<ul>
+<li><strong>热模型</strong>：常驻 GPU，始终有实例运行</li>
+<li><strong>温模型</strong>：加载在 GPU 但不运行，按需激活</li>
+<li><strong>冷模型</strong>：存储在 CPU/NVMe，按需加载到 GPU</li>
+</ul>
+
+<h2>3. Serverless 推理</h2>
+
+
+
+
+
+
+<div class="warn"><strong>⚠️ 常见误区：</strong>Serverless推理的Cold Start问题比传统Serverless函数严重得多。普通Lambda函数冷启动可能只需100ms，但加载一个7B模型到GPU需要2-5秒，70B模型需要20-50秒。如果SLA要求TTFT&lt;1秒，冷启动期间的请求会超时。必须使用模型池或Snapshot等预热策略。</div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>3.1 Serverless 的动机</h3>
+<p>Serverless 推理的核心价值：<strong>按使用量付费，无需管理基础设施</strong>。对于间歇性请求（如内部工具、低流量 API），Serverless 比常驻实例更经济。</p>
+
+<h3>3.2 Cold Start 问题</h3>
+<div class="ascii">
+Cold Start 时间分解:
+
+模型加载 (最慢):
+  7B FP16 (14GB): 从 NVMe 加载 ≈ 2-5s
+  70B FP16 (140GB): 从 NVMe 加载 ≈ 20-50s
+  70B INT4 (35GB): 从 NVMe 加载 ≈ 5-10s
+
+编译优化:
+  torch.compile warmup: 5-30s (取决于模型大小)
+  CUDA Graph 录制: 1-5s
+
+总计 Cold Start:
+  最佳 (7B + 量化 + 缓存): 3-5s
+  典型 (70B + 编译): 30-60s
+  最差 (首次 + 无缓存): 60-120s
+</div>
+
+<h3>3.3 Cold Start 优化策略</h3>
+<table>
+<tr><th>策略</th><th>原理</th><th>效果</th></tr>
+<tr><td>模型池</td><td>预加载模型到 GPU，按需分配</td><td>Cold Start → 0s</td></tr>
+<tr><td>量化</td><td>INT4/INT8 减少模型大小</td><td>加载时间减少 2-4x</td></tr>
+<tr><td>编译缓存</td><td>持久化 torch.compile 结果</td><td>编译时间 30s → 2s</td></tr>
+<tr><td>Snapshot</td><td>GPU 内存快照，直接恢复</td><td>加载时间 → 1-2s</td></tr>
+<tr><td>预热请求</td><td>服务启动时发送 dummy 请求</td><td>首次真实请求无延迟</td></tr>
+</table>
+
+<h2>4. 自动扩缩容</h2>
+
+
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<h3>4.1 扩缩容指标</h3>
+<table>
+<tr><th>指标</th><th>含义</th><th>阈值建议</th></tr>
+<tr><td>队列长度</td><td>等待处理的请求数</td><td>&gt; 10 → 扩容</td></tr>
+<tr><td>GPU 利用率</td><td>GPU 计算单元使用率</td><td>&gt; 80% → 扩容, &lt; 20% → 缩容</td></tr>
+<tr><td>TTFT 延迟</td><td>首 token 延迟</td><td>&gt; SLA → 扩容</td></tr>
+<tr><td>KV Cache 使用率</td><td>KV Cache 占显存比例</td><td>&gt; 90% → 扩容</td></tr>
+</table>
+
+<h3>4.2 扩缩容策略</h3>
+<ul>
+<li><strong>水平扩容</strong>：增加 GPU 实例数量</li>
+<li><strong>垂直扩容</strong>：将小模型实例合并为大模型实例</li>
+<li><strong>预测性扩容</strong>：根据历史流量模式提前扩容</li>
+<li><strong>Spot 实例</strong>：使用抢占式实例降低成本（需要容错机制）</li>
+</ul>
+
+<h2>5. 多模型调度架构</h2>
+于在实际工程中做出更合理的技术选择和优化决策。</p>
+
+<h3>多模型调度架构</h3>
+
+
+
+
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 520 380" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <!-- API Gateway -->
+  <rect x="80" y="10" width="360" height="90" rx="8" fill="#161b22" stroke="#fbbf24" stroke-width="2"/>
+  <text x="260" y="32" text-anchor="middle" fill="#fbbf24" font-size="13" font-weight="bold">API Gateway</text>
+  <rect x="100" y="42" width="140" height="42" rx="5" fill="#0d1117" stroke="#fbbf24" stroke-width="1"/>
+  <text x="170" y="68" text-anchor="middle" fill="#c9d1d9" font-size="11">路由: model=A</text>
+  <rect x="280" y="42" width="140" height="42" rx="5" fill="#0d1117" stroke="#fbbf24" stroke-width="1"/>
+  <text x="350" y="68" text-anchor="middle" fill="#c9d1d9" font-size="11">路由: model=B</text>
+  <!-- Arrows down -->
+  <line x1="170" y1="100" x2="170" y2="140" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arr1)"/>
+  <line x1="350" y1="100" x2="350" y2="140" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arr1)"/>
+  <defs><marker id="arr1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff"/></marker></defs>
+  <!-- Model A GPU Pool -->
+  <rect x="60" y="140" width="220" height="100" rx="8" fill="#161b22" stroke="#22d3ee" stroke-width="2"/>
+  <text x="170" y="162" text-anchor="middle" fill="#22d3ee" font-size="12" font-weight="bold">模型 A GPU Pool</text>
+  <rect x="80" y="175" width="80" height="46" rx="5" fill="#0d1117" stroke="#22d3ee" stroke-width="1"/>
+  <text x="120" y="203" text-anchor="middle" fill="#22d3ee" font-size="11">G0</text>
+  <rect x="180" y="175" width="80" height="46" rx="5" fill="#0d1117" stroke="#22d3ee" stroke-width="1"/>
+  <text x="220" y="203" text-anchor="middle" fill="#22d3ee" font-size="11">G1</text>
+  <!-- Model B GPU Pool -->
+  <rect x="290" y="140" width="170" height="100" rx="8" fill="#161b22" stroke="#34d399" stroke-width="2"/>
+  <text x="375" y="162" text-anchor="middle" fill="#34d399" font-size="12" font-weight="bold">模型 B GPU Pool</text>
+  <rect x="305" y="175" width="65" height="46" rx="5" fill="#0d1117" stroke="#34d399" stroke-width="1"/>
+  <text x="337" y="203" text-anchor="middle" fill="#34d399" font-size="11">G2</text>
+  <rect x="385" y="175" width="65" height="46" rx="5" fill="#0d1117" stroke="#34d399" stroke-width="1"/>
+  <text x="417" y="203" text-anchor="middle" fill="#34d399" font-size="11">G3</text>
+  <!-- Arrows down to model repo -->
+  <line x1="170" y1="240" x2="200" y2="290" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arr1)"/>
+  <line x1="375" y1="240" x2="320" y2="290" stroke="#58a6ff" stroke-width="1.5" marker-end="url(#arr1)"/>
+  <!-- Model Repo -->
+  <rect x="80" y="290" width="360" height="70" rx="8" fill="#161b22" stroke="#a78bfa" stroke-width="2"/>
+  <text x="260" y="320" text-anchor="middle" fill="#a78bfa" font-size="12" font-weight="bold">模型仓库 (S3/NVMe)</text>
+  <text x="260" y="340" text-anchor="middle" fill="#8b949e" font-size="11">Cold 模型按需加载</text>
+</svg>
+</div>
+
+<div class="deep"><strong>背景与动机的技术原理与数学推导：</strong>
+从<strong>底层</strong>硬件角度分析，背景与动机的性能瓶颈通常在于内存带宽而非计算能力。
+<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
+因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
+这一<strong>数学本质</strong>决定了背景与动机的所有优化策略都应围绕减少内存访问展开。
+从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
+是提升算术强度的两大核心手段。
+</div>
+<div class="deep"><strong>背景与动机的系统架构分析：</strong>
+从系统设计的<strong>原理</strong>出发，背景与动机采用分层架构来管理复杂性。
+<strong>为什么</strong>分层是主流选择？<strong>推导</strong>如下：
+设系统有N个组件，全连接交互复杂度为O(N²)，分层后降低到O(N·L)，L为层数。
+<strong>数学本质</strong>上，这是用少量层间通信开销换取大幅降低的组件间耦合。
+在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过标准接口解耦——
+这类似于TCP/IP协议栈的设计<strong>原理</strong>，每层独立优化，层内改动不影响整体。
+</div>
+<h3>背景与动机的性能优化策略</h3>
+<p>优化背景与动机性能需要系统性的方法论。首先用profiling工具定位瓶颈——
+从<strong>底层</strong>看，GPU推理的瓶颈通常表现为三种模式：
+1) 计算受限（GPU利用率>80%，SM活跃）；
+2) 内存受限（带宽利用率高，但计算单元空闲）；
+3) 通信受限（多卡场景，NCCL等待时间长）。
+<strong>为什么</strong>要区分这三种模式？因为优化策略完全不同：
+计算受限→减少FLOPs（量化/剪枝）；内存受限→减少数据搬运（算子融合/缓存）；
+通信受限→优化通信拓扑（梯度压缩/异步通信）。
+这一<strong>原理</strong>是推理性能调优的基础框架。</p>
+<pre><code class="language-python"># 背景与动机 - 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    """测量推理延迟和吞吐"""
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    print(f"Throughput: {1/elapsed:.0f} req/s")
+    return elapsed
+</code></pre>
+<pre><code class="language-python"># 背景与动机 - 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    """测量推理延迟和吞吐"""
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    print(f"Throughput: {1/elapsed:.0f} req/s")
+    return elapsed
+</code></pre>
+<div class="ascii">
+背景与动机 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+  PCIe传输       Tensor Core          结果回传
+</div>
+<div class="tip"><strong>相关章节：</strong>
+背景与动机与以下内容密切相关：<a href="01-推理服务架构总览.html">01-推理服务架构总览</a> | <a href="02-Disaggregated-Prefill-Decode.html">02-Disaggregated-Prefill-Decode</a> | <a href="03-KV-Cache调度与路由.html">03-KV-Cache调度与路由</a>。
+建议结合这些章节一起学习，形成完整的知识体系。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+在学习背景与动机时，建议先建立整体认知框架，再深入细节。
+用最小化实验验证核心概念——比如用小模型+短序列跑通完整流程，
+确认理解正确后再扩展到生产规模。记录每一步的性能数据，
+建立自己的"优化知识库"，这些经验在后续项目中会反复用到。
+</div>
+<div class="exercise">
+<strong>练习 1</strong>：计算你的推理服务的 Cold Start 预算。如果 SLA 要求 TTFT < 5s，你能接受多大的模型加载时间？<br><br>
+<strong>练习 2</strong>：在 K8s 中部署一个 vLLM 服务，配置 HPA (Horizontal Pod Autoscaler) 基于 GPU 利用率自动扩缩容。
+</div>
+
+<h2>术语速查表</h2>
+<h3>术语速查表</h3>
+
+
+<div class="deep"><strong>深入探讨：</strong>从系统设计的<strong>底层原理</strong>看，背景与动机的核心挑战是在性能、精度和资源三者之间寻找最优平衡。<strong>为什么</strong>不能同时最大化三者？因为提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），减少资源又会降低性能。理解这个三角约束，就能推导出大多数技术选择背后的逻辑。</div>
+<div class="ascii"><pre>LLM 推理全流程
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
+│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
+└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
+                                       └──────────────┘    └────┬─────┘
+                     ┌──────────────┐    ┌──────────────┐      │
+                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
+                     │  "你好！..." │    │  解码        │
+                     └──────────────┘    └──────────────┘</pre></div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<table>
+<tr><th>术语</th><th>含义</th></tr>
+<tr><td>MIG</td><td>Multi-Instance GPU，NVIDIA GPU 分区技术</td></tr>
+<tr><td>MPS</td><td>Multi-Process Service，多进程共享 GPU</td></tr>
+<tr><td>Cold Start</td><td>Serverless 函数首次调用的延迟</td></tr>
+<tr><td>HPA</td><td>Horizontal Pod Autoscaler，K8s 自动扩缩容</td></tr>
+<tr><td>Spot Instance</td><td>抢占式实例，便宜但可能被回收</td></tr>
+</table>
+
+</div>
+<div class="footer"><p><a href="index.html">返回推理服务架构总览</a> | <a href="../index.html">返回学习目录</a></p></div>
+
+<div class="tip"><strong>向前串联：</strong>
+背景与动机的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习背景与动机建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+
+<div class="tip"><strong>📚 前置知识：</strong>学习本章内容前，建议先掌握Transformer注意力机制原理、KV Cache的基本概念、GPU内存层次结构(HBM/L2/SRAM)。这些基础知识是理解后续优化策略的前提。</div>
+</body>
+</html>

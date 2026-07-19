@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04 · 数据去重</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.7}a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}.nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;justify-content:space-between;position:sticky;top:0;z-index:100}.nav span{color:#8b949e;font-size:0.9em}.nav a{color:#58a6ff}.container{max-width:900px;margin:0 auto;padding:30px 20px}h1{color:#58a6ff;font-size:2em;margin:20px 0 10px}h2{color:#f0f6fc;border-left:4px solid #58a6ff;padding-left:14px;margin:35px 0 15px;font-size:1.4em}h3{color:#d2a8ff;margin:20px 0 10px;font-size:1.15em}p{margin:10px 0}ul,ol{margin:10px 0 10px 24px}li{margin:4px 0}code{background:#21262d;color:#79c0ff;padding:2px 6px;border-radius:4px;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;overflow-x:auto;margin:12px 0}pre code{background:none;color:#c9d1d9;padding:0}table{border-collapse:collapse;width:100%;margin:12px 0}th{background:#161b22;color:#58a6ff;text-align:left;padding:10px 14px;border:1px solid #30363d}td{padding:10px 14px;border:1px solid #21262d}tr:nth-child(even){background:#161b2233}.tip{background:#0d1d30;border-left:4px solid #58a6ff;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.tip strong{color:#58a6ff}.warn{background:#2d1b00;border-left:4px solid #d29922;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.warn strong{color:#d29922}.exercise{background:#0d2818;border-left:4px solid #238636;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.exercise strong{color:#3fb950}.deep{background:#1a1024;border-left:4px solid #a371f7;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.deep strong{color:#a371f7}.ascii{background:#161b22;border:1px solid #30363d;padding:16px;font-family:monospace;font-size:0.85em;line-height:1.4;overflow-x:auto;margin:12px 0;white-space:pre}.formula{background:#161b22;border:1px solid #30363d;padding:14px 18px;border-radius:6px;margin:12px 0;text-align:center;font-size:1.1em;color:#d2a8ff}.footer{text-align:center;padding:30px;border-top:1px solid #21262d;margin-top:30px;color:#8b949e;font-size:0.85em}.glossary{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin:16px 0}.glossary dt{color:#58a6ff;font-weight:bold;margin-top:8px}.glossary dd{color:#8b949e;margin-left:16px}</style>
+</head>
+<body>
+<div class="nav"><a href="03-数据清洗与质量过滤.html">&larr; 03-数据清洗与质量过滤</a><span>模块 04/08 · 数据去重</span><a href="05-合成数据生成.html">05-合成数据生成 &rarr;</a></div>
+<div class="container">
+
+<h1>🔄 04 · 数据去重 — 消除重复，防止记忆</h1>
+<p style="color:#8b949e;font-size:1.05em;">精确去重 · MinHash+LSH · Suffix Array · 去重粒度与效果评估</p>
+
+<h2>一、背景与动机</h2>
+<p>网页数据中存在大量重复：同一篇文章被多个网站转载、模板页面批量生成、导航栏和页脚反复出现。研究表明，Common Crawl 中约 30-50% 的内容是重复或近重复的。</p>
+<p>重复数据的危害：① 模型过拟合到重复内容 ② 训练效率降低(重复数据浪费计算) ③ 模型可能"记忆"训练数据(隐私风险) ④ 评估结果失真。</p>
+
+<div class="tip"><strong>💡 关键发现：</strong>Lee et al. (2022) 发现，去重后模型性能显著提升，同时训练数据量减少 10-30%。去重是"免费的午餐"——用更少的数据达到更好的效果。</div>
+
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>去重策略的常见坑：① 去重粒度选择——文档级去重效率高但可能保留部分重复的文档（如不同版本的同一篇文章），子串级去重更精细但计算成本高 10-100x；② 去重阈值（Jaccard similarity threshold）的选择直接影响精确率和召回率——0.8 通常是个好的起点，但多语言数据可能需要调整；③ 去重后的数据分布可能发生变化（如某些主题的文章被大量转载后只剩一篇），需要检查数据多样性。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>去重的理论基础来自 Lee et al. 2022 的关键发现：C4 数据集中约 30% 的内容是重复或近重复的，去重后模型性能显著提升（相同训练步数下 loss 更低）。这个发现的深层含义是：重复数据不仅浪费计算，还会让模型"记忆"重复内容而非学习泛化能力。去重是"免费的午餐"——用更少的数据达到更好的效果，且不需要额外的训练计算。</div>
+<h2>二、名字由来</h2>
+<p><strong>Deduplication(去重)</strong>：De(去除) + duplication(重复)。</p>
+<p><strong>MinHash</strong>：最小哈希——用多个哈希函数的最小值来近似估计集合的 Jaccard 相似度。</p>
+<p><strong>LSH</strong>：Locality-Sensitive Hashing(局部敏感哈希)——相似的文档更可能被哈希到同一个桶中。</p>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>MinHash + LSH 的核心概念速记：MinHash = 用多个哈希函数的最小值近似 Jaccard 相似度（概率性估计），LSH = 用 band-and-row 技巧将相似文档哈希到同一个桶（加速候选对查找）。实际实现推荐用 <code>datasketch</code> 库（Python），它封装了 MinHash 和 LSH 的完整流程，API 简洁且性能优秀。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>MinHash/LSH 的常见坑：① MinHash 的哈希函数数量（num_perm）影响估计精度——128 个是经验最优值，太少精度不够，太多计算慢且内存占用大；② LSH 的 band 参数（b）和 row 参数（r）需要满足 b×r=num_perm，且 b 和 r 的选择直接影响精确率和召回率的权衡；③ n-gram 的窗口大小（如 5-gram）会影响去重效果——太小会把停用词匹配当作重复，太大会漏掉部分重复。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>MinHash 的数学本质：P(h_min(A) = h_min(B)) = Jaccard(A, B)。这个等式的关键假设是哈希函数是"完全随机"的——每个元素被映射到任意值的概率相等。在实践中，用 128 个独立的哈希函数就能得到足够精确的 Jaccard 估计（标准差 ≈ 0.05）。LSH 的 band-and-row 技巧将 O(N²) 的成对比较降到 O(N)——通过将签名分成 b 个 band，每个 band 有 r 行，只有当至少一个 band 完全匹配时才认为两个文档是候选对。</div>
+<h2>三、核心原理</h2>
+
+<h3>3.1 去重方法分类</h3>
+<div class="svg-diagram"><svg viewBox="0 0 680 460" xmlns="http://www.w3.org/2000/svg" style="font-family:'Cascadia Code','Fira Code',monospace">
+<text x="340" y="25" fill="#58a6ff" font-size="15" font-weight="bold" text-anchor="middle">去重方法的层次</text>
+<!-- Exact -->
+<rect x="60" y="45" width="560" height="90" rx="8" fill="#161b22" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="80" y="70" fill="#22d3ee" font-size="13" font-weight="bold">精确去重 (Exact Deduplication)</text>
+<text x="80" y="90" fill="#c9d1d9" font-size="11.5">• URL 去重: 相同URL → 相同内容</text>
+<text x="80" y="108" fill="#c9d1d9" font-size="11.5">• 哈希去重: MD5/SHA256 完全匹配</text>
+<text x="80" y="126" fill="#8b949e" font-size="11">速度快，但只能找完全相同的文档</text>
+<!-- Arrow 1 -->
+<line x1="340" y1="135" x2="340" y2="170" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+<!-- Fuzzy -->
+<rect x="60" y="175" width="560" height="90" rx="8" fill="#161b22" stroke="#34d399" stroke-width="1.5"/>
+<text x="80" y="200" fill="#34d399" font-size="13" font-weight="bold">模糊去重 (Fuzzy/Approximate Dedup)</text>
+<text x="80" y="220" fill="#c9d1d9" font-size="11.5">• MinHash + LSH: 近似相似文档</text>
+<text x="80" y="238" fill="#c9d1d9" font-size="11.5">• SimHash: 局部敏感哈希变体</text>
+<text x="80" y="256" fill="#8b949e" font-size="11">可以找到高度相似但不完全相同的文档</text>
+<!-- Arrow 2 -->
+<line x1="340" y1="265" x2="340" y2="300" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+<!-- Substring -->
+<rect x="60" y="305" width="560" height="90" rx="8" fill="#161b22" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="80" y="330" fill="#a78bfa" font-size="13" font-weight="bold">子串去重 (Substring Deduplication)</text>
+<text x="80" y="350" fill="#c9d1d9" font-size="11.5">• Suffix Array: 找到重复的子串</text>
+<text x="80" y="368" fill="#c9d1d9" font-size="11.5">• 去掉文档中重复的段落/句子</text>
+<text x="80" y="386" fill="#8b949e" font-size="11">最精细但计算量最大</text>
+<!-- Arrow marker -->
+<defs><marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#8b949e"/></marker></defs>
+<!-- Speed/precision labels -->
+<text x="640" y="90" fill="#22d3ee" font-size="10" text-anchor="end">⚡ 速度: 极快</text>
+<text x="640" y="220" fill="#34d399" font-size="10" text-anchor="end">⚖ 速度: 快</text>
+<text x="640" y="350" fill="#a78bfa" font-size="10" text-anchor="end">🔬 速度: 慢</text>
+</svg></div>
+
+<h3>3.2 MinHash 算法详解</h3>
+<p>MinHash 是估计两个集合 Jaccard 相似度的高效方法：</p>
+<div class="formula">Jaccard(A, B) = |A ∩ B| / |A ∪ B|<br>
+MinHash: 对每个哈希函数 h, h_min(A) = min{h(x) : x ∈ A}<br>
+P(h_min(A) = h_min(B)) = Jaccard(A, B)</div>
+
+<div class="svg-diagram"><svg viewBox="0 0 700 380" xmlns="http://www.w3.org/2000/svg" style="font-family:'Cascadia Code','Fira Code',monospace">
+<text x="350" y="22" fill="#58a6ff" font-size="14" font-weight="bold" text-anchor="middle">MinHash 计算过程</text>
+<!-- Doc A -->
+<rect x="20" y="40" width="320" height="50" rx="6" fill="#161b22" stroke="#22d3ee"/>
+<text x="30" y="60" fill="#22d3ee" font-size="11" font-weight="bold">文档 A:</text>
+<text x="30" y="78" fill="#c9d1d9" font-size="11">"the cat sat on the mat"</text>
+<!-- Doc B -->
+<rect x="360" y="40" width="320" height="50" rx="6" fill="#161b22" stroke="#34d399"/>
+<text x="370" y="60" fill="#34d399" font-size="11" font-weight="bold">文档 B:</text>
+<text x="370" y="78" fill="#c9d1d9" font-size="11">"the cat sat on a mat"</text>
+<!-- Step 1 -->
+<rect x="20" y="105" width="660" height="95" rx="6" fill="#161b22" stroke="#30363d"/>
+<text x="30" y="125" fill="#fbbf24" font-size="12" font-weight="bold">Step 1: 构建 n-gram 集合 (5-gram)</text>
+<text x="30" y="145" fill="#22d3ee" font-size="11">A = {"the cat sat", "cat sat on", "sat on the", "on the mat"}</text>
+<text x="30" y="165" fill="#34d399" font-size="11">B = {"the cat sat", "cat sat on", "sat on a",  "on a mat"}</text>
+<text x="30" y="190" fill="#8b949e" font-size="10">交集: {"the cat sat", "cat sat on"}  |A∩B| = 2, |A∪B| = 6  → Jaccard = 0.33</text>
+<!-- Step 2 -->
+<rect x="20" y="210" width="660" height="155" rx="6" fill="#161b22" stroke="#30363d"/>
+<text x="30" y="230" fill="#fbbf24" font-size="12" font-weight="bold">Step 2: 用 k 个哈希函数计算 MinHash 签名</text>
+<text x="30" y="252" fill="#c9d1d9" font-size="11">h₁: min_hash(A) = 3, min_hash(B) = 3  →</text><text x="440" y="252" fill="#34d399" font-size="11">匹配 ✓</text>
+<text x="30" y="272" fill="#c9d1d9" font-size="11">h₂: min_hash(A) = 7, min_hash(B) = 7  →</text><text x="440" y="272" fill="#34d399" font-size="11">匹配 ✓</text>
+<text x="30" y="292" fill="#c9d1d9" font-size="11">h₃: min_hash(A) = 2, min_hash(B) = 5  →</text><text x="440" y="292" fill="#f87171" font-size="11">不匹配 ✗</text>
+<text x="30" y="312" fill="#8b949e" font-size="11">...</text>
+<rect x="30" y="325" width="400" height="28" rx="4" fill="#0d1d30" stroke="#58a6ff"/>
+<text x="340" y="344" fill="#58a6ff" font-size="11" text-anchor="middle">签名匹配比例 ≈ Jaccard 相似度  |  128个哈希中120个匹配 → Jaccard ≈ 0.94</text>
+</svg></div>
+
+<h3>3.3 LSH (Locality-Sensitive Hashing)</h3>
+<p>直接比较所有文档对的 MinHash 签名太慢(O(n²))。LSH 将签名分成 b 个 band，每个 band 有 r 行。如果任意一个 band 完全匹配，两个文档就是候选对。</p>
+<div class="svg-diagram"><svg viewBox="0 0 700 380" xmlns="http://www.w3.org/2000/svg" style="font-family:'Cascadia Code','Fira Code',monospace">
+<text x="350" y="22" fill="#58a6ff" font-size="14" font-weight="bold" text-anchor="middle">LSH 的 band/row 参数</text>
+<text x="350" y="42" fill="#8b949e" font-size="11" text-anchor="middle">签名长度 = b × r (如 b=20, r=5 → 100个哈希函数)</text>
+<!-- Bands visualization -->
+<rect x="40" y="55" width="300" height="40" rx="5" fill="#161b22" stroke="#22d3ee"/>
+<text x="50" y="80" fill="#22d3ee" font-size="11">Band 1: [h₁, h₂, h₃, h₄, h₅]</text>
+<rect x="40" y="100" width="300" height="40" rx="5" fill="#161b22" stroke="#34d399"/>
+<text x="50" y="125" fill="#34d399" font-size="11">Band 2: [h₆, h₇, h₈, h₉, h₁₀]</text>
+<rect x="120" y="145" width="140" height="20" rx="3" fill="none" stroke="#8b949e" stroke-dasharray="3,3"/>
+<text x="190" y="160" fill="#8b949e" font-size="11" text-anchor="middle">...</text>
+<rect x="40" y="170" width="300" height="40" rx="5" fill="#161b22" stroke="#a78bfa"/>
+<text x="50" y="195" fill="#a78bfa" font-size="11">Band 20: [h₉₆, h₉₇, h₉₈, h₉₉, h₁₀₀]</text>
+<text x="360" y="105" fill="#fbbf24" font-size="12">← 任一band匹配即为候选对</text>
+<!-- Threshold formula -->
+<rect x="40" y="225" width="620" height="55" rx="6" fill="#1a1024" stroke="#a371f7"/>
+<text x="350" y="248" fill="#d2a8ff" font-size="12" text-anchor="middle">相似度阈值 t ≈ (1/b)^(1/r)</text>
+<text x="200" y="270" fill="#c9d1d9" font-size="11" text-anchor="middle">b=20, r=5 → t ≈ 0.55</text>
+<text x="500" y="270" fill="#c9d1d9" font-size="11" text-anchor="middle">b=10, r=10 → t ≈ 0.79</text>
+<!-- Tuning guide -->
+<rect x="40" y="295" width="620" height="70" rx="6" fill="#161b22" stroke="#30363d"/>
+<text x="50" y="318" fill="#fbbf24" font-size="12" font-weight="bold">调整 b 和 r 可以控制阈值:</text>
+<text x="50" y="340" fill="#c9d1d9" font-size="11">更多 band (b↑) → 更低阈值 → 更多召回但更多误报</text>
+<text x="50" y="356" fill="#c9d1d9" font-size="11">更多 rows (r↑) → 更高阈值 → 更少召回但更精确</text>
+</svg></div>
+
+<h3>3.4 Jaccard 阈值选择</h3>
+<table>
+<tr><th>阈值</th><th>含义</th><th>效果</th><th>典型用途</th></tr>
+<tr><td>0.5</td><td>50% 相似</td><td>激进去重，可能误删</td><td>数据量极大时</td></tr>
+<tr><td>0.7</td><td>70% 相似</td><td>平衡</td><td>常用阈值</td></tr>
+<tr><td>0.8</td><td>80% 相似</td><td>保守</td><td>FineWeb 使用</td></tr>
+<tr><td>0.9</td><td>90% 相似</td><td>只去掉高度重复</td><td>精细去重</td></tr>
+</table>
+
+<h3>3.5 Suffix Array 子串去重</h3>
+<p>Raffel et al. (2020) 提出用 Suffix Array 找到文档中重复的长子串(>50 tokens)，然后删除这些重复子串。</p>
+<div class="svg-diagram"><svg viewBox="0 0 700 300" xmlns="http://www.w3.org/2000/svg" style="font-family:'Cascadia Code','Fira Code',monospace">
+<text x="350" y="22" fill="#58a6ff" font-size="14" font-weight="bold" text-anchor="middle">Suffix Array 去重</text>
+<!-- Input -->
+<rect x="30" y="40" width="640" height="45" rx="6" fill="#161b22" stroke="#22d3ee"/>
+<text x="40" y="60" fill="#22d3ee" font-size="11" font-weight="bold">输入:</text>
+<text x="40" y="78" fill="#c9d1d9" font-size="11">多个文档拼接成一个长字符串:  Doc1#Doc2#Doc3#...</text>
+<!-- Arrow -->
+<line x1="350" y1="85" x2="350" y2="105" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arr2)"/>
+<!-- Build -->
+<rect x="30" y="108" width="640" height="50" rx="6" fill="#161b22" stroke="#34d399"/>
+<text x="40" y="130" fill="#34d399" font-size="11" font-weight="bold">构建:</text>
+<text x="40" y="148" fill="#c9d1d9" font-size="11">Suffix Array + LCP Array  |  LCP[i] = suffix[i] 和 suffix[i-1] 的最长公共前缀长度</text>
+<!-- Arrow -->
+<line x1="350" y1="158" x2="350" y2="178" stroke="#8b949e" stroke-width="1.5" marker-end="url(#arr2)"/>
+<!-- Detect -->
+<rect x="30" y="181" width="640" height="45" rx="6" fill="#161b22" stroke="#fbbf24"/>
+<text x="40" y="203" fill="#fbbf24" font-size="11" font-weight="bold">检测:</text>
+<text x="40" y="218" fill="#c9d1d9" font-size="11">如果 LCP[i] ≥ 阈值(如50 tokens) → 重复子串 → 标记并删除</text>
+<!-- Pros/Cons -->
+<rect x="30" y="245" width="310" height="40" rx="6" fill="#0d2818" stroke="#34d399"/>
+<text x="40" y="270" fill="#34d399" font-size="11">✓ 能找到任意位置的重复子串</text>
+<rect x="360" y="245" width="310" height="40" rx="6" fill="#2d1b00" stroke="#d29922"/>
+<text x="370" y="270" fill="#d29922" font-size="11">✗ 计算量大，需所有文档拼接在内存</text>
+<defs><marker id="arr2" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto"><polygon points="0 0, 10 3.5, 0 7" fill="#8b949e"/></marker></defs>
+</svg></div>
+
+<h3>3.6 去重粒度</h3>
+<table>
+<tr><th>粒度</th><th>方法</th><th>优点</th><th>缺点</th></tr>
+<tr><td>URL 级</td><td>URL 哈希去重</td><td>极快</td><td>同一内容不同URL漏掉</td></tr>
+<tr><td>文档级</td><td>MinHash/哈希</td><td>标准方法</td><td>部分重复的文档保留</td></tr>
+<tr><td>段落级</td><td>段落 MinHash</td><td>更精细</td><td>复杂度高</td></tr>
+<tr><td>子串级</td><td>Suffix Array</td><td>最精细</td><td>计算量大</td></tr>
+</table>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>去重方法选择指南：① URL 去重——最快，但只能去除完全相同的 URL，对镜像站无效；② MinHash+LSH——标准方法，适合文档级去重，推荐 Jaccard 阈值 0.8；③ Suffix Array——最精细，适合子串级去重，但计算成本高（O(n log n)）。建议组合使用：先 URL 去重 → 再 MinHash+LSH → 最后 Suffix Array。实际中 MinHash+LSH 通常就能去除 80%+ 的重复。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>去重方法选择的常见坑：① 不要一开始就用 Suffix Array 做子串去重——计算成本太高，先用 MinHash+LSH 做文档级去重作为 baseline；② SimHash 和 MinHash 解决的问题不同——SimHash 估计余弦相似度，MinHash 估计 Jaccard 相似度，两者不能互换；③ 去重不是越多越好——过度去重（阈值太低）可能删除有价值的数据变体（如同一问题的不同表述）。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>去重方法的层次结构反映了精度-效率的权衡：URL 去重（O(N)，只能找完全相同的文档）→ MinHash+LSH（O(N)，能找近似重复，有 false positive）→ Suffix Array（O(N log N)，能找到所有重复子串，无 false positive）。这个层次结构的深层含义是：在大规模数据处理中，"足够好"的近似方法通常比"完美"的精确方法更实用——因为数据规模会将计算成本的差异放大几个数量级。</div>
+<h2>四、技术细节</h2>
+
+<h3>4.1 去重工具对比</h3>
+<table>
+<tr><th>工具</th><th>方法</th><th>语言</th><th>速度</th><th>特点</th></tr>
+<tr><td>text-dedup</td><td>MinHash+LSH+Suffix</td><td>Python</td><td>中</td><td>功能全面</td></tr>
+<tr><td>datasketch</td><td>MinHash+LSH</td><td>Python</td><td>快</td><td>库形式</td></tr>
+<tr><td>deduplicate-text-datasets</td><td>Suffix Array</td><td>Python+Rust</td><td>快</td><td>Google出品</td></tr>
+<tr><td>cc-dedup</td><td>MinHash</td><td>Java</td><td>极快</td><td>大规模设计</td></tr>
+</table>
+
+<h3>4.2 去重效果评估</h3>
+<table>
+<tr><th>指标</th><th>描述</th></tr>
+<tr><td>去重率</td><td>被删除的文档/总文档数</td></tr>
+<tr><td>训练效果</td><td>去重后训练的模型 vs 未去重的模型</td></tr>
+<tr><td>多样性</td><td>去重后数据的主题/语言分布是否变化</td></tr>
+<tr><td>误删率</td><td>人工检查被删除文档中有价值的比例</td></tr>
+</table>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>去重工程实现要点：① 大规模去重用 MapReduce/Spark 实现——Map 阶段计算每个文档的 MinHash 签名，Reduce 阶段用 LSH 找候选对并验证；② Suffix Array 的内存优化：不需要构建完整的 suffix array，可以用"分块处理"将内存需求从 O(N) 降到 O(N/K)（K 是块数）；③ 去重结果需要持久化——保存去重后的文档 ID 列表，避免每次重新计算。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>技术细节的常见坑：① MinHash 实现中的哈希函数选择——不要用 MD5/SHA256（太慢），推荐用 <code>mmh3</code>（MurmurHash3）或 <code>xxhash</code>，速度快 10x+；② n-gram 的构建要注意边界处理——文档首尾的 n-gram 可能不完整，需要 padding 或截断；③ 多语言数据的去重需要调整 n-gram 窗口——日语/中文等语言的字符级 n-gram 窗口应比英语小（2-3 而非 5）。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>去重技术的演进：早期用精确哈希（MD5）做文档级去重（只能找完全相同的文档）→ MinHash+LSH（2000s）引入了近似去重能力 → Suffix Array（2010s）实现了子串级去重 → 神经去重（2020s）用 embedding 相似度做语义去重。每代技术都在精度和效率之间找到新的平衡点。当前的趋势是"语义去重"——不仅去除字面重复，还去除语义重复（如同一事实的不同表述）。</div>
+<h2>五、使用场景</h2>
+<ul>
+<li><strong>预训练数据准备</strong>：大规模去重是必做步骤</li>
+<li><strong>评测集去污染</strong>：去掉与训练集重复的评测样本</li>
+<li><strong>增量数据更新</strong>：新爬取数据与已有数据去重</li>
+<li><strong>多语言去重</strong>：跨语言翻译导致的重复</li>
+</ul>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>去重工具推荐：① <code>datasketch</code>（Python）——MinHash+LSH 的标准实现，适合中小规模数据；② <code>text-dedup</code>（Python）——封装了 MinHash、SimHash、Suffix Array 等多种方法，API 统一；③ <code>deduplicate-text-datasets</code>（Google）——专为大规模网页数据设计，基于 Suffix Array；④ Spark 的 <code>approxNearestNeighbors</code>——分布式 MinHash 实现，适合 TB 级数据。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>使用场景的常见坑：① 去重必须在数据清洗之后进行——先过滤低质量内容（如广告、导航栏），再去重，否则会保留大量低质量的重复模板页面；② 去重粒度与数据源相关——Common Crawl 等网页数据的重复率高（30-50%），学术文献的重复率低（<5%），代码数据的重复率中等（10-20%）；③ 去重后的数据量减少需要相应调整训练超参数（如学习率 schedule）。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>去重在数据工程中的位置：数据采集 → 质量过滤 → 去重 → 数据配比 → 训练。去重处于"质量过滤"之后，是因为低质量内容（如广告、模板页面）的重复不应该被保留（应该先被过滤掉）。去重处于"数据配比"之前，是因为去重会改变各数据源的比例（某些数据源的重复率更高），需要在去重后重新评估数据配比。</div>
+<h2>六、相似技术对比</h2>
+<table>
+<tr><th>对比</th><th>精确哈希</th><th>MinHash+LSH</th><th>Suffix Array</th></tr>
+<tr><td>粒度</td><td>文档(完全相同)</td><td>文档(近似)</td><td>子串</td></tr>
+<tr><td>速度</td><td>极快</td><td>快</td><td>慢</td></tr>
+<tr><td>召回率</td><td>只找完全重复</td><td>找近似重复</td><td>找所有重复子串</td></tr>
+<tr><td>精度</td><td>100%</td><td>~95%(取决于参数)</td><td>~99%</td></tr>
+<tr><td>适用场景</td><td>URL去重</td><td>文档级模糊去重</td><td>精细去重</td></tr>
+</table>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>去重方法对比速查：MinHash（Jaccard 相似度，适合集合比较）vs SimHash（余弦相似度，适合向量比较）vs BM25（检索导向，适合去重+排序）。实际推荐：文档级去重用 MinHash+LSH（最成熟），语义去重用 embedding 相似度（sentence-transformers），子串去重用 Suffix Array（最精确）。不要混淆——SimHash 不是 MinHash 的替代品，两者解决不同的相似度度量问题。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>相似技术对比的常见坑：① MinHash 和 SimHash 的适用场景不同——MinHash 估计 Jaccard 相似度（适合短文本、n-gram 集合），SimHash 估计余弦相似度（适合长文本、TF-IDF 向量）；② BM25 是检索算法而非去重算法——它计算查询和文档的相关性，不能直接用于去重；③ Embedding 相似度（如 sentence-transformers）可以做语义去重，但计算成本比 MinHash 高 100x+，只适合小规模数据或作为后处理步骤。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>去重方法的技术演进：精确哈希（1990s）→ MinHash+LSH（2000s，Broder et al.）→ SimHash（2007，Google 用于网页去重）→ Suffix Array（2010s，Lee et al. 用于训练数据去重）→ Neural Dedup（2020s，用 embedding 做语义去重）。每代技术都在解决前一代的局限：精确哈希只能找完全相同的文档，MinHash 引入了近似匹配，Suffix Array 引入了子串级匹配，Neural Dedup 引入了语义级匹配。</div>
+<h2>七、关联技术</h2>
+<ul>
+<li><strong>数据清洗(上一章)</strong>：去重通常在清洗流程中进行</li>
+<li><strong>数据配比(模块06)</strong>：去重后各领域数据比例可能变化</li>
+<li><strong>去污染(模块07)</strong>：评测集去重是去污染的特例</li>
+</ul>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>去重与其他数据处理步骤的关系：① 质量过滤（在去重之前）→ 去除低质量内容后再去重，效率更高；② 数据配比（在去重之后）→ 去重会改变各数据源的比例，需要重新调整；③ 数据增强（在去重之后）→ 去重后可以用 paraphrasing 等方法生成数据变体，补充被删除的多样性。建议流程：采集 → 过滤 → 去重 → 配比 → 增强 → 训练。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>关联技术的常见坑：① 去重和质量过滤的顺序很重要——先去重再过滤会保留大量低质量的重复内容（因为去重只看相似度，不看质量），推荐先过滤再去重；② 去重后的数据多样性检查——某些主题的文章被大量转载后可能只剩一篇，导致模型在该主题上的训练数据不足；③ 去重结果需要与下游任务对齐——如果下游任务是问答，去重时应保留同一问题的不同答案（它们不是真正的"重复"）。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>去重在数据工程中的"木桶效应"：如果去重不彻底，模型会记忆重复内容（浪费计算+隐私风险）；如果去重过度，模型会缺乏数据多样性（泛化能力差）。最优的去重策略是"分层去重"——URL 去重去除最明显的重复，MinHash+LSH 去除近似重复，Suffix Array 去除残留的重复子串。每一层解决不同粒度的重复问题，组合使用才能达到最佳效果。</div>
+<h2>八、实际效果</h2>
+<table>
+<tr><th>实验</th><th>去重方法</th><th>效果</th></tr>
+<tr><td>Lee et al. 2022</td><td>MinHash 文档级</td><td>去重后 1B 模型 PPL 降低 10%</td></tr>
+<tr><td>FineWeb</td><td>MinHash Jaccard>0.8</td><td>去掉 20% 数据，模型效果不降</td></tr>
+<tr><td>Raffel/T5</td><td>Suffix Array</td><td>C4 去重后效果显著提升</td></tr>
+</table>
+
+<h3>📖 术语速查表</h3>
+<dl class="glossary">
+<dt>Jaccard Similarity</dt><dd>两个集合的交集大小除以并集大小</dd>
+<dt>MinHash</dt><dd>用哈希函数最小值估计Jaccard相似度的方法</dd>
+<dt>LSH</dt><dd>Locality-Sensitive Hashing，相似文档哈希到同一桶</dd>
+<dt>Suffix Array</dt><dd>字符串所有后缀的排序数组，用于高效查找重复子串</dd>
+<dt>Band/Row</dt><dd>LSH的参数，控制相似度阈值</dd>
+</dl>
+
+<div class="warn"><strong>常见误区：</strong>① 认为去重会丢失信息——实际上，去重只删除"完全相同"或"高度相似"的内容，保留的是独特的信息，去重后模型性能通常更好；② 忽略去重粒度的影响——文档级去重和段落级去重效果差异很大，段落级去重更精细但计算成本更高。</div>
+
+<div class="deep"><strong>深入探讨：</strong>去重的"免费午餐"现象引出一个深层问题：为什么重复数据有害？一种解释是"记忆假说"——模型会逐字记忆重复出现的文本，而不是学习泛化的语言能力。另一种解释是"分布偏移假说"——重复数据扭曲了训练数据的分布，让模型过度关注重复出现的模式。无论哪种解释，去重都是必要的。有趣的是，去重甚至可以帮助减少"训练数据提取攻击"（membership inference attack）的风险。</div>
+
+<div class="tip"><strong>向前串联：</strong>
+一、背景与动机的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<pre><code class="language-python"># 一、背景与动机 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="ascii">
+一、背景与动机 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+</div>
+<div class="tip"><strong>相关章节：</strong>
+一、背景与动机与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+一、背景与动机与以下内容密切相关：<a href="01-训练数据总览.html">01-训练数据总览</a> | <a href="02-数据采集与来源.html">02-数据采集与来源</a> | <a href="03-数据清洗与质量过滤.html">03-数据清洗与质量过滤</a>。建议结合学习。
+</div>
+<div class="ascii">
+一、背景与动机 性能分析 (屋顶模型)
+  计算吞吐  │         ╱ 计算受限区
+  (TFLOPS)  │       ╱
+            │     ╱   ← 实际工作点
+            │   ╱
+            │ ╱ 带宽受限区
+            │╱
+            └──────────────── 带宽利用率
+  转折点 = 峰值算力 / 峰值带宽
+</div>
+<pre><code class="language-python"># 一、背景与动机 - 性能基准测试
+import torch, time
+def benchmark(model, x, n=100):
+    for _ in range(10): model(x)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(n): model(x)
+    torch.cuda.synchronize()
+    print(f"Latency: {(time.perf_counter()-t0)/n*1000:.2f}ms")
+</code></pre>
+<div class="exercise"><strong>✏️ 练习题：</strong>
+<ol>
+<li>MinHash 为什么能用哈希函数最小值来估计 Jaccard 相似度？请给出数学证明。</li>
+<li>如果 LSH 参数 b=20, r=5，相似度为 0.8 的两个文档被检测为候选对的概率是多少？</li>
+<li>为什么 FineWeb 选择 Jaccard > 0.8 作为去重阈值？更高或更低的阈值各有什么风险？</li>
+</ol></div>
+
+</div>
+
+<div class="tip"><strong>💡 实用技巧：</strong>去重效果评估方法：① 用精确去重（MD5 哈希）做 baseline，对比 MinHash+LSH 的精确率和召回率；② 人工抽样检查——随机抽取 100 对候选重复对，判断是否真的重复（精确率）；随机抽取 100 对非候选对，判断是否遗漏了重复（召回率）；③ 训练效果评估——对比去重前后模型在相同训练步数下的 loss 和下游任务性能。Lee et al. 的经验：去重后训练效率提升 20-30%。</div>
+<p>MinHash算法的核心数学原理值得深入理解。给定两个集合A和B，它们的Jaccard相似度定义为交集大小除以并集大小。MinHash的巧妙之处在于：对每个随机哈希函数h，取集合中哈希值最小的元素作为该集合的签名。数学上可以证明，两个集合的MinHash值相等的概率恰好等于它们的Jaccard相似度。因此，使用k个独立的哈希函数，统计匹配的比例，就可以无偏地估计Jaccard相似度。这一数学性质使得MinHash成为大规模去重的理论基础。</p>
+
+<p>LSH的band/row参数选择是去重质量的关键。阈值公式t约等于(1/b)的(1/r)次方。以b=20、r=5为例，阈值约为0.55，意味着Jaccard相似度大于0.55的文档对有很高概率被检测到。如果需要更高的阈值如0.8，可以减小b增大r。大规模去重的工程实现需要分布式计算，对于TB级数据，单机无法存储所有的MinHash签名。常用的解决方案包括将数据分片独立计算、使用Spark或Ray等分布式框架并行计算、将签名存储在分布式KV存储中。cc-dedup是目前处理大规模数据最快的开源去重工具之一。</p>
+
+<p>Suffix Array子串去重的实现原理是将所有文档拼接成一个长字符串，然后构建这个字符串的Suffix Array和LCP数组。LCP数组记录了排序后相邻后缀的最长公共前缀长度。如果LCP值超过阈值如50个token，说明存在长度超过阈值的重复子串，可以标记并删除。这种方法可以找到任意位置的重复子串，但需要将所有文档加载到内存中。去重效果的评估不应该只看去重率，还需要评估去重后数据的多样性变化，建议在去重后进行主题聚类分析。去重与去污染的关系也需要特别注意，去重是去掉训练数据内部的重复，去污染是去掉训练数据与评测集的重叠，两者的技术手段相似但目标不同。在工程实践中通常先做去重再做去污染，因为去重可以大幅减少去污染需要扫描的数据量。去重粒度的选择也很重要，URL级去重最快但效果最差，文档级去重是标准方法，子串级去重最精细但计算量最大。</p>
+
+<h2>九、学习路径与去重实践建议</h2>
+<p>去重是数据清洗流程中最关键的子步骤之一。掌握去重技术后，下一步是学习合成数据生成，了解如何用AI补充训练数据的不足。</p>
+
+<div class="ascii">去重方法选择指南:
+
+  ┌─────────────────────────────────────────────────┐
+  │              去重方法选择决策树                     │
+  ├─────────────────────────────────────────────────┤
+  │                                                 │
+  │  数据规模?                                       │
+  │    │                                            │
+  │    ├── < 1GB                                    │
+  │    │     └── 精确哈希去重 (MD5/SHA256)            │
+  │    │         速度快，实现简单                      │
+  │    │                                            │
+  │    ├── 1GB - 1TB                                │
+  │    │     └── MinHash + LSH                      │
+  │    │         文档级模糊去重，平衡精度和速度          │
+  │    │         推荐: 128个哈希函数, b=20, r=5       │
+  │    │                                            │
+  │    └── > 1TB                                    │
+  │          └── 分布式MinHash + 分片处理              │
+  │              或 Spark+MinHash 大规模并行            │
+  │                                                 │
+  │  需要子串级去重?                                   │
+  │    └── Suffix Array (计算量大但最精细)             │
+  │        适合: 去掉文档中重复的段落/模板               │
+  └─────────────────────────────────────────────────┘</div>
+
+<p>MinHash算法的工程实现中有许多细节需要注意。首先，哈希函数的选择对性能影响很大。实践中通常使用MurmurHash3或xxHash等非加密哈希函数，它们的速度比MD5/SHA256快10倍以上，同时哈希分布足够均匀。其次，哈希函数的数量（即签名长度）需要在精度和效率之间权衡：128个哈希函数是常用的默认值，可以在0.5-0.9的Jaccard范围内提供足够的区分度。</p>
+
+<p>LSH的band和row参数选择是去重质量的关键。阈值公式t≈(1/b)^(1/r)给出了理论阈值，但实际效果还取决于数据的相似度分布。如果数据中存在大量"部分重复"（如新闻转载只改了标题），需要降低阈值（增大b或减小r）以提高召回率。如果数据中重复率很低，可以提高阈值以减少误报。建议先在小样本上分析相似度分布，再选择合适的b和r参数。</p>
+
+<p>大规模去重的工程挑战主要在于内存和计算开销。对于TB级数据，单机无法存储所有的MinHash签名。常用的解决方案是：①将数据分片（shard），每个shard独立计算MinHash；②使用Spark或Ray等分布式框架并行计算；③将签名存储在分布式KV存储（如Redis Cluster）中；④使用LSH索引减少候选对数量。cc-dedup（Java实现）是目前处理大规模数据最快的开源去重工具之一，可以在数百节点集群上处理PB级数据。</p>
+
+<p>去重效果的评估不应该只看去重率，还需要评估去重后数据的多样性变化。一个常见的陷阱是：过于激进的去重可能会删除语义相似但表达不同的内容（如同一主题的不同文章），导致数据多样性下降。建议在去重后进行主题聚类分析，比较去重前后各主题的数据量变化。如果某个重要主题的数据量大幅减少，可能需要调整去重阈值或对该主题做特殊处理。</p>
+
+<p>去重与去污染的关系需要特别注意。去重是去掉训练数据内部的重复，去污染是去掉训练数据与评测集的重叠。两者的技术手段相似（都使用n-gram匹配或语义相似度），但目标不同。在工程实践中，通常先做去重再做去污染，因为去重可以大幅减少去污染需要扫描的数据量。此外，去重和去污染应该使用不同的阈值——去重使用相对宽松的阈值（如Jaccard>0.8），而去污染使用更严格的阈值（任何匹配都需要检查）。</p>
+
+<div class="tip"><strong>💡 实践建议：</strong>下一步继续学习合成数据生成，了解如何用AI模型生成补充训练数据。同时建议在本地用datasketch库实现一个简单的MinHash去重实验：取1000篇文档，手动创建一些近似重复，然后用MinHash检测，观察不同阈值下的精确率和召回率。</div>
+
+<div class="warn"><strong>⚠️ 去重注意事项：</strong>去重粒度的选择对最终效果影响很大。URL级去重最快但效果最差（同一内容不同URL无法检测）；文档级去重是标准方法，但可能保留部分重复的文档；子串级去重最精细但计算量最大。建议根据数据特点选择合适的去重粒度，并在多个粒度上组合使用。例如，先做URL级去重去掉明显的重复，再做文档级MinHash去重去掉近似重复，最后用Suffix Array去掉残留的重复子串。</div>
+
+<p>大规模去重的工程实现还需要考虑容错和进度追踪，MinHash计算可能需要数小时甚至数天期间机器可能故障或网络中断，建议将数据分片处理每片独立计算和保存结果这样即使某片失败也可以单独重试而不影响其他片，进度追踪可以通过记录每个分片的处理状态来实现已处理的分片跳过未处理或失败的分片重新处理，这种设计模式在分布式数据处理中非常常见是保证大规模数据工程可靠性的基础，去重完成后应该生成详细的去重报告包含去重率各阈值下的去重效果被删除文档的抽样检查等信息。</p>
+<p>去重后的数据分析也是必不可少的步骤，应该检查去重后各语言各主题的数据量分布是否合理，如果某个重要主题的数据量大幅减少可能需要调整去重阈值或对该主题做特殊处理，去重还应该考虑时效性新闻类数据的重复可能是合理的因为同一事件被多次报道而技术文档的重复则更可能是真正的冗余。</p>
+<p>去重工具的选择应该根据数据规模和精度要求来决定，小规模数据可以使用Python的datasketch库快速实现，大规模数据建议使用cc-dedup或Spark分布式实现，精度要求高的场景可以组合使用多种去重方法。</p>
+</div>
+<pre><code># MinHash + LSH 去重 Python 实现示例
+
+from datasketch import MinHash, MinHashLSH
+import hashlib
+
+# 1. 配置 LSH 参数
+# 阈值 t ≈ (1/b)^(1/r)，b=20, r=6 → t ≈ 0.76
+lsh = MinHashLSH(threshold=0.8, num_perm=128)
+
+def compute_minhash(text: str, num_perm=128) -> MinHash:
+    """将文本转为 MinHash 签名"""
+    m = MinHash(num_perm=num_perm)
+    # 使用 5-gram 作为特征
+    for i in range(len(text) - 4):
+        m.update(text[i:i+5].encode('utf-8'))
+    return m
+
+# 2. 构建索引
+documents = ["doc1_text...", "doc2_text...", "..."]
+minhashes = {}
+for i, doc in enumerate(documents):
+    mh = compute_minhash(doc)
+    minhashes[f"doc_{i}"] = mh
+    lsh.insert(f"doc_{i}", mh)
+
+# 3. 查询近似重复
+query_doc = "some new document text..."
+query_mh = compute_minhash(query_doc)
+candidates = lsh.query(query_mh)  # 返回候选重复文档ID
+print(f"发现 {len(candidates)} 个近似重复文档")</code></pre>
+
+<div class="footer"><p>📊 训练数据工程 · 04 · 数据去重</p><p><a href="index.html">返回目录</a> · <a href="../index.html">返回总览</a></p></div>
+</body></html>
+</html>

@@ -1,0 +1,300 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chunked Prefill</title><style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff; --green: #3fb950; --orange: #d29922; --red: #f85149; --purple: #bc8cff; --pink: #f778ba; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+  .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
+  .nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0.8rem 1.5rem; position: sticky; top: 0; z-index: 100; display: flex; justify-content: space-between; align-items: center; font-size: 0.9rem; }
+  .nav a { color: var(--accent); text-decoration: none; } .nav a:hover { text-decoration: underline; } .nav .title { color: var(--text-dim); }
+  h1 { font-size: 1.8rem; color: var(--accent); margin: 1.5rem 0 1rem; }
+  h2 { font-size: 1.3rem; color: var(--text); margin: 2rem 0 0.8rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; color: var(--green); margin: 1.2rem 0 0.5rem; }
+  p { margin: 0.5rem 0; font-size: 0.95rem; }
+  ul, ol { padding-left: 1.5rem; margin: 0.5rem 0; font-size: 0.95rem; } li { margin-bottom: 0.3rem; }
+  code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; color: var(--green); }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; color: var(--text); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); } th { color: var(--accent); font-weight: 600; background: var(--surface); } tr:hover { background: rgba(88, 166, 255, 0.05); }
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+  .callout { background: var(--surface); border-left: 3px solid var(--accent); padding: 1rem 1.2rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .callout.warn { border-left-color: var(--orange); } .callout.tip { border-left-color: var(--green); } .callout.important { border-left-color: var(--red); }
+  .next-prev { display: flex; justify-content: space-between; margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+  .next-prev a { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+  footer { text-align: center; margin-top: 3rem; padding: 1.5rem 0; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.8rem; }
+  .formula { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin: 0.8rem 0; text-align: center; font-family: 'Courier New', monospace; font-size: 1rem; color: var(--purple); }
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+  .exercise { background: #1a2332; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+</style></head><body>
+<div class="nav"><a href="02-连续批处理.html">← 上一节</a><span class="title">模块 03 · Chunked Prefill</span><a href="04-调度策略.html">下一节 →</a></div>
+<div class="container"><h1>✂️ Chunked Prefill 分块预填充</h1>
+<div class="callout"><strong>本节目标：</strong>理解长 prompt 的 Prefill 为什么阻塞已有 decode 请求，掌握 Chunked Prefill 的调度机制、chunk 大小选择的数学分析以及与连续批处理的协同。</div>
+
+<div class="callout"><strong>🗺️ 学习路径：</strong><a href="../01-核心概念/03-KV Cache.html">KV Cache 基础</a> → <a href="01-静态vs动态批处理.html">动态批处理</a> → <a href="02-连续批处理.html">连续批处理</a> → 本节（分块预填充）→ <a href="04-调度策略.html">调度策略</a></div>
+
+<h2>1. 问题：长 Prefill 阻塞 Decode</h2>
+
+<h3>1.1 Prefill 与 Decode 的计算特征差异</h3>
+
+<p>理解 Chunked Prefill 的前提是要深刻理解 Prefill 和 Decode 两个阶段的计算特征本质差异：</p>
+
+<table>
+<tr><th>特征</th><th>Prefill 阶段</th><th>Decode 阶段</th></tr>
+<tr><td>输入 token 数</td><td>N 个（整个 prompt）</td><td>1 个（当前生成的 token）</td></tr>
+<tr><td>计算模式</td><td>矩阵-矩阵乘法 (GEMM)</td><td>矩阵-向量乘法 (GEMV)</td></tr>
+<tr><td>计算密度</td><td>高（compute-bound）</td><td>低（memory-bound）</td></tr>
+<tr><td>GPU 利用率</td><td>高（算力充分利用）</td><td>低（受限于显存带宽）</td></tr>
+<tr><td>耗时</td><td>与 N 成正比（线性-二次）</td><td>几乎恒定（~几十ms/step）</td></tr>
+<tr><td>KV Cache 操作</td><td>一次性填充所有</td><td>逐行追加</td></tr>
+</table>
+
+<div class="deep"><strong>🔍 为什么 Prefill 是 compute-bound 而 Decode 是 memory-bound：</strong>这可以用<strong>算术强度</strong>（Arithmetic Intensity = FLOPs / Bytes）来解释。对于矩阵乘法 C = A × B（[M,K] × [K,N]），AI = 2×M×K×N / (M×K + K×N + M×N) × dtype_bytes。Prefill 时 M=N=较大值（如 4096），AI 很高；Decode 时 M=1（单 token），AI ≈ 2×K / (K+N) × dtype_bytes，极低。GPU 的 FLOPs/Byte 比值（如 A100: 312 TFLOPs / 2 TB/s = 156）决定了当 AI < 156 时为 memory-bound。Decode 的 AI 通常 < 10，远低于此阈值。</div>
+
+<h3>1.2 长 Prefill 导致的延迟尖峰</h3>
+
+<div class="ascii"><pre>没有 Chunked Prefill 的时间线:
+
+时间 →
+         t0        t1        t2        t3        t4        t5
+请求A:   [decode]  [decode]  [decode]  [decode]  [decode]  [decode]
+请求B:   [decode]  [decode]  [decode]  [decode]  [decode]  [decode]
+请求C:   [decode]  [decode]  [decode]  [decode]  [decode]  [decode]
+
+t=2.5s: 请求 D 到达 (prompt 8192 tokens)
+
+         t2.5                    t4.5
+请求D:   [======== Prefill 8K ========]  [decode]...
+请求A:   [xxx 阻塞 xxx 阻塞 xxx 阻塞]  [decode]  ← TPOT 从 50ms 飙升到 2s!
+请求B:   [xxx 阻塞 xxx 阻塞 xxx 阻塞]  [decode]
+请求C:   [xxx 阻塞 xxx 阻塞 xxx 阻塞]  [decode]
+
+问题: D 的长 Prefill 独占 GPU，A/B/C 的 decode 完全停止
+用户 A/B/C 感受到 2 秒的输出卡顿!</pre></div>
+
+<div class="warn"><strong>⚠️ 量化分析：</strong>以 Llama-3-8B 为例，Prefill 8192 tokens 约需 2 秒（A100）。在这 2 秒内，其他请求的 decode 全部暂停，TPOT 从正常的 50ms 飙升到 2000ms（40倍恶化）。在高并发场景下，不断有新请求到来，这种"延迟尖峰会"反复出现，导致 P99 延迟不可接受。</div>
+
+<h3>1.3 Prefill 占比与 GPU 利用率的关系</h3>
+
+<table>
+<tr><th>场景</th><th>Prompt 长度</th><th>Prefill 时间</th><th>Decode 时间/step</th><th>Prefill 占比</th></tr>
+<tr><td>短对话</td><td>128 tokens</td><td>~30ms</td><td>~50ms</td><td>37%</td></tr>
+<tr><td>中等问答</td><td>1024 tokens</td><td>~200ms</td><td>~50ms</td><td>80%</td></tr>
+<tr><td>长文档总结</td><td>8192 tokens</td><td>~2000ms</td><td>~50ms</td><td>97.5%</td></tr>
+<tr><td>RAG 上下文</td><td>32768 tokens</td><td>~8000ms</td><td>~50ms</td><td>99.4%</td></tr>
+</table>
+
+<div class="tip"><strong>💡 关键洞察：</strong>Prefill 时间与 prompt 长度近似线性关系（FlashAttention 下），而 decode 每步几乎恒定。当 prompt 长度 > 1024 tokens 时，Prefill 时间就开始显著影响其他请求的延迟。这就是 Chunked Prefill 诞生的原因。</div>
+
+<h2>2. 解决：Chunked Prefill 机制</h2>
+
+<h3>2.1 核心思想：分时复用 GPU</h3>
+
+<p>Chunked Prefill 的核心思想借鉴了操作系统的<strong>时间片轮转</strong>调度——将长 Prefill 切分为多个小 chunk，每个 chunk 的计算时间与一次 decode 步骤相当，然后交替执行。</p>
+
+<div class="ascii"><pre>有 Chunked Prefill 的时间线 (chunk_size=1024):
+
+时间 →
+         t0        t1        t2        t3        t4        t5        t6
+请求A:   [decode]  [decode]  [decode]  [decode]  [decode]  [decode]  [decode]
+请求B:   [decode]  [decode]  [decode]  [decode]  [decode]  [decode]  [decode]
+请求C:   [decode]  [decode]  [decode]  [decode]  [decode]  [decode]  [decode]
+
+t=2.5s: 请求 D 到达 (prompt 8192 tokens, 分成 8 个 chunk)
+
+         t2.5    t2.6    t2.7    t2.8    t2.9    t3.0    t3.1 ...
+请求D:   [chunk1][chunk2][chunk3][chunk4][chunk5][chunk6][chunk7]...
+请求A:   [decode][decode][decode][decode][decode][decode][decode]...
+请求B:   [decode][decode][decode][decode][decode][decode][decode]...
+请求C:   [decode][decode][decode][decode][decode][decode][decode]...
+
+每个时间步: Prefill 1 个 chunk (1024 tokens) + 3 个 decode 请求
+TPOT 影响: 50ms → 50ms + chunk_compute_time ≈ 80ms (仅增加 60%)
+vs 无 Chunked: 50ms → 2000ms (增加 4000%)!</pre></div>
+
+<h3>2.2 调度算法</h3>
+
+<pre><code>// Chunked Prefill 调度器 (简化伪代码)
+class ChunkedPrefillScheduler:
+    def __init__(self, chunk_size=512, max_batch_tokens=8192):
+        self.chunk_size = chunk_size          # 每个 chunk 的最大 token 数
+        self.max_batch_tokens = max_batch_tokens  # 单步最大总 token 数
+        self.waiting_queue = []   # 等待 Prefill 的请求
+        self.running_queue = []   # 正在 Decode 的请求
+
+    def schedule_step(self):
+        batch_tokens = 0
+        scheduled_prefills = []
+        scheduled_decodes = []
+
+        # 优先安排 decode 请求（保证已开始请求的 TPOT）
+        for req in self.running_queue:
+            scheduled_decodes.append(req)
+            batch_tokens += 1  # decode 每个请求 1 个 token
+
+        # 用剩余 token 预算安排 prefill chunk
+        for req in self.waiting_queue:
+            remaining = req.remaining_prefill_tokens()
+            chunk = min(remaining, self.chunk_size)
+            if batch_tokens + chunk <= self.max_batch_tokens:
+                scheduled_prefills.append((req, chunk))
+                batch_tokens += chunk
+            else:
+                break
+
+        # 混合执行: prefill chunk + decode 在同一步完成
+        execute_mixed_batch(scheduled_prefills, scheduled_decodes)
+
+        # 检查哪些 prefill 完成 → 移到 running_queue
+        for req, chunk in scheduled_prefills:
+            req.advance_prefill(chunk)
+            if req.prefill_done():
+                self.waiting_queue.remove(req)
+                self.running_queue.append(req)</code></pre>
+
+<h3>2.3 chunk_size 的选择</h3>
+
+<div class="formula">chunk_size 选择的关键约束:
+1. chunk_size × dtype_bytes × n_layers × n_kv_heads × d_k ≤ GPU_prefill_budget
+2. chunk_compute_time ≈ decode_step_time × k (k 为可接受的 TPOT 增幅比例)
+3. chunk_size 应该是 GPU warp/block 对齐的倍数 (如 64, 128, 256, 512)</div>
+
+<table>
+<tr><th>chunk_size</th><th>Prefill 轮数(8K prompt)</th><th>TPOT 增幅</th><th>TTFT 影响</th><th>推荐场景</th></tr>
+<tr><td>128</td><td>64 轮</td><td>极小</td><td>显著增加</td><td>高并发、TPOT 敏感</td></tr>
+<tr><td>512</td><td>16 轮</td><td>小</td><td>轻微增加</td><td><strong>通用推荐</strong></td></tr>
+<tr><td>1024</td><td>8 轮</td><td>中等</td><td>几乎无影响</td><td>中等并发</td></tr>
+<tr><td>4096</td><td>2 轮</td><td>大</td><td>无影响</td><td>低并发</td></tr>
+<tr><td>8192(不分块)</td><td>1 轮</td><td>最大</td><td>无影响</td><td>不推荐</td></tr>
+</table>
+
+<div class="tip"><strong>💡 vLLM 的默认选择：</strong>vLLM 默认 chunk_size 为 512 或与 max_num_batched_tokens 相关。chunk_size 不是越小越好——太小会导致过多的调度开销和 KV Cache 的频繁碎片分配。<a href="../02-内存管理/01-GPU内存层次.html">PagedAttention</a> 的分页机制天然适合 Chunked Prefill，因为每个 chunk 只需要分配对应数量的 KV Cache 页。</div>
+
+<h2>3. Chunked Prefill 与连续批处理的协同</h2>
+
+<h3>3.1 混合批处理的执行流程</h3>
+
+<div class="ascii"><pre>混合批处理单步执行 (1 个 chunk + 多个 decode):
+
+Step 时间线:
+┌─────────────────────────────────────────────────────┐
+│ 准备: 收集 batch 中的所有 token                       │
+├─────────────────────────────────────────────────────┤
+│ Prefill chunk: [D_t0..D_t511]  (512 tokens, GEMM)  │
+│ Decode:        [A_t, B_t, C_t]  (3 tokens, GEMV)   │
+│                                                     │
+│ 实际执行: 将所有 token 拼成一个大 batch               │
+│ 输入矩阵: [515 tokens, hidden_dim]                  │
+│ 其中前 512 是 prefill, 后 3 是 decode               │
+│                                                     │
+│ 注意力计算:                                          │
+│   Prefill tokens: 自注意力 (512×512 + 512×历史KV)   │
+│   Decode tokens: 交叉注意力 (1×全部KV)              │
+│                                                     │
+│ KV Cache:                                           │
+│   D: 追加 512 行新 KV                               │
+│   A/B/C: 各追加 1 行新 KV                           │
+└─────────────────────────────────────────────────────┘</pre></div>
+
+<h3>3.2 TTFT 与 TPOT 的权衡分析</h3>
+
+<table>
+<tr><th>指标</th><th>无 Chunked Prefill</th><th>有 Chunked Prefill</th><th>变化原因</th></tr>
+<tr><td>已有请求 TPOT</td><td>被长 Prefill 阻塞（飙升）</td><td>几乎不受影响（+30%）</td><td>Prefill 被切分，不独占 GPU</td></tr>
+<tr><td>新请求 TTFT</td><td>一次性完成（快）</td><td>分段完成（略慢 10-20%）</td><td>多轮调度开销 + 等待时间</td></tr>
+<tr><td>GPU 利用率</td><td>Prefill 时 decode 空闲</td><td>Prefill 和 decode 混合</td><td>GPU 算力更充分</td></tr>
+<tr><td>整体吞吐</td><td>低（延迟尖峰导致空等）</td><td>高（平稳调度）</td><td>消除延迟尖峰</td></tr>
+<tr><td>实现复杂度</td><td>简单</td><td>需要调度逻辑</td><td>chunk 管理、KV 分配</td></tr>
+</table>
+
+<div class="deep"><strong>🔍 TTFT 增加的数学分析：</strong>设 prompt 长度为 N，chunk 大小为 C，已有 decode 请求数为 B。无 Chunked 时 TTFT = T_prefill(N)。有 Chunked 时，每个 chunk 需要等待前面的 chunk + B 个 decode 完成。假设每步总时间 ≈ T_decode(B) + T_prefill(C)，则 TTFT ≈ (N/C) × (T_decode(B) + T_prefill(C))。当 N/C 较大且 B 较多时，TTFT 可能增加 20-50%。但对于 <a href="../09-部署实战/04-llama.cpp部署.html">用户体验</a> 来说，P99 TPOT 的改善远比 TTFT 的轻微增加更重要。</div>
+
+<h2>4. 与 KV Cache 管理的交互</h2>
+
+<h3>4.1 Chunked Prefill 的 KV Cache 分配</h3>
+
+<pre><code>// Chunked Prefill 的 KV Cache 分配策略
+// 与 PagedAttention 配合:
+
+// 无 Chunked Prefill:
+//   prefill 一次性分配 max_seq_len 个 KV 页
+//   浪费: 如果用户只生成了 100 个 token，预分配的页都浪费了
+
+// 有 Chunked Prefill:
+//   每个 chunk 只分配 chunk_size 个 KV 页
+//   chunk 1: 分配 512 页 → 填充 512 个 KV
+//   chunk 2: 分配 512 页 → 填充 512 个 KV
+//   ...
+//   decode: 每步分配 1 页（或复用预分配池）
+//   优势: 内存分配更精确，碎片更少
+
+// 实际实现 (vLLM 的做法):
+// 1. 预分配一小批 KV 页（如 256 页）
+// 2. Prefill chunk 时从池中取页
+// 3. 页不够时再扩展
+// 4. 请求完成后归还页到池中</code></pre>
+
+<h3>4.2 与前缀缓存的协同</h3>
+
+<div class="tip"><strong>💡 Chunked Prefill + 前缀缓存 = 最佳实践：</strong>当前缀缓存命中时，只有 prompt 的非前缀部分需要 Prefill。结合 Chunked Prefill，可以将非前缀部分分块处理。例如，一个 8K prompt 中 4K 是缓存的前缀，剩余 4K 分 8 个 chunk 处理，大幅减少 TTFT。参见 <a href="../02-内存管理/03-前缀缓存.html">前缀缓存</a>。</div>
+
+<h2>5. 前沿发展：PD 分离与 Disaggregated Serving</h2>
+
+<h3>5.1 Prefill-Decode 分离架构</h3>
+
+<p>Chunked Prefill 的思想进一步发展为 Prefill-Decode 分离（Disaggregated Serving）：将 Prefill 和 Decode 放在不同的 GPU 集群上，各自独立优化。</p>
+
+<div class="ascii"><pre>Disaggregated Serving 架构:
+
+┌──────────────────────┐        ┌──────────────────────┐
+│   Prefill 集群 (GPU)  │  KV    │   Decode 集群 (GPU)   │
+│                      │ 传输→  │                      │
+│ 高算力 GPU (A100)     │        │ 高带宽 GPU (H100)     │
+│ 优化: 吞吐量          │        │ 优化: 延迟            │
+│ 可以用大 batch        │        │ 连续批处理            │
+│ FlashAttention 优化   │        │ KV Cache 管理优化     │
+└──────────────────────┘        └──────────────────────┘
+
+优势: Prefill 和 Decode 可以独立扩缩容
+      Prefill 集群: 处理长 prompt, compute-bound → 用高算力 GPU
+      Decode 集群: 逐 token 生成, memory-bound → 用高带宽 GPU
+</pre></div>
+
+<div class="warn"><strong>⚠️ PD 分离的挑战：</strong>KV Cache 传输是最大瓶颈。一个 8K 序列的 KV Cache（Llama-3-8B FP16）约 256 MB，在 100Gbps 网络下传输需要约 20ms。对于短 prompt，这个传输时间可能比 Prefill 本身还长。解决方案包括 KV Cache 压缩传输（<a href="../02-内存管理/04-KV Cache压缩.html">KV Cache 压缩</a>）、异步预传输等。</div>
+
+<h2>6. 思考与练习</h2>
+
+<div class="tip"><strong>向前串联：</strong>
+Chunked Prefill的知识将在后续的推理框架对比、性能调优、生产部署等章节中反复应用。
+建议在理解本章原理后，结合实际框架（如vLLM、TensorRT-LLM）动手验证，
+将理论知识转化为工程能力。掌握了Chunked Prefill，你就掌握了推理优化的核心技术栈之一。
+</div>
+<div class="deep"><strong>原理与推导：</strong>
+Chunked Prefill的<strong>工作机制</strong>可以从信息论的角度<strong>推导</strong>。
+设信息传输速率为R、信道容量为C，根据Shannon信道编码定理，
+当R < C时存在可靠传输方案。<strong>为什么</strong>这对Chunked Prefill很重要？
+因为Chunked Prefill本质上是在有限的硬件资源（信道）上最大化有效信息传输。
+从<strong>底层</strong>实现看，系统的瓶颈往往不在计算本身，
+而在数据搬运——这就是<strong>为什么</strong>理解硬件<strong>原理</strong>
+对于优化Chunked Prefill性能至关重要。
+</div>
+<div class="exercise"><strong>📝 思考题 1：</strong>为什么说 Chunked Prefill 的本质是"时间片轮转"？它与操作系统的进程调度有什么类比关系？</div>
+
+<div class="exercise"><strong>📝 思考题 2：</strong>假设 Llama-3-8B 在 A100 上，Prefill 512 tokens 需要 100ms，Decode 一步需要 50ms。有 10 个 decode 请求在运行，一个 8K prompt 到来。分别计算 (a) 无 Chunked Prefill 时的 TTFT 和 TPOT 增幅，(b) chunk_size=512 时的 TTFT 和 TPOT 增幅。</div>
+
+<div class="exercise"><strong>📝 思考题 3：</strong>chunk_size=128 时，调度开销（每步需要重新收集 batch、分配 KV 页等）可能成为瓶颈。如何量化调度开销？设计一个自适应 chunk_size 的算法。</div>
+
+<div class="exercise"><strong>📝 思考题 4：</strong>在 Disaggregated Serving 中，如果 Prefill 集群和 Decode 集群之间用 RDMA 传输 KV Cache，计算传输 Llama-3-70B（80层、8 KV头、d_k=128）8K 序列的 KV Cache 在 400Gbps InfiniBand 下的传输时间。</div>
+
+<!-- 交叉引用 -->
+<div class="callout"><strong>🔗 交叉引用：</strong>
+<br>• <strong>前置知识</strong>：<a href="../01-核心概念/03-KV Cache.html">KV Cache 基础</a>、<a href="01-静态vs动态批处理.html">动态批处理</a>、<a href="02-连续批处理.html">连续批处理</a>
+<br>• <strong>相关技术</strong>：<a href="../02-内存管理/01-GPU内存层次.html">PagedAttention</a>（KV Cache 分页）、<a href="../02-内存管理/03-前缀缓存.html">前缀缓存</a>（减少 Prefill 量）
+<br>• <strong>对比技术</strong>：<a href="../05-注意力优化/04-Ring Attention.html">Ring Attention</a>（Prefill 阶段的多 GPU 并行）
+<br>• <strong>下游应用</strong>：<a href="04-调度策略.html">调度策略</a>、<a href="../09-部署实战/04-llama.cpp部署.html">llama.cpp 部署</a>
+</div>
+
+<div class="next-prev"><a href="00-总览.html">← 返回模块总览</a><a href="../index.html">📚 返回总目录</a></div>
+<footer>LLM 推理框架系统学习指南 · 模块 03 · 2026</footer></div></body></html>

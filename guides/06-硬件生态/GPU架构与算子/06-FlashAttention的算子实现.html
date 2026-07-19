@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>06 · FlashAttention的算子实现 — 重新定义Attention</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.7}a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}.nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;justify-content:space-between;position:sticky;top:0;z-index:100}.nav span{color:#8b949e;font-size:0.9em}.nav a{color:#58a6ff}.container{max-width:900px;margin:0 auto;padding:30px 20px}h1{color:#58a6ff;font-size:2em;margin:20px 0 10px}h2{color:#f0f6fc;border-left:4px solid #58a6ff;padding-left:14px;margin:35px 0 15px;font-size:1.4em}h3{color:#d2a8ff;margin:20px 0 10px;font-size:1.15em}p{margin:10px 0}ul,ol{margin:10px 0 10px 24px}li{margin:4px 0}code{background:#21262d;color:#79c0ff;padding:2px 6px;border-radius:4px;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;overflow-x:auto;margin:12px 0}pre code{background:none;color:#c9d1d9;padding:0}table{border-collapse:collapse;width:100%;margin:12px 0}th{background:#161b22;color:#58a6ff;text-align:left;padding:10px 14px;border:1px solid #30363d}td{padding:10px 14px;border:1px solid #21262d}tr:nth-child(even){background:#161b2233}.tip{background:#0d1d30;border-left:4px solid #58a6ff;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.tip strong{color:#58a6ff}.warn{background:#2d1b00;border-left:4px solid #d29922;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.warn strong{color:#d29922}.exercise{background:#0d2818;border-left:4px solid #238636;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.exercise strong{color:#3fb950}.deep{background:#1a1024;border-left:4px solid #a371f7;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.deep strong{color:#a371f7}.ascii{background:#161b22;border:1px solid #30363d;padding:16px;font-family:monospace;font-size:0.85em;line-height:1.4;overflow-x:auto;margin:12px 0;white-space:pre}.footer{text-align:center;padding:30px;border-top:1px solid #21262d;margin-top:30px;color:#8b949e;font-size:0.85em}.glossary{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin:16px 0}.glossary dt{color:#58a6ff;font-weight:bold;margin-top:8px}.glossary dd{color:#8b949e;margin-left:16px}</style>
+</head>
+<body>
+<div class="nav"><a href="05-Triton编程入门.html">&larr; 05-Triton编程入门</a><span>模块 06/08 · FlashAttention</span><a href="07-CUTLASS与算子库.html">07-CUTLASS与算子库 &rarr;</a></div>
+<div class="container">
+
+<h1>⚡ 06 · FlashAttention 的算子实现 — 重新定义 Attention</h1>
+<p style="color:#8b949e;font-size:1.05em">tiling + online softmax · SRAM优化 · FlashAttention 1/2/3 演进 · 75% H100利用率 · FP8支持</p>
+
+<h2>一、背景与动机</h2>
+<h3>一、背景与动机</h3>on 的计算复杂度是 O(n²)，内存复杂度也是 O(n²)——需要存储完整的 n×n 注意力矩阵。对于 4K 上下文，这个矩阵是 4096×4096×2 bytes = 32MB；对于 128K 上下文，是 32GB！</p>
+<p>FlashAttention 的核心思想：<strong>不存储完整的注意力矩阵</strong>，而是通过 tiling(分块)和 online softmax 在 SRAM(Shared Memory) 中完成计算，只把最终结果写回 HBM。这既节省了内存，又因为减少了 HBM 访问而提高了速度。</p>
+<pre><code class="language-python"># 一、背景与动机 - 核心实现示例
+import torch
+import numpy as np
+
+class 一、背景与动机Config:
+    """配置类：定义一、背景与动机的关键参数"""
+    def __init__(self):
+        self.batch_size = 32
+        self.max_seq_len = 2048
+        self.dtype = torch.float16
+        
+    def validate(self):
+        """参数验证"""
+        assert self.batch_size > 0, "batch_size must be positive"
+        assert self.max_seq_len > 0, "max_seq_len must be positive"
+        return True
+
+def benchmark(func, iterations=100):
+    """性能基准测试"""
+    import time
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iterations):
+        func()
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iterations
+    print(f"Average latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+
+
+<div class="tip"><strong>💡 一句话总结：</strong>FlashAttention 不改变数学结果(精确计算)，只改变计算顺序——把"算完再写"变成"边算边写"，避免了 O(n²) 的内存开销。</div>
+
+<h2>二、标准 Attention 的问题</h2>
+
+<h3>2.1 标准 Attention 的计算流程</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 600 140" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="300" y="20" text-anchor="middle" fill="#f0f6fc" font-size="12" font-weight="bold">标准 Attention 内存需求</text>
+  <rect x="40" y="35" width="170" height="36" rx="5" fill="rgba(52,211,153,0.1)" stroke="#34d399" stroke-width="1"/>
+  <text x="125" y="52" text-anchor="middle" fill="#34d399" font-size="10">n=4K: S=P=32MB</text>
+  <text x="125" y="64" text-anchor="middle" fill="#8b949e" font-size="8">可接受</text>
+  <rect x="220" y="35" width="170" height="36" rx="5" fill="rgba(251,191,36,0.1)" stroke="#fbbf24" stroke-width="1"/>
+  <text x="305" y="52" text-anchor="middle" fill="#fbbf24" font-size="10">n=32K: S=P=2GB</text>
+  <text x="305" y="64" text-anchor="middle" fill="#8b949e" font-size="8">很紧张</text>
+  <rect x="400" y="35" width="170" height="36" rx="5" fill="rgba(251,113,133,0.1)" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="485" y="52" text-anchor="middle" fill="#fb7185" font-size="10">n=128K: S=P=32GB</text>
+  <text x="485" y="64" text-anchor="middle" fill="#fb7185" font-size="8">OOM!</text>
+  <text x="300" y="100" text-anchor="middle" fill="#8b949e" font-size="10">H100 HBM = 80GB → 128K上下文的Attention矩阵都装不下!</text>
+  <text x="300" y="120" text-anchor="middle" fill="#fb7185" font-size="10" font-weight="bold">内存: O(n²) 存储 S 和 P → 需要 FlashAttention!</text>
+</svg>
+</div>
+
+<h3>2.2 为什么标准 Attention 是 Memory-bound</h3>
+<div class="ascii">Roofline 分析: 标准 Attention
+
+  算术强度 = FLOPs / Bytes
+  
+  QK^T: n²d FLOPs / (2nd + n²) Bytes
+    当 n >> d 时, 算术强度 ≈ n·d / (2d + n) ≈ d
+  
+  H100: 峰值算力 989 TFLOPS, 带宽 3.35 TB/s
+    拐点 = 989/3.35 ≈ 295 FLOPS/Byte
+  
+  d=128 时, 算术强度 ≈ 128 < 295
+  → Memory-bound! 受限于HBM带宽
+  
+  → 优化方向: 减少HBM访问(FlashAttention的核心)</div>
+
+<h2>三、FlashAttention 核心原理</h2>
+
+<h3>3.1 Tiling (分块计算)</h3>
+<div class="ascii">FlashAttention 的分块计算:
+
+  将 Q 分成 Tr 个行块(每块 Br 行)
+  将 K/V 分成 Tc 个列块(每块 Bc 列)
+
+  Q: [Q₁]     K: [K₁ K₂ K₃ ...]     V: [V₁ V₂ V₃ ...]
+     [Q₂]
+     [Q₃]
+     [...]
+
+  对每个 Qᵢ:
+    初始化: Oᵢ = 0, mᵢ = -∞, lᵢ = 0
+    for each Kⱼ, Vⱼ:
+      ① 从HBM加载 Qᵢ, Kⱼ, Vⱼ 到SRAM
+      ② 计算局部注意力: Sᵢⱼ = Qᵢ × Kⱼ^T  [Br×Bc]
+      ③ 用 online softmax 更新统计量
+      ④ 累加: Oᵢ += softmax(Sᵢⱼ) × Vⱼ
+    ⑤ 将最终 Oᵢ 写回HBM
+
+  关键: 每次只在SRAM中处理一个小块(Br×Bc)
+        SRAM容量: ~200KB (够放 Br×Bc×2B)
+        不需要存储完整的 n×n 矩阵!</div>
+
+<h3>3.2 Online Softmax (在线Softmax)</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 600 170" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="300" y="20" text-anchor="middle" fill="#f0f6fc" font-size="12" font-weight="bold">Online Softmax 更新规则</text>
+  <rect x="40" y="35" width="520" height="120" rx="8" fill="rgba(167,139,250,0.06)" stroke="#a78bfa" stroke-width="1.2"/>
+  <text x="80" y="58" fill="#a78bfa" font-size="10" font-weight="bold">缩放因子:</text>
+  <text x="170" y="58" fill="#c9d1d9" font-size="10">scale = exp(m_old - m_new)</text>
+  <text x="80" y="80" fill="#a78bfa" font-size="10" font-weight="bold">旧分母缩放:</text>
+  <text x="190" y="80" fill="#c9d1d9" font-size="10">l_old' = l_old × scale</text>
+  <text x="80" y="102" fill="#a78bfa" font-size="10" font-weight="bold">新分母累加:</text>
+  <text x="190" y="102" fill="#c9d1d9" font-size="10">l_new = l_old' + Σexp(Sⱼ - m_new)</text>
+  <text x="80" y="124" fill="#a78bfa" font-size="10" font-weight="bold">旧输出缩放:</text>
+  <text x="190" y="124" fill="#c9d1d9" font-size="10">O_old' = O_old × (l_old' / l_new)</text>
+  <text x="80" y="146" fill="#a78bfa" font-size="10" font-weight="bold">新输出累加:</text>
+  <text x="190" y="146" fill="#c9d1d9" font-size="10">O_new = O_old' + softmax(Sⱼ) × Vⱼ</text>
+</svg>
+</div>
+
+<h3>3.3 SRAM 利用率优化</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 620 250" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="310" y="20" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">GPU 内存层次与 FlashAttention</text>
+  <!-- Memory layers -->
+  <rect x="40" y="38" width="540" height="40" rx="6" fill="rgba(251,191,36,0.1)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="60" y="58" fill="#fbbf24" font-size="10" font-weight="bold">HBM (80GB, 3.35 TB/s, 400 cycles)</text>
+  <text x="440" y="58" fill="#8b949e" font-size="9">← 存储 Q, K, V, O</text>
+  <rect x="40" y="86" width="540" height="40" rx="6" fill="rgba(52,211,153,0.1)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="60" y="106" fill="#34d399" font-size="10" font-weight="bold">L2 Cache (50MB, 12 TB/s, 200 cycles)</text>
+  <text x="440" y="106" fill="#8b949e" font-size="9">← 缓存频繁访问</text>
+  <rect x="40" y="134" width="540" height="40" rx="6" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="2"/>
+  <text x="60" y="154" fill="#22d3ee" font-size="10" font-weight="bold">SRAM/Shared Memory (~200KB/SM, 19 TB/s, 30 cycles)</text>
+  <text x="480" y="154" fill="#22d3ee" font-size="9" font-weight="bold">← FA工作区</text>
+  <rect x="40" y="182" width="540" height="40" rx="6" fill="rgba(167,139,250,0.1)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="60" y="202" fill="#a78bfa" font-size="10" font-weight="bold">寄存器 (~256KB/SM, ~80 TB/s, 1 cycle)</text>
+  <text x="440" y="202" fill="#8b949e" font-size="9">← 累加器</text>
+  <!-- Data flow arrow -->
+  <text x="310" y="240" text-anchor="middle" fill="#22d3ee" font-size="10" font-weight="bold">HBM → SRAM → 寄存器 → 计算 → 寄存器 → SRAM → HBM</text>
+  <text x="310" y="255" text-anchor="middle" fill="#fb7185" font-size="9">只在HBM和SRAM之间搬运一次! 中间结果(S, P)不写回HBM!</text>
+</svg>
+</div>
+
+<h2>四、FlashAttention 版本演进</h2>
+
+<h3>4.1 FlashAttention-1 (2022)</h3>
+<table>
+<tr><th>特性</th><th>描述</th></tr>
+<tr><td>Tiling</td><td>将Q/K/V分成小块在SRAM中计算</td></tr>
+<tr><td>Online Softmax</td><td>逐块计算softmax，无需存储完整S矩阵</td></tr>
+<tr><td>Recomputation</td><td>反向传播时重新计算S和P(节省内存)</td></tr>
+<tr><td>效果</td><td>2-4× 加速，内存从O(n²)降到O(n)</td></tr>
+</table>
+
+<h3>4.2 FlashAttention-2 (2023)</h3>
+<div class="ascii">FA-2 的关键改进:
+
+  改进1: 循环顺序优化
+    FA-1: 外层K/V, 内层Q → Q块被重复加载
+    FA-2: 外层Q, 内层K/V → Q块只加载1次
+
+  改进2: 减少 non-matmul FLOPs
+    rescaling 操作从内循环移到外循环
+    → Tensor Core 利用率更高
+
+  改进3: 更好的 Warp 并行化
+    不同 Warp 处理不同的 Q 块
+    → 更好的 GPU 占用率
+
+  效果: 比 FA-1 快 2×
+       H100 上达到 230 TFLOPS (FP16)</div>
+
+<h3>4.3 FlashAttention-3 (2024, Hopper)</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 620 320" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="310" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">FA-3 的 Hopper 专属优化</text>
+  <!-- Box 1: Warp Specialization -->
+  <rect x="20" y="38" width="580" height="85" rx="8" fill="rgba(34,211,238,0.06)" stroke="#22d3ee" stroke-width="1.2"/>
+  <text x="40" y="58" fill="#22d3ee" font-size="11" font-weight="bold">创新1: 异步执行 + Warp 专用化</text>
+  <text x="40" y="76" fill="#8b949e" font-size="9">传统: 每个Warp都做加载+计算+存储</text>
+  <text x="40" y="92" fill="#8b949e" font-size="9">FA-3: 不同Warp专职不同任务 → 三个阶段完全重叠执行!</text>
+  <!-- Warp specialization diagram -->
+  <rect x="40" y="100" width="120" height="16" rx="3" fill="rgba(251,191,36,0.2)" stroke="#fbbf24" stroke-width="0.8"/>
+  <text x="100" y="112" text-anchor="middle" fill="#fbbf24" font-size="8">Warp 0-1: 加载(TMA)</text>
+  <rect x="170" y="100" width="200" height="16" rx="3" fill="rgba(167,139,250,0.2)" stroke="#a78bfa" stroke-width="0.8"/>
+  <text x="270" y="112" text-anchor="middle" fill="#a78bfa" font-size="8">Warp 2-5: 计算(WGMMA)</text>
+  <rect x="380" y="100" width="120" height="16" rx="3" fill="rgba(52,211,153,0.2)" stroke="#34d399" stroke-width="0.8"/>
+  <text x="440" y="112" text-anchor="middle" fill="#34d399" font-size="8">Warp 6-7: 存储</text>
+  <!-- Box 2: FP8 GEMM -->
+  <rect x="20" y="132" width="280" height="78" rx="8" fill="rgba(251,191,36,0.06)" stroke="#fbbf24" stroke-width="1.2"/>
+  <text x="40" y="152" fill="#fbbf24" font-size="11" font-weight="bold">创新2: FP8 GEMM 支持</text>
+  <text x="40" y="170" fill="#8b949e" font-size="9">Q,K 用 FP8 存储和计算</text>
+  <text x="40" y="185" fill="#8b949e" font-size="9">累加器用 FP32 保持精度</text>
+  <text x="40" y="200" fill="#fbbf24" font-size="9" font-weight="bold">→ 2× 吞吐 | 1.2 PFLOPS (FP8, H100)</text>
+  <!-- Box 3: Utilization -->
+  <rect x="320" y="132" width="280" height="78" rx="8" fill="rgba(52,211,153,0.06)" stroke="#34d399" stroke-width="1.2"/>
+  <text x="340" y="152" fill="#34d399" font-size="11" font-weight="bold">创新3: 75% H100 利用率</text>
+  <text x="340" y="170" fill="#8b949e" font-size="9">FA-2: ~35% Tensor Core 利用率</text>
+  <text x="340" y="185" fill="#8b949e" font-size="9">FA-3: ~75% Tensor Core 利用率</text>
+  <text x="340" y="200" fill="#34d399" font-size="9" font-weight="bold">→ 比FA-2快 1.5-2.0× | 740 TFLOPS</text>
+  <!-- Performance comparison bar -->
+  <rect x="20" y="224" width="580" height="80" rx="6" fill="rgba(240,246,252,0.03)" stroke="#30363d" stroke-width="0.8"/>
+  <text x="310" y="242" text-anchor="middle" fill="#f0f6fc" font-size="10" font-weight="bold">Tensor Core 利用率对比</text>
+  <text x="40" y="265" fill="#8b949e" font-size="9">FA-2:</text>
+  <rect x="80" y="255" width="175" height="14" rx="3" fill="rgba(167,139,250,0.3)" stroke="#a78bfa" stroke-width="0.8"/>
+  <text x="260" y="266" fill="#a78bfa" font-size="9">~35%</text>
+  <text x="40" y="288" fill="#8b949e" font-size="9">FA-3:</text>
+  <rect x="80" y="278" width="375" height="14" rx="3" fill="rgba(52,211,153,0.3)" stroke="#34d399" stroke-width="0.8"/>
+  <text x="460" y="289" fill="#34d399" font-size="9" font-weight="bold">~75%</text>
+</svg>
+</div>
+
+<h3>4.4 版本对比</h3>
+<table>
+<tr><th>版本</th><th>年份</th><th>GPU</th><th>FP16 TFLOPS</th><th>FP8 TFLOPS</th><th>内存</th></tr>
+<tr><td>FA-1</td><td>2022</td><td>A100</td><td>~124</td><td>N/A</td><td>O(n)</td></tr>
+<tr><td>FA-2</td><td>2023</td><td>A100/H100</td><td>~230</td><td>N/A</td><td>O(n)</td></tr>
+<tr><td>FA-3</td><td>2024</td><td>H100</td><td>~740</td><td>~1200</td><td>O(n)</td></tr>
+<tr><td>标准Attention</td><td>-</td><td>H100</td><td>~100</td><td>N/A</td><td>O(n²)</td></tr>
+</table>
+
+<h2>五、反向传播的 Recomputation</h2>
+p>深入理解五、反向传播的 Recomputation的工作原理，有助于在实际工程中做出更合理的技术选择和优化决策。</p>
+
+<h3>五、反向传播的 Recomputation</h3>
+<div class="ascii">FlashAttention 的反向传播:
+
+  标准Attention反向:
+    需要存储 S[n×n] 和 P[n×n] 用于梯度计算
+    → O(n²) 内存
+
+  FlashAttention反向:
+    不存储 S 和 P
+    反向传播时重新计算(recomputation)
+    
+    前向: 计算 O, 保存 m, l (统计量)
+    反向: 用 m, l 重新计算 S 和 P
+          然后计算梯度
+    
+    额外计算: ~1次前向的FLOPs
+    节省内存: O(n²) → O(n)
+    
+    → 用计算换内存, 总体更快(因为减少了HBM访问)</div>
+
+<h2>六、FlashAttention vs 标准 Attention</h2>
+tention vs 标准 Attention的工作原理，有助于在实际工程中做出更合理的技术选择和优化决策。</p>
+
+<h3>六、FlashAttention vs 标准 Attention</h3>
+<table>
+<tr><th>对比</th><th>标准 Attention</th><th>FlashAttention-3</th></tr>
+<tr><td>FLOPs</td><td>O(n²d)</td><td>O(n²d) (相同)</td></tr>
+<tr><td>HBM访问</td><td>O(n²)</td><td>O(n²d²/M) (大幅减少)</td></tr>
+<tr><td>内存</td><td>O(n²)</td><td>O(n) (线性)</td></tr>
+<tr><td>精确性</td><td>精确</td><td>精确(数学等价)</td></tr>
+<tr><td>H100速度</td><td>~100 TFLOPS</td><td>~740 TFLOPS</td></tr>
+<tr><td>最大序列长度</td><td>~8K(80GB)</td><td>~128K+(80GB)</td></tr>
+</table>
+
+<h2>七、Ring Attention (多GPU长序列)</h2>
+<h3>七、Ring Attention (多GPU长序列)</h3>
+<div class="ascii">Ring Attention: 多GPU分布式Attention
+
+  问题: 单GPU内存有限, 超长序列(1M+)装不下
+  
+  方案: 将序列分到多个GPU上
+  
+  GPU 0: [Q₁, K₁, V₁]
+  GPU 1: [Q₂, K₂, V₂]
+  GPU 2: [Q₃, K₃, V₃]
+  GPU 3: [Q₄, K₄, V₄]
+
+  环形通信:
+    Step 1: 每个GPU计算本地 QᵢKᵢᵀ
+    Step 2: K,V 环形传递(GPU0→1→2→3→0)
+    Step 3: 每个GPU计算与下一个K,V块的注意力
+    Step 4: 重复直到所有K,V块都被处理
+    
+    计算和通信重叠 → 隐藏通信延迟
+    
+  效果: 序列长度可以线性扩展到GPU数量</div>
+
+<h2>八、使用场景</h2>
+<h3>八、使用场景</h3>
+<p></pli>
+<li><strong>训练和推理</strong>：训练节省显存，推理降低延迟</li>
+<li><strong>多模态</strong>：Vision Transformer 的 Attention</li>
+<li><strong>Ring Attention</strong>：超长序列的多GPU训练</li>
+</ul>
+
+<h2>九、实际效果</h2>
+<h3>八、使用场景</h3>
+<table>
+<tr><th>场景</th><th>标准Attention</th><th>FA-3(H100)</th><th>加速比</th></tr>
+<tr><td>seq=2K, FP16</td><td>~100 TFLOPS</td><td>~740 TFLOPS</td><td>7.4×</td></tr>
+<tr><td>seq=8K, FP16</td><td>OOM风险</td><td>~600 TFLOPS</td><td>∞(可用)</td></tr>
+<tr><td>seq=128K, FP16</td><td>OOM</td><td>~400 TFLOPS</td><td>∞(可用)</td></tr>
+<tr><td>seq=8K, FP8</td><td>N/A</td><td>~1200 TFLOPS</td><td>12×</td></tr>
+</table>
+
+<h3>📖 术语速查表</h3>
+<dl class="glossary">
+<dt>FlashAttention</dt><dd>通过tiling和online softmax实现IO感知的精确Attention</dd>
+<dt>Online Softmax</dt><dd>逐块计算softmax的技术，无需存储完整注意力矩阵</dd>
+<dt>Tiling</dt><dd>将大矩阵分成小块在SRAM中计算</dd>
+<dt>Recomputation</dt><dd>反向传播时重新计算中间结果以节省内存</dd>
+<dt>Ring Attention</dt><dd>多GPU分布式Attention，序列分片环形通信</dd>
+<dt>TMA</dt><dd>Tensor Memory Accelerator，Hopper的异步数据搬运引擎</dd>
+<dt>WGMMA</dt><dd>Warp Group MMA，Hopper的异步矩阵乘累加指令</dd>
+</dl>
+
+<pre><code class="language-python"># 一、背景与动机 - 性能基准测试与分析
+import time
+import torch
+
+def profile_inference(model, input_data, warmup=10, iterations=100):
+    """推理性能分析：测量延迟、吞吐和显存"""
+    # Warmup
+    for _ in range(warmup):
+        with torch.no_grad():
+            model(input_data)
+    torch.cuda.synchronize()
+    
+    # Measure latency
+    latencies = []
+    for _ in range(iterations):
+        start = time.perf_counter()
+        with torch.no_grad():
+            output = model(input_data)
+        torch.cuda.synchronize()
+        latencies.append(time.perf_counter() - start)
+    
+    # Statistics
+    avg_ms = sum(latencies) / len(latencies) * 1000
+    p50 = sorted(latencies)[len(latencies)//2] * 1000
+    p99 = sorted(latencies)[int(len(latencies)*0.99)] * 1000
+    mem_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+    
+    print(f"Latency: avg={avg_ms:.2f}ms, p50={p50:.2f}ms, p99={p99:.2f}ms")
+    print(f"Peak Memory: {mem_mb:.0f}MB")
+    print(f"Throughput: {1000/avg_ms:.0f} req/s")
+    return {"avg_ms": avg_ms, "p50": p50, "p99": p99, "mem_mb": mem_mb}
+</code></pre>
+<pre><code class="language-bash"># 一、背景与动机 - 环境配置与快速验证
+#!/bin/bash
+set -e
+
+# 1. 环境检查
+echo "=== GPU信息 ==="
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+
+# 2. 依赖安装
+pip install torch transformers accelerate
+
+# 3. 快速验证脚本
+python3 -c "
+import torch
+print(f'PyTorch: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+print(f'GPU: {torch.cuda.get_device_name(0)}')
+print(f'GPU Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB')
+
+# 验证推理
+from transformers import AutoTokenizer, AutoModelForCausalLM
+model_name = 'gpt2'
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name).cuda()
+inputs = tokenizer('Hello world', return_tensors='pt').to('cuda')
+with torch.no_grad():
+    outputs = model.generate(**inputs, max_new_tokens=20)
+print(f'Generated: {tokenizer.decode(outputs[0])}')
+print('验证通过!')
+"
+</code></pre>
+<div class="exercise"><strong>✏️ 练习题：</strong>
+<ol>
+<li>FlashAttention 为什么是"精确"的？Online Softmax 的更新规则如何保证数学等价性？</li>
+<li>计算 FA-3 在 H100 上处理 seq=32K, d=128 的 Attention 时需要多少 SRAM。假设 Br=Bc=128。</li>
+<li>FA-3 的 Warp 专用化如何实现？为什么将加载、计算、存储分配给不同 Warp 能提升效率？</li>
+<li>Ring Attention 的环形通信如何与计算重叠？如果通信延迟 > 计算时间会怎样？</li>
+</ol></div>
+
+<div class="warn"><strong>⚠️ 常见误区：FlashAttention减少了FLOPs：</strong>这是最常见的错误理解！FlashAttention的FLOPs和标准Attention完全一样——都是O(n²d)。它减少的是<strong>HBM访问量</strong>和<strong>内存占用</strong>。速度提升来自减少了从HBM读写S和P矩阵的开销。标准Attention需要把n×n的S和P矩阵写回HBM再读出来做softmax，FlashAttention在SRAM中完成这一切。</div>
+
+<div class="warn"><strong>⚠️ 常见误区：FlashAttention适用于所有Attention变体：</strong>FlashAttention的核心假设是"Attention矩阵太大放不进SRAM"。对于GQA(Grouped Query Attention)，KV头数比Q少，矩阵更小，FA仍然有效。但对于某些稀疏Attention(如Longformer的local attention)，可能有更高效的实现方式。</div>
+
+<div class="deep"><strong>🔬 深入探讨：Online Softmax的数学证明</strong><br><br>
+标准softmax: softmax(x_i) = exp(x_i - max(x)) / Σexp(x_j - max(x))<br>
+问题是max(x)需要看到所有元素。Online Softmax通过<strong>增量更新</strong>解决：<br>
+假设已处理前k个元素，得到m_k和l_k。处理新块时：<br>
+1. 计算新块最大值: m_new_block = max(new_block)<br>
+2. 更新全局最大值: m_new = max(m_k, m_new_block)<br>
+3. 缩放旧分母: l_k' = l_k × exp(m_k - m_new)<br>
+4. 累加新贡献: l_new = l_k' + Σexp(x_j - m_new)<br>
+5. 缩放旧输出: O_old' = O_old × (l_k' / l_new)<br>
+关键: exp(m_k - m_new)保证数学等价——把之前的exp值重新缩放到新的max基准下。</div>
+
+<div class="deep"><strong>🔬 深入探讨：如何选择Br和Bc？</strong><br><br>
+Br(行tile)和Bc(列tile)的选择直接影响FlashAttention性能：<br>
+<strong>约束</strong>：Br×d×2B + Bc×d×2B + Br×Bc×2B(×2 for S和P) ≤ Shared Memory<br>
+<strong>H100为例</strong>(228KB SMem, d=128)：Br=Bc=128需要~128KB → OK；Br=Bc=256需要~512KB → 超了!<br>
+增大Br提高Q复用率；增大Bc提高K/V复用率。但两者受SMem约束。典型配置Br=Bc=128。</div>
+
+<div class="ascii">Online Softmax 状态机:
+
+  初始化: m = -∞, l = 0, O = 0
+
+  Tile 1 (K₁, V₁):
+    S₁ = Q × K₁ᵀ     [Br × Bc]
+    m₁ = max(S₁)
+    l₁ = Σexp(S₁-m₁)
+    O₁ = softmax(S₁) × V₁
+    m = m₁, l = l₁, O = O₁
+
+  Tile 2 (K₂, V₂):
+    S₂ = Q × K₂ᵀ
+    m_new = max(m, max(S₂))     ← 更新全局最大值
+    scale = exp(m - m_new)      ← 缩放因子
+    l = l × scale + Σexp(S₂-m_new)  ← 缩放旧分母+累加新
+    O = O × scale + softmax(S₂)×V₂  ← 缩放旧输出+累加新
+    m = m_new
+
+  Tile 3: (同上)
+
+  最终: O = O / l   ← 只在最后归一化一次!
+  结果与标准Attention数学等价 ✓</div>
+
+<table>
+<tr><th>序列长度</th><th>标准Attention内存</th><th>FlashAttention内存</th><th>内存节省</th></tr>
+<tr><td>1K</td><td>2MB</td><td>~几KB</td><td>~500×</td></tr>
+<tr><td>4K</td><td>32MB</td><td>~几十KB</td><td>~800×</td></tr>
+<tr><td>16K</td><td>512MB</td><td>~几百KB</td><td>~1000×</td></tr>
+<tr><td>64K</td><td>8GB</td><td>~几MB</td><td>~2000×</td></tr>
+<tr><td>128K</td><td>32GB</td><td>~几MB</td><td>~5000×</td></tr>
+</table>
+
+<div class="tip"><strong>💡 通俗类比：FlashAttention像"流式处理"：</strong>标准Attention像"把所有电影帧都加载到内存，然后处理"；FlashAttention像"边看边处理，只保留关键统计信息(m和l)"。最终结果完全一样，但不需要把所有帧(注意力矩阵)都存下来。</div>
+
+<div class="tip"><strong>💡 实用建议：什么时候用标准Attention就够了？</strong>
+序列长度≤512、batch size很大、不需要长上下文时，标准Attention(如cuBLAS的batched GEMM)可能更快，因为没有FlashAttention的online softmax开销和recomputation开销。FlashAttention的优势在长序列场景中才明显。</div>
+
+</div>
+<div class="footer"><p>🖥️ GPU架构与算子 · 06 · FlashAttention的算子实现 — 重新定义Attention</p><p><a href="index.html">返回目录</a> · <a href="../index.html">返回总览</a></p></div>
+
+<div class="tip"><strong>向前串联：</strong>
+一、背景与动机的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

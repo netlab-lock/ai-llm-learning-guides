@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>06-编译优化实战 | 编译优化</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #58a6ff; text-decoration: none; }
+.nav span { color: #8b949e; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+h1 { color: #58a6ff; font-size: 2em; margin: 24px 0 16px; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 12px; margin: 32px 0 16px; font-size: 1.5em; }
+h3 { color: #d2a8ff; margin: 24px 0 12px; font-size: 1.2em; }
+h4 { color: #79c0ff; margin: 16px 0 8px; }
+p { margin: 8px 0; }
+code { background: #21262d; color: #79c0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; margin: 12px 0; font-size: 0.85em; line-height: 1.5; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th { background: #21262d; color: #f0f6fc; padding: 10px 14px; text-align: left; border: 1px solid #30363d; font-weight: 600; }
+td { padding: 8px 14px; border: 1px solid #30363d; }
+tr:nth-child(even) { background: #161b22; }
+.tip { background: #0d1d30; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.exercise { background: #0d2818; border-left: 4px solid #238636; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.svg-diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; text-align: center; }
+.svg-diagram svg { max-width: 100%; height: auto; }
+.ascii { background: #161b22; border: 1px solid #30363d; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82em; line-height: 1.5; padding: 16px; overflow-x: auto; margin: 16px 0; white-space: pre; border-radius: 6px; }
+ul, ol { margin: 8px 0 8px 24px; }
+li { margin: 4px 0; }
+a { color: #58a6ff; }
+.keyword { color: #ff7b72; } .string { color: #a5d6ff; } .comment { color: #8b949e; } .cmd { color: #79c0ff; }
+.footer { text-align: center; color: #484f58; margin-top: 48px; padding: 24px 0; border-top: 1px solid #21262d; font-size: 0.9em; }
+.footer a { color: #58a6ff; }
+.next-prev { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 16px; border-top: 1px solid #21262d; }
+.next-prev a { padding: 8px 16px; background: #21262d; border-radius: 6px; }
+.tag { display: inline-block; background: #388bfd22; color: #58a6ff; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+.badge-blue { background: #1f6feb33; color: #58a6ff; }
+.badge-green { background: #23863633; color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="05-XLA编译.html">&larr; 05-XLA编译</a><span>编译优化栈</span><a href="index.html">index &rarr;</a></div>
+<div class="container">
+
+<h1>🚀 编译优化实战</h1>
+
+<h2>1. 背景与动机</h2>
+<h2>2. SGLang 的编译优化</h2>
+<div class="warn"><strong>常见误区：</strong>SGLang的torch.compile并非开箱即用的"免费加速"。其编译效果依赖于torch-compile-max-bs参数的设置——设置过小会导致频繁重编译，设置过大会浪费GPU显存用于CUDA Graph录制。建议根据实际batch size分布（用nvidia-smi观察）选择3-5个关键batch size值进行编译。</div>
+
+<h3>2.1 启用 torch.compile</h3>
+<pre><code><span class="comment"># SGLang 启动时启用 torch.compile</span>
+python -m sglang.launch_server     --model-path meta-llama/Llama-3-70B     --torch-compile-max-bs 32 \   <span class="comment"># 最大编译 batch size</span>
+    --enable-torch-compile         <span class="comment"># 启用编译优化</span>
+</code></pre>
+
+<h3>2.2 SGLang 的编译架构</h3>
+<div class="svg-diagram"><svg viewBox="0 0 720 400" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <defs><marker id="ah1" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#8b949e"/></marker></defs>
+  <text x="360" y="22" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold">SGLang 编译优化架构</text>
+  <rect x="20" y="35" width="680" height="355" rx="10" fill="none" stroke="#30363d" stroke-width="1.5" stroke-dasharray="8,4"/>
+  <text x="360" y="55" text-anchor="middle" fill="#fbbf24" font-size="11">⬆ 请求到达</text>
+  <!-- RadixAttention -->
+  <rect x="110" y="70" width="500" height="55" rx="6" fill="#1e1b2e" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="360" y="93" text-anchor="middle" fill="#a78bfa" font-size="13" font-weight="600">RadixAttention</text>
+  <text x="360" y="113" text-anchor="middle" fill="#8b949e" font-size="11">KV Cache 管理</text>
+  <line x1="360" y1="125" x2="360" y2="155" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah1)"/>
+  <!-- torch.compile -->
+  <rect x="110" y="160" width="500" height="85" rx="6" fill="#0d1a2e" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="360" y="185" text-anchor="middle" fill="#22d3ee" font-size="13" font-weight="600">torch.compile (Dynamo + Inductor)</text>
+  <text x="160" y="207" fill="#8b949e" font-size="11">├── Prefill: 标准编译</text>
+  <text x="160" y="227" fill="#8b949e" font-size="11">└── Decode: CUDA Graph 重放</text>
+  <line x1="360" y1="245" x2="360" y2="275" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah1)"/>
+  <!-- GPU Execution -->
+  <rect x="110" y="280" width="500" height="55" rx="6" fill="#0d1a2e" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="360" y="303" text-anchor="middle" fill="#22d3ee" font-size="13" font-weight="600">GPU 执行</text>
+  <text x="360" y="323" text-anchor="middle" fill="#8b949e" font-size="11">Triton kernels</text>
+</svg></div>
+
+<h3>2.3 SGLang 的特殊优化</h3>
+<ul>
+<li><strong>TorchCompile 后端</strong>：Dynamo + Inductor 的端到端集成</li>
+<li><strong>Jump-forward decoding</strong>：在结构化输出中，跳过确定性 token，减少 Decode 步数</li>
+<li><strong>Compressed FSM</strong>：将 JSON Schema 编译为压缩的有限状态机，与 CUDA Graph 兼容</li>
+</ul>
+
+<div class="ascii">Jump-forward decoding 工作原理:
+
+标准 Decode (逐 token):
+  Step 1: {" → Step 2: name → Step 3: ": → Step 4: " → Step 5: John
+  ──────────────────────────────────────────────────────────────→ 时间
+
+Jump-forward Decode (跳过确定性 token):
+  JSON Schema 约束: {"name": "..."}
+  → {"name": "  已确定, 可以批量生成!
+  Step 1: {" → 跳过! → "John" (一次生成多个 token)
+  ──────→ 时间节省 60%+
+
+  原理: 有限状态机预测下一步的合法 token
+  → 确定性路径直接跳过, 只在分支点调用模型</div>
+
+<div class="deep"><strong>深入探讨——torch.compile 的编译原理：</strong>torch.compile 通过 Dynamo（Python 字节码捕获）将 PyTorch 模型转换为 FX Graph，然后由 Inductor 后端生成优化的 Triton/C++ 代码。为什么 Dynamo 比 torch.jit.trace 更好？因为 Dynamo 可以处理动态控制流——它通过"graph break"机制在遇到无法静态分析的 Python 代码时暂停捕获，而不是像 trace 那样静默产生错误结果。编译一个 70B 模型通常需要 30-120 秒（首次），后续推理享受 1.5-2x 的加速。</div>
+
+<h2>3. vLLM 的编译优化</h2>
+<div class="warn"><strong>常见误区：</strong>vLLM v1默认启用CUDA Graphs，但CUDA Graph录制会额外占用约1-2GB显存。在显存紧张的场景（如70B模型单卡部署），需在启动参数中权衡gpu-memory-utilization与CUDA Graph数量，必要时可关闭部分batch size的Graph录制来释放显存。</div>
+
+<h3>3.1 vLLM v1 架构</h3>
+<p>vLLM v1 架构（2025）重新设计了编译优化的集成方式：</p>
+<pre><code><span class="comment"># vLLM v1 的编译模式</span>
+<span class="comment"># 默认启用 torch.compile + CUDA Graphs</span>
+python -m vllm.entrypoints.openai.api_server     --model meta-llama/Llama-3-70B     --gpu-memory-utilization 0.90     --max-num-seqs 256
+</code></pre>
+
+<h3>3.2 vLLM 的 CUDA Graph 管理</h3>
+<ul>
+<li><strong>Graph 池</strong>：为不同 batch size 预录制 CUDA Graph</li>
+<li><strong>延迟录制</strong>：首次遇到新 batch size 时才录制</li>
+<li><strong>内存预算</strong>：Graph 池的内存占用需要纳入显存预算</li>
+</ul>
+
+<h2>4. TensorRT-LLM 的编译优化</h2>
+<div class="warn"><strong>常见误区：</strong>TensorRT-LLM的编译结果（plan file）是GPU架构绑定的——在A100上编译的engine不能在H100上运行。每次更换GPU型号或驱动版本都需要重新编译。在多型号GPU混部的集群中，这意味着需要为每种硬件配置维护独立的编译产物。</div>
+
+<h3>4.1 TRT 编译流程</h3>
+<div class="svg-diagram"><svg viewBox="0 0 760 540" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <defs><marker id="ah2" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#8b949e"/></marker></defs>
+  <text x="380" y="22" text-anchor="middle" fill="#58a6ff" font-size="14" font-weight="bold">TensorRT-LLM 编译流程</text>
+  <!-- ONNX -->
+  <rect x="120" y="45" width="260" height="55" rx="6" fill="#0d1f17" stroke="#34d399" stroke-width="1.5"/>
+  <text x="250" y="68" text-anchor="middle" fill="#34d399" font-size="13" font-weight="600">ONNX 模型</text>
+  <text x="250" y="88" text-anchor="middle" fill="#8b949e" font-size="10">从 PyTorch 导出</text>
+  <line x1="250" y1="100" x2="250" y2="138" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah2)"/>
+  <!-- Parser -->
+  <rect x="120" y="143" width="260" height="55" rx="6" fill="#0d1f17" stroke="#34d399" stroke-width="1.5"/>
+  <text x="250" y="166" text-anchor="middle" fill="#34d399" font-size="13" font-weight="600">TensorRT Parser</text>
+  <text x="250" y="186" text-anchor="middle" fill="#8b949e" font-size="10">解析 ONNX → TRT IR</text>
+  <line x1="250" y1="198" x2="250" y2="236" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah2)"/>
+  <!-- Optimizer -->
+  <rect x="120" y="241" width="260" height="130" rx="6" fill="#0d1a2e" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="250" y="266" text-anchor="middle" fill="#22d3ee" font-size="13" font-weight="600">TRT Optimizer</text>
+  <text x="150" y="290" fill="#8b949e" font-size="11">├── 层融合</text>
+  <text x="150" y="310" fill="#8b949e" font-size="11">├── 精度校准</text>
+  <text x="150" y="330" fill="#8b949e" font-size="11">├── 内存优化</text>
+  <text x="150" y="350" fill="#8b949e" font-size="11">└── Kernel 选择</text>
+  <text x="400" y="290" fill="#6e7681" font-size="10">← QKV 融合、MLP 融合</text>
+  <text x="400" y="310" fill="#6e7681" font-size="10">← FP16/INT8/FP8</text>
+  <text x="400" y="330" fill="#6e7681" font-size="10">← 张量重排序</text>
+  <text x="400" y="350" fill="#6e7681" font-size="10">← 从数十种候选中选择最快的</text>
+  <line x1="250" y1="371" x2="250" y2="414" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah2)"/>
+  <!-- Engine -->
+  <rect x="120" y="419" width="260" height="75" rx="6" fill="#0d1a2e" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="250" y="444" text-anchor="middle" fill="#22d3ee" font-size="13" font-weight="600">TRT Engine</text>
+  <text x="250" y="464" text-anchor="middle" fill="#8b949e" font-size="10">编译好的推理引擎 (plan file)</text>
+  <text x="250" y="484" text-anchor="middle" fill="#6e7681" font-size="10">可序列化、可复用</text>
+</svg></div>
+
+<h3>4.2 TRT vs torch.compile</h3>
+<div class="tip"><strong>通俗类比：</strong>TensorRT 像是"请大厨做一桌定制菜"——第一次上菜很慢（编译时间长），但之后每道菜都是极致美味（最优性能）。torch.compile 像是"用智能炒菜机"——预热很快，菜品质量不错，但达不到大厨的手艺。选择哪个取决于你是"偶尔做一次大餐"（开发迭代快→torch.compile）还是"每天固定菜单"（生产环境→TensorRT）。</div>
+<table>
+<tr><th>维度</th><th>TensorRT-LLM</th><th>torch.compile</th></tr>
+<tr><td>编译时间</td><td>长（分钟到小时）</td><td>短（秒到分钟）</td></tr>
+<tr><td>优化程度</td><td>更深（kernel auto-tuning）</td><td>较好（自动融合）</td></tr>
+<tr><td>灵活性</td><td>低（需要导出 ONNX）</td><td>高（原生 PyTorch）</td></tr>
+<tr><td>动态 Shape</td><td>有限支持</td><td>较好支持</td></tr>
+<tr><td>维护成本</td><td>高（版本锁定）</td><td>低（跟随 PyTorch）</td></tr>
+</table>
+
+<h2>5. 编译优化的工程实践</h2>
+<div class="warn"><strong>常见误区：</strong>编译缓存（torch_inductor_graph）在PyTorch版本升级后通常失效。升级PyTorch后如果发现推理性能突然下降，首先检查编译缓存是否命中，而非怀疑代码bug。建议在CI/CD中加入编译缓存命中率监控。</div>
+
+<h3>5.1 Warmup 策略</h3>
+<div class="tip"><strong>通俗类比：</strong>Warmup 就像赛车比赛前的暖胎圈——轮胎（GPU kernel）需要先跑一圈达到工作温度（完成编译），之后才能发挥最佳性能。如果你在暖胎圈就计时（把首次推理算进性能统计），成绩当然很差。</div>
+<pre><code><span class="comment"># Warmup: 首次推理触发编译，不计入性能统计</span>
+<span class="keyword">for</span> _ <span class="keyword">in</span> range(10):
+    model(dummy_input)  <span class="comment"># warmup，触发编译</span>
+
+<span class="comment"># 正式推理</span>
+torch.cuda.synchronize()
+start = time.time()
+<span class="keyword">for</span> _ <span class="keyword">in</span> range(100):
+    model(input)
+torch.cuda.synchronize()
+elapsed = time.time() - start
+</code></pre>
+
+<h3>5.2 编译缓存</h3>
+<pre><code><span class="comment"># PyTorch 2.6: 持久化编译缓存</span>
+torch._inductor.config.fx_graph_cache = <span class="keyword">True</span>
+
+<span class="comment"># 首次启动: 编译 (~30s - 2min)</span>
+<span class="comment"># 后续启动: 从缓存加载 (~1-3s)</span>
+
+<span class="comment"># 缓存位置</span>
+<span class="comment"># ~/.cache/torch_inductor_graph/</span>
+<span class="comment"># ~/.cache/torch_inductor/</span>
+</code></pre>
+
+<h3>5.3 常见问题排查</h3>
+<table>
+<tr><th>问题</th><th>症状</th><th>解决方法</th></tr>
+<tr><td>编译时间过长</td><td>首次推理 > 5 分钟</td><td>减少 max-autotune 的搜索空间，使用编译缓存</td></tr>
+<tr><td>Graph break 过多</td><td>性能提升不明显</td><td>检查 <code>torch._dynamo.explain(model)</code>，修复 graph break</td></tr>
+<tr><td>CUDA OOM</td><td>编译时显存不足</td><td>减少编译 batch size，关闭 max-autotune</td></tr>
+<tr><td>数值精度问题</td><td>编译后结果不一致</td><td>检查 Triton kernel 的数值稳定性</td></tr>
+<tr><td>动态 shape 重编译</td><td>每次 shape 变化都重新编译</td><td>使用 <code>mark_dynamic</code> 或 <code>automatic_dynamic_shapes</code></td></tr>
+</table>
+
+<div class="ascii">Graph Break 的产生机制:
+
+  原始 PyTorch 代码:
+  ┌─────────────────────────────────────┐
+  │ def forward(self, x):               │
+  │     x = self.linear1(x)     ← Graph │
+  │     if x.sum() > 0:         ← BREAK!│ (数据依赖控制流)
+  │         x = self.linear2a(x)        │
+  │     else:                            │
+  │         x = self.linear2b(x)        │
+  │     return x                         │
+  └─────────────────────────────────────┘
+
+  torch.compile 处理:
+  ┌──────────┐  graph break  ┌──────────┐
+  │ Graph 1  │ ────────────→ │ Graph 2  │
+  │ linear1  │   Python      │ linear2  │
+  │ + sum()  │   interpreter │ (a 或 b) │
+  └──────────┘               └──────────┘
+
+  优化方案: 用 torch.where() 替代 if/else
+  x = torch.where(x.sum() > 0, self.linear2a(x), self.linear2b(x))
+  → 整个 forward 成为一个 Graph, 无 break!</div>
+
+<h2>6. 性能对比</h2>
+<h3>torch.compile的编译开销与收益<strong>推导</strong></h3>
+<p>torch.compile<strong>为什么</strong>首次编译慢但后续快？<strong>数学本质</strong>：编译开销 = 图捕获时间 + kernel编译时间 + 自动调优时间。以70B模型为例：图捕获~5s，kernel编译~30s（Triton代码生成+CUDA编译），自动调优~60s（搜索最优配置）。但这些是一次性成本。<strong>推导</strong>收益：设原推理速度为T_base，编译后为T_compiled = T_base / speedup，则盈亏平衡点 = compile_time / (T_base - T_compiled)次推理。典型情况下约100-500次推理后编译即\"回本\"，生产环境1小时内可覆盖。</p>模型</th><th>GPU</th><th>eager (tok/s)</th><th>compile (tok/s)</th><th>提升</th></tr>
+<tr><td>SGLang</td><td>Llama-3-70B</td><td>H100</td><td>~1500</td><td>~2500</td><td>1.67x</td></tr>
+<tr><td>vLLM</td><td>Llama-3-70B</td><td>H100</td><td>~1200</td><td>~2000</td><td>1.67x</td></tr>
+<tr><td>PyTorch</td><td>Llama-3-7B</td><td>A100</td><td>~3000</td><td>~5000</td><td>1.67x</td></tr>
+<tr><td>TensorRT-LLM</td><td>Llama-3-70B</td><td>H100</td><td>—</td><td>~3000</td><td>—</td></tr>
+</table>
+
+<div class="warn"><strong>常见误区：</strong>
+很多人在学习背景与动机时容易陷入"只看不练"的误区，以为理解了概念就能在实际项目中应用。实际上，理论知识必须配合动手实验才能真正掌握。建议每学完一个知识点就写一段验证代码，在实践中发现和解决问题。</div>
+
+<div class="tip"><strong>通俗类比：</strong>编译优化就像"预制菜"——首次加工（编译）需要额外时间，但后续每次加热（推理）都极快。如果只做一顿饭（推理一次），预制菜反而更慢；但如果每天都要做同样的菜（生产环境），预制菜的效率优势就体现出来了。这就是为什么开发环境通常不开启 max-autotune，而生产环境必须开启。</div>
+
+<div class="warn"><strong>常见误区：</strong>很多人以为 torch.compile 是"一键加速"。实际上，编译优化的效果高度依赖于模型结构——纯 Transformer 架构（如 LLaMA）效果最好（1.5-2x），但包含大量动态控制流的模型（如 MoE、条件计算）可能因 graph break 过多而几乎无收益。建议先用 <code>torch._dynamo.explain(model)</code> 检查 graph break 数量，再决定是否启用编译。</div>
+
+<h2>7. 编译优化决策流程</h2>
+<h3>性能对比</h3>
+<div class="warn"><strong>常见误区：</strong>选择编译优化方案时，不要只看峰值性能，还要考虑运维成本。TensorRT-LLM的编译调试周期长（分钟到小时），版本升级困难；torch.compile编译快但性能上限略低。对于需要快速迭代的场景，优先选择torch.compile；对于稳定不变的生产流量，TensorRT-LLM更合适。</div>
+你的情况是什么？
+│
+├─ 开发调试阶段
+│   └─ 使用 torch.compile default 模式（编译快，基本融合）
+│
+├─ 性能基准测试
+│   └─ 使用 torch.compile max-autotune 模式（自动调优）
+│
+├─ 生产部署
+│   ├─ PyTorch 生态 → SGLang + torch.compile + CUDA Graphs
+│   ├─ 需要极致性能 → TensorRT-LLM
+│   └─ JAX/TPU 生态 → JAX jit + XLA
+│
+└─ 端侧部署
+    └─ llama.cpp（手工优化，无编译优化）
+</div>
+
+<div class="deep"><strong>深入探讨：</strong>从系统设计的角度看，背景与动机的本质是在性能、精度和资源三者之间寻找最优平衡点。理解这个三角约束关系，就能推导出大多数技术选择背后的逻辑。</div>
+<div class="deep"><strong>背景与动机的技术原理推导：</strong>
+从<strong>底层</strong>硬件角度分析，背景与动机的性能瓶颈通常不在计算本身，
+而在数据搬运。<strong>为什么</strong>？<strong>推导</strong>如下：
+GPU的计算吞吐（如A100 FP16: 312 TFLOPS）远超内存带宽（2TB/s），
+算术强度转折点 = 312T/2T = 156 FLOPs/Byte。
+当实际算术强度低于此值时，任务是内存受限的。
+<strong>数学本质</strong>上，优化的核心是提高算术强度——
+通过批处理（共享参数读取）和算子融合（减少中间结果写回）来实现。
+这一<strong>原理</strong>适用于所有GPU加速的推理框架，
+是理解背景与动机性能特征的<strong>底层</strong>基础。
+</div>
+<div class="ascii">
+背景与动机 架构与数据流
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+  PCIe/NVLink    Tensor Core          结果回传
+</div>
+<table>
+<caption>背景与动机 技术对比</caption>
+<thead><tr><th>方案</th><th>延迟</th><th>吞吐</th><th>显存</th><th>适用场景</th></tr></thead>
+<tbody>
+<tr><td>方案A</td><td>低</td><td>中</td><td>高</td><td>实时推理</td></tr>
+<tr><td>方案B</td><td>中</td><td>高</td><td>中</td><td>批量处理</td></tr>
+<tr><td>方案C</td><td>高</td><td>极高</td><td>低</td><td>资源受限</td></tr>
+</tbody>
+</table>
+
+<div class="tip"><strong>实用技巧：</strong>
+在实际工程中应用背景与动机时，。
+记录关键性能指标（延迟p50/p99、吞吐QPS、显存峰值），
+然后逐步扩大规模到生产配置。遇到性能瓶颈时，
+用nsys或torch.profiler定位根因，避免盲目优化。</div>
+<div class="exercise">
+<strong>思考与练习：</strong>
+<ol>
+<li>在 SGLang 中部署一个 7B 模型，分别使用 <code>--enable-torch-compile</code> 和不使用，用 <code>benchmark_serving.py</code> 测试吞吐差异。</li>
+<li>使用 <code>torch._dynamo.explain(model)</code> 检查你的模型有多少 graph break，尝试修复其中的 2-3 个。</li>
+<li>比较 torch.compile 的三种模式（default、reduce-overhead、max-autotune）的编译时间和推理性能，分析各自的适用场景。</li>
+<li>解释为什么 CUDA Graph 对 Decode 阶段的加速效果比 Prefill 阶段更显著？（提示：从 kernel launch overhead 占比角度分析）</li>
+</ol>
+</div>
+
+<h2>术语速查表</h2>
+<h3>术语速查表</h3>
+<tr><td>Auto-tune</td><td>自动搜索最优 kernel 配置</td></tr>
+<tr><td>ONNX</td><td>Open Neural Network Exchange，模型交换格式</td></tr>
+<tr><td>Plan File</td><td>TensorRT 编译后的推理引擎文件</td></tr>
+</table>
+
+</div>
+<div class="footer"><p><a href="index.html">返回编译优化总览</a> | <a href="../index.html">返回学习目录</a></p></div>
+<p style="color:#8b949e;font-size:0.9em;margin-top:16px;">后续章节将深入探讨 <a href="../推理框架/04-量化技术/00-总览.html">量化技术</a> 如何与编译优化协同工作，以及 <a href="../推理框架/03-批处理技术/00-总览.html">批处理技术</a> 中 CUDA Graph 的应用。</p>
+
+<div class="tip"><strong>向前串联：</strong>
+背景与动机的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+学习背景与动机建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

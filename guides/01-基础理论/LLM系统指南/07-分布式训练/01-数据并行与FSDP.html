@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>01-数据并行与FSDP | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.deep{background:rgba(188,140,255,0.08);border-left:4px solid var(--purple)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}
+.highlight{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin:16px 0;font-size:0.92em}</style>
+</head>
+<body>
+<div class="nav"><span></span><span>07-分布式 / 数据并行与FSDP</span><a href="02-张量并行.html">02-张量并行 &rarr;</a></div>
+<div class="container">
+
+<h1>📊 1. 数据并行与 FSDP</h1>
+
+<h2>1.1 数据并行的基本原理</h2>
+<p>数据并行（Data Parallelism, DP）是分布式训练中最基本也是最广泛使用的并行策略。其核心思想非常直观：将训练数据分成多份，每份交给一张GPU处理，每张GPU持有完整的模型副本，独立完成前向传播和反向传播后，通过集合通信操作同步梯度，最后各自更新参数。这种并行方式的优势在于实现简单、扩展性好，并且不会改变模型的计算逻辑，因此训练结果与单卡训练完全等价。</p>
+
+<div class="box tip"><div class="label">💡 通俗类比</div>数据并行就像一个餐厅有 8 个厨师，每人拿到一模一样的菜谱（完整模型副本），但处理不同的订单（不同数据批次）。做完后大家互相交流心得（AllReduce 同步梯度），确保每个人的菜谱更新一致。简单高效，但前提是每个厨师的厨房（GPU 显存）要放得下完整的菜谱。</div>
+
+<p>在标准的数据并行训练中，每张GPU需要存储三部分内容：模型参数（以FP16/BF16存储，占2字节/参数）、梯度（与参数同等大小）、以及优化器状态（Adam优化器需要额外存储一阶动量和二阶动量，各占4字节/参数）。以一个7B参数的模型为例，单卡显存占用的详细计算如下：模型参数为7B × 2 bytes = 14 GB，梯度为7B × 2 bytes = 14 GB，Adam优化器状态为7B × 4 bytes × 2 = 56 GB，总计约84 GB。这意味着即使是7B模型，单张A100 80GB显卡也只能勉强放下，而更大的模型则完全无法使用标准DDP训练。</p>
+
+<div class="ascii">数据并行训练流程:
+
+  ┌─────────┐   ┌─────────┐   ┌─────────┐   ┌─────────┐
+  │  GPU 0  │   │  GPU 1  │   │  GPU 2  │   │  GPU 3  │
+  │完整模型  │   │完整模型  │   │完整模型  │   │完整模型  │
+  │Batch #0 │   │Batch #1 │   │Batch #2 │   │Batch #3 │
+  └────┬────┘   └────┬────┘   └────┬────┘   └────┬────┘
+       │             │             │             │
+       ▼             ▼             ▼             ▼
+  前向传播      前向传播      前向传播      前向传播
+       │             │             │             │
+       ▼             ▼             ▼             ▼
+  计算Loss      计算Loss      计算Loss      计算Loss
+       │             │             │             │
+       ▼             ▼             ▼             ▼
+  反向传播      反向传播      反向传播      反向传播
+  (局部梯度)    (局部梯度)    (局部梯度)    (局部梯度)
+       │             │             │             │
+       └──────┬──────┴──────┬──────┴──────┬──────┘
+              ▼             ▼             ▼
+         ┌──────────────────────────────────┐
+         │      AllReduce (梯度平均)         │
+         │   Ring AllReduce: 2(N-1)/N × M   │
+         └──────────────┬───────────────────┘
+                        │
+              ▼         ▼         ▼         ▼
+           更新参数   更新参数   更新参数   更新参数
+           (同步)     (同步)     (同步)     (同步)</div>
+
+<h3>AllReduce 的实现原理</h3>
+<p>AllReduce是数据并行中最核心的通信原语。其作用是将所有GPU上的梯度张量进行归约（通常是求平均），然后将结果广播回所有GPU。最常见的实现算法是Ring AllReduce，其工作原理如下：假设有N张GPU，每张GPU持有一个大小为M的梯度张量。Ring AllReduce将每个张量分成N份，通过N-1轮的ReduceScatter操作和N-1轮的AllGather操作完成归约。总通信量为2(N-1)/N × M，当N足够大时趋近于2M，即与GPU数量无关，实现了带宽最优。</p>
+
+<div class="box deep"><div class="label">🔬 深入探讨</div>
+<h3>Ring AllReduce 的数学分析</h3>
+<p>Ring AllReduce 的通信复杂度分析如下：设共有 N 张 GPU，每张 GPU 持有大小为 M 的数据。在 ReduceScatter 阶段，数据被分成 N 块，每块大小为 M/N。每轮传输中，每张 GPU 向环中下一张 GPU 发送一块数据，同时接收上一张 GPU 的一块数据并累加。经过 N-1 轮后，每张 GPU 持有完整归约结果的 1/N。AllGather 阶段类似，经过 N-1 轮后每张 GPU 持有完整的归约结果。</p>
+<p>总通信量 = 2 × (N-1) × (M/N) ≈ 2M（当 N 较大时）。这个结果表明 Ring AllReduce 的通信量与 GPU 数量几乎无关，是带宽最优的算法。然而，Ring AllReduce 的延迟为 2(N-1) × α，其中 α 是每次传输的启动延迟。对于小消息，延迟可能成为瓶颈，此时树形（Tree）AllReduce 更优。</p>
+<p>NCCL（NVIDIA Collective Communications Library）在实际实现中会根据消息大小、GPU 数量和拓扑结构自动选择最优的 AllReduce 算法。对于大于几MB的消息，NCCL 通常选择 Ring 或 Tree 算法的混合变体；对于小消息，则可能使用简单的广播方式。NCCL 2.x 引入了对 NVLink、NVSwitch 和 InfiniBand 的原生支持，能够自动检测硬件拓扑并优化通信路径。</p>
+</div>
+
+<h3>DDP 的梯度同步策略</h3>
+<p>PyTorch 的 DistributedDataParallel（DDP）是数据并行的标准实现。DDP 提供了两种梯度同步策略：</p>
+<ul>
+<li><strong>同步数据并行（Synchronous DP）</strong>：所有GPU必须完成梯度计算后才能进行参数更新。优点是训练结果确定且等价于单卡大Batch训练；缺点是存在木桶效应，最慢的GPU决定了整体速度。</li>
+<li><strong>异步数据并行（Asynchronous DP）</strong>：各GPU独立更新参数，无需等待其他GPU。优点是无木桶效应；缺点是梯度过时（stale gradient）问题，可能导致训练不稳定。</li>
+</ul>
+
+<p>现代大模型训练几乎都采用同步数据并行，因为训练稳定性远比速度重要。DDP 还引入了一个重要优化：梯度分桶（Gradient Bucketing）。DDP 将参数的梯度分成多个桶（默认25MB），当一个桶的所有梯度就绪后立即启动该桶的 AllReduce，而不是等待所有梯度计算完成。这种流水线化的处理方式可以将通信与计算重叠，显著提高GPU利用率。</p>
+
+<div class="box tip"><div class="label">💡 实践建议</div>在使用 DDP 时，有几个关键的性能优化技巧：(1) 设置 find_unused_parameters=False（默认值），除非模型有动态计算图；(2) 使用 gradient_as_bucket_view=True 减少内存拷贝；(3) 确保数据加载器使用 DistributedSampler，避免各GPU处理相同数据；(4) 使用梯度累积来等效增大 Batch Size，减少通信频率。这些优化综合起来可以将训练吞吐量提升 10-30%。</div>
+
+<table>
+<tr><th>数据并行变体</th><th>梯度同步</th><th>显存需求</th><th>训练稳定性</th><th>适用场景</th></tr>
+<tr><td>标准 DDP</td><td>AllReduce 同步</td><td>每卡完整模型</td><td>最优</td><td>模型能放进单卡</td></tr>
+<tr><td>ZeRO Stage 1</td><td>AllReduce + 分片优化器</td><td>优化器/N + 完整参数</td><td>最优</td><td>优化器显存占比大</td></tr>
+<tr><td>ZeRO Stage 2</td><td>ReduceScatter + AllGather</td><td>优化器/N + 梯度/N</td><td>最优</td><td>中等规模模型</td></tr>
+<tr><td>ZeRO Stage 3 / FSDP</td><td>AllGather + ReduceScatter</td><td>全部分片/N</td><td>最优</td><td>超大模型</td></tr>
+<tr><td>Gossip (异步)</td><td>异步 P2P</td><td>每卡完整模型</td><td>可能不稳</td><td>研究用途</td></tr>
+</table>
+
+<h2>1.2 ZeRO (Zero Redundancy Optimizer)</h2>
+<p>ZeRO（Zero Redundancy Optimizer）是微软 DeepSpeed 团队提出的显存优化技术，其核心思想是通过分片（Sharding）消除数据并行中的显存冗余。在标准DDP中，每张GPU都存储完整的模型参数、梯度和优化器状态，这造成了N-1倍的冗余存储（N为GPU数量）。ZeRO通过将这些状态分散存储到不同GPU上，将单卡显存需求降低到原来的1/N，代价是增加了少量通信开销。</p>
+
+<div class="box warn"><div class="label">⚠️ 常见误区</div>很多人以为 ZeRO 和 DDP 效果一样。实际上 DDP 需要每张 GPU 存放完整模型副本（参数+梯度+优化器状态），而 ZeRO 将这些分片存储。对于 70B 模型，DDP 每卡需要 ~560GB（不可能），ZeRO-3 只需 ~560/N GB。但 ZeRO 的代价是更多通信——Stage 3 每次前向/反向都需要 AllGather 收集完整参数。</div>
+
+<div class="ascii">ZeRO 三阶段显存分片示意 (N=4 GPU, 参数 P, 梯度 G, 优化器 O):
+
+┌──────────────────────────────────────────────────────────────────┐
+│ Stage 0 (DDP): 每卡存 [P, G, O] 完整副本                        │
+│                                                                  │
+│ GPU0: [P0-5][G0-5][O0-5]   GPU1: [P0-5][G0-5][O0-5]            │
+│ GPU2: [P0-5][G0-5][O0-5]   GPU3: [P0-5][G0-5][O0-5]            │
+│ 冗余: (N-1)/N = 75%                                              │
+├──────────────────────────────────────────────────────────────────┤
+│ Stage 1: 分片优化器状态                                           │
+│                                                                  │
+│ GPU0: [P0-5][G0-5][O0-1]   GPU1: [P0-5][G0-5][O2-3]            │
+│ GPU2: [P0-5][G0-5][O4-5]   GPU3: [P0-5][G0-5][空]              │
+│ 节省: 优化器显存 → 1/N                                           │
+├──────────────────────────────────────────────────────────────────┤
+│ Stage 2: + 分片梯度                                               │
+│                                                                  │
+│ GPU0: [P0-5][G0-1][O0-1]   GPU1: [P0-5][G2-3][O2-3]            │
+│ GPU2: [P0-5][G4-5][O4-5]   GPU3: [P0-5][G0-1][空]              │
+│ 节省: 优化器+梯度 → 各1/N                                        │
+├──────────────────────────────────────────────────────────────────┤
+│ Stage 3 (FSDP): + 分片参数                                       │
+│                                                                  │
+│ GPU0: [P0-1][G0-1][O0-1]   GPU1: [P2-3][G2-3][O2-3]            │
+│ GPU2: [P4-5][G4-5][O4-5]   GPU3: [P0-1][G0-1][O0-1]            │
+│ 节省: 全部 → 1/N  |  代价: 前向需 AllGather 获取完整参数         │
+└──────────────────────────────────────────────────────────────────┘</div>
+
+<h3>ZeRO 各阶段的通信与显存分析</h3>
+<p>ZeRO 的三个阶段在通信量和显存节省之间提供了不同的权衡点。以下是每个阶段的详细数学分析：</p>
+
+<p><strong>ZeRO Stage 1</strong>：将优化器状态（Adam 的一阶动量和二阶动量）分片到 N 张 GPU 上。每个参数的优化器状态从 8 bytes（2 × FP32 动量）降至 8/N bytes。通信量与 DDP 相同：每步需要 2M 字节的 AllReduce（M 为参数量 × 2 bytes，FP16）。显存节省主要体现在优化器状态上，对大模型的参数和梯度存储无帮助。</p>
+
+<p><strong>ZeRO Stage 2</strong>：在 Stage 1 的基础上，将梯度也分片存储。每张GPU只需要存储 1/N 的梯度，通过 ReduceScatter 聚合梯度后只保留自己负责的那部分。通信量仍为 2M 字节/步（ReduceScatter + AllGather 与 AllReduce 等价）。显存节省显著：以 7B 模型为例，Stage 2 在 8 GPU 上的单卡显存 = 14GB(参数) + 14/8 GB(梯度) + 56/8 GB(优化器) = 14 + 1.75 + 7 = 22.75 GB。</p>
+
+<p><strong>ZeRO Stage 3 / FSDP</strong>：将参数也分片存储。前向传播时通过 AllGather 收集完整参数，计算完立即释放；反向传播时再次 AllGather。通信量增加到 3M 字节/步（多了一次 AllGather）。以 7B 模型为例，Stage 3 在 8 GPU 上的单卡显存 = 84/8 = 10.5 GB。</p>
+
+<div class="box warn"><div class="label">⚠️ 关键注意</div>ZeRO Stage 3 的通信量虽然增加了50%（3M vs 2M），但在实际训练中，由于通信可以与计算重叠，额外的开销通常只有 10-20%。真正的瓶颈在于 AllGather 的延迟——每次前向和反向都需要等待所有参数收集完毕才能开始计算。对于非常大的模型，这种同步等待可能成为性能瓶颈。因此，在跨节点训练中，通常建议使用 Stage 2 而非 Stage 3。</div>
+
+<h2>1.3 FSDP 实战详解</h2>
+<p>PyTorch 的 Fully Sharded Data Parallel（FSDP）是 ZeRO Stage 3 的官方 PyTorch 实现。与 DeepSpeed 的 ZeRO 相比，FSDP 更加"PyTorch 原生"，无需修改模型代码，只需用 FSDP 包装器包裹模型即可。FSDP 的关键设计决策包括：分片粒度（auto_wrap_policy）、混合精度策略、以及通信与计算的重叠方式。</p>
+
+<div class="box tip"><div class="label">💡 实践建议</div>FSDP 的关键是选择合适的 <code>auto_wrap_policy</code>。通常按 Transformer 层来包装（每层一个 FSDP 单元），这样通信粒度适中。混合精度（BF16）几乎是必须的——既节省显存又不影响训练质量。如果显存仍然不够，可以开启 <code>activation_checkpointing</code> 用计算换存储。</div>
+
+<pre><code><span class="comment"># PyTorch FSDP 完整使用示例</span>
+<span class="keyword">import</span> torch
+<span class="keyword">from</span> torch.distributed.fsdp <span class="keyword">import</span> FullyShardedDataParallel <span class="keyword">as</span> FSDP
+<span class="keyword">from</span> torch.distributed.fsdp <span class="keyword">import</span> MixedPrecision, ShardingStrategy
+<span class="keyword">from</span> torch.distributed.fsdp.wrap <span class="keyword">import</span> transformer_auto_wrap_policy
+<span class="keyword">from</span> transformers <span class="keyword">import</span> LlamaForCausalLM, LlamaConfig
+<span class="keyword">from</span> transformers.models.llama.modeling_llama <span class="keyword">import</span> LlamaDecoderLayer
+<span class="keyword">import</span> functools
+
+<span class="comment"># 1. 创建模型</span>
+config = LlamaConfig(
+    hidden_size=4096,
+    num_hidden_layers=32,
+    num_attention_heads=32,
+    intermediate_size=11008,
+)
+model = LlamaForCausalLM(config)
+
+<span class="comment"># 2. 定义自动包装策略 (按 Transformer 层包装)</span>
+auto_wrap_policy = functools.partial(
+    transformer_auto_wrap_policy,
+    transformer_layer_cls={LlamaDecoderLayer},
+)
+
+<span class="comment"># 3. 混合精度策略</span>
+mp_policy = MixedPrecision(
+    param_dtype=torch.bfloat16,   <span class="comment"># 参数用 BF16</span>
+    reduce_dtype=torch.bfloat16,  <span class="comment"># 梯度归约用 BF16</span>
+    buffer_dtype=torch.bfloat16,  <span class="comment"># Buffer 用 BF16</span>
+)
+
+<span class="comment"># 4. FSDP 包装</span>
+model = FSDP(
+    model,
+    sharding_strategy=ShardingStrategy.FULL_SHARD,  <span class="comment"># ZeRO-3</span>
+    mixed_precision=mp_policy,
+    auto_wrap_policy=auto_wrap_policy,
+    device_id=torch.cuda.current_device(),
+    limit_all_gathers=True,  <span class="comment"># 限制同时进行的 AllGather 数量</span>
+)
+
+<span class="comment"># 5. 启动: torchrun --nproc_per_node=8 train_fsdp.py</span></code></pre>
+
+<h3>FSDP 的前向与反向传播流程</h3>
+<p>FSDP 的前向传播过程如下：当模型的某个 FSDP 单元（如一个 Transformer 层）需要计算时，FSDP 首先通过 AllGather 操作从所有 GPU 收集该单元的完整参数。AllGather 完成后，使用完整参数执行正常的前向计算。计算完成后，释放非本地的参数分片以节省显存。这一过程对每个 FSDP 单元依次进行。</p>
+
+<p>反向传播过程类似：当需要计算某个 FSDP 单元的梯度时，再次通过 AllGather 收集完整参数，然后执行反向计算。梯度计算完成后，通过 ReduceScatter 操作将梯度分片，每张 GPU 只保留自己负责的那部分梯度。这样，整个训练步的通信量为：每个参数被 AllGather 两次（前向+反向），ReduceScatter 一次，总计约 3 × 参数量的通信。</p>
+
+<div class="box deep"><div class="label">🔬 深入探讨</div>
+<h3>FSDP 通信量的精确计算</h3>
+<p>FSDP 的通信量可以精确建模。设模型参数量为 Φ（以元素个数计），参数精度为 b 字节（BF16 则 b=2），GPU 数量为 N。对于 ZeRO Stage 3（FULL_SHARD），每个训练步的通信量为：</p>
+<p>前向 AllGather: Φ × b 字节（每个参数被收集一次）</p>
+<p>反向 AllGather: Φ × b 字节（再次收集参数用于梯度计算）</p>
+<p>反向 ReduceScatter: Φ × b 字节（梯度分片）</p>
+<p>总通信量 = 3 × Φ × b</p>
+<p>对比 DDP 的通信量 = 2 × Φ × b（AllReduce = ReduceScatter + AllGather），FSDP 的通信量增加了 50%。但 FSDP 的通信可以更好地与计算重叠——因为每次只收集一层的参数，计算完立即释放，而不是一次性 AllReduce 所有梯度。在实践中，FSDP 的实际开销通常只有 10-30% 的额外时间。</p>
+<p>一个重要的优化是 <code>forward_prefetch</code>，它允许 FSDP 在当前层计算时预先 AllGather 下一层的参数。类似地，<code>backward_prefetch</code> 在反向传播时预先收集下一层的参数。这些预取操作可以将通信完全隐藏在计算中，使 FSDP 的性能接近 DDP。</p>
+</div>
+
+<h3>Activation Checkpointing（激活检查点）</h3>
+<p>对于非常大的模型，即使使用 FSDP 分片参数，显存仍然可能不够。这是因为前向传播中保存的中间激活值（用于反向传播）也会占用大量显存。Activation Checkpointing（也叫 Gradient Checkpointing）通过丢弃部分前向传播的中间激活值，在反向传播时重新计算，从而用计算时间换取显存空间。</p>
+
+<p>PyTorch 提供了 <code>torch.utils.checkpoint</code> 模块来实现这一功能。与 FSDP 配合使用时，通常对每个 Transformer 层应用 Activation Checkpointing。这样，每个层的激活值只在需要时才重新计算，显存占用可以减少 60-70%，代价是增加约 33% 的计算时间（因为反向传播需要额外的前向计算）。</p>
+
+<pre><code><span class="comment"># Activation Checkpointing + FSDP</span>
+<span class="keyword">from</span> torch.distributed.algorithms._checkpoint.checkpoint_wrapper <span class="keyword">import</span> (
+    checkpoint_wrapper,
+    CheckpointImpl,
+    apply_activation_checkpointing,
+)
+
+<span class="comment"># 对每个 Transformer 层应用 Activation Checkpointing</span>
+apply_activation_checkpointing(
+    model,
+    checkpoint_wrapper_fn=checkpoint_wrapper,
+    check_fn=<span class="keyword">lambda</span> submodule: isinstance(submodule, LlamaDecoderLayer),
+)
+
+<span class="comment"># 效果: 显存减少 60-70%, 计算时间增加 ~33%</span>
+<span class="comment"># 适用于: 模型太大，即使用 FSDP 也放不进显存的情况</span></code></pre>
+
+<h2>1.4 通信开销与性能优化</h2>
+<p>FSDP 的通信开销是实际部署中最重要的考量因素。通信量比 DDP 多50%（3× vs 2× 参数量），因为每次前向传播都需要 AllGather 收集完整参数，计算完立即释放。但在大模型场景下，FSDP 让原本不可能跑的模型变得可能——这是"能不能跑"和"快不快"的区别。</p>
+
+<div class="box tip"><div class="label">💡 性能优化清单</div>
+FSDP 性能优化的关键技巧：<br>
+1. 使用 BF16 混合精度（非 FP16，避免梯度 underflow）<br>
+2. 开启 forward_prefetch 和 backward_prefetch<br>
+3. 设置 limit_all_gathers=True 防止显存 OOM<br>
+4. 按 Transformer 层粒度包装（而非按参数或按模块）<br>
+5. 使用梯度累积减少通信频率<br>
+6. 确保数据加载不成为瓶颈（num_workers > 0, pin_memory=True）
+</div>
+
+<table>
+<tr><th>优化方法</th><th>通信量/GPU</th><th>显存节省</th><th>适用场景</th><th>额外代价</th></tr>
+<tr><td>标准 DDP</td><td>2× 参数量</td><td>无</td><td>模型能放进单卡</td><td>无</td></tr>
+<tr><td>FSDP (FULL_SHARD)</td><td>3× 参数量</td><td>N 倍</td><td>大模型训练</td><td>50% 额外通信</td></tr>
+<tr><td>FSDP + AC</td><td>3× 参数量</td><td>N 倍 + 激活节省</td><td>超大模型</td><td>33% 额外计算</td></tr>
+<tr><td>FSDP (SHARD_GRAD_OP)</td><td>2× 参数量</td><td>~N/2 倍</td><td>中等模型</td><td>类似 ZeRO-2</td></tr>
+</table>
+
+<h3>跨节点通信的带宽分析</h3>
+<p>实际训练中，通信带宽是决定 FSDP 性能的关键因素。以 A100 80GB GPU 为例，NVLink 3.0 提供 600 GB/s 的双向带宽，而跨节点的 InfiniBand NDR 只有 50 GB/s（400 Gbps）。这意味着跨节点的 FSDP 通信比节点内慢约 12 倍。</p>
+
+<div class="ascii">不同通信硬件的带宽对比:
+
+NVLink 4.0 (H100):  ████████████████████████████████████████ 900 GB/s
+NVLink 3.0 (A100):  ██████████████████████████████           600 GB/s
+NVSwitch (H100):    ████████████████████████████████████████ 900 GB/s
+InfiniBand NDR:     ███                                      50 GB/s
+InfiniBand HDR:     ██                                       25 GB/s
+RoCE v2 (100GbE):  █                                        12.5 GB/s
+PCIe 5.0 (x16):    ████                                     64 GB/s (单向)
+
+性能影响: FSDP 跨节点训练时, 通信时间占总训练时间的 30-60%
+          节点内 FSDP 训练时, 通信时间仅占 5-15%</div>
+
+<div class="box warn"><div class="label">⚠️ 生产环境注意</div>在生产环境中，跨节点 FSDP 的性能可能远低于理论值。常见问题包括：(1) 网络拥塞导致实际带宽只有理论值的 50-70%；(2) 多个 AllGather 操作竞争带宽；(3) CPU 端的通信调度开销。建议在跨节点训练时使用梯度累积来减少通信频率，或考虑使用 ZeRO Stage 2 代替 Stage 3 以减少通信量。此外，NCCL 的环境变量如 NCCL_IB_TIMEOUT、NCCL_SOCKET_IFNAME 等需要根据集群网络配置进行调优。</div>
+
+<h2>1.5 实际案例：LLaMA-3 的训练配置</h2>
+<p>Meta 在训练 LLaMA-3 405B 模型时使用了 16,384 张 H100 GPU。其训练配置是分布式并行策略的典型范例：张量并行度 TP=8（单机 8 卡通过 NVLink 互联），流水线并行度 PP=16（16 个流水线阶段跨机器），数据并行度 DP=122（122 组数据并行）。总计 8 × 16 × 122 = 15,616 张 GPU 用于训练，剩余 GPU 用于容错备份。</p>
+
+<p>在这个配置中，FSDP 被用于数据并行维度上的梯度同步。由于 DP 组内的 GPU 跨越多个节点，通信通过 InfiniBand 进行。为了减少跨节点通信，LLaMA-3 团队使用了 ZeRO Stage 1（仅分片优化器状态），而非 Stage 3。这是因为对于如此大规模的训练，跨节点的 AllGather 开销会严重影响训练吞吐量。</p>
+
+<table>
+<tr><th>模型</th><th>GPU 数量</th><th>TP</th><th>PP</th><th>DP</th><th>训练时间</th><th>框架</th></tr>
+<tr><td>LLaMA-3 8B</td><td>~2,000</td><td>1</td><td>1</td><td>~2,000</td><td>数天</td><td>Megatron-LM</td></tr>
+<tr><td>LLaMA-3 70B</td><td>~6,000</td><td>8</td><td>4</td><td>~188</td><td>数周</td><td>Megatron-LM</td></tr>
+<tr><td>LLaMA-3 405B</td><td>16,384</td><td>8</td><td>16</td><td>122</td><td>54天</td><td>Megatron-LM</td></tr>
+<tr><td>DeepSeek-V3</td><td>2,048</td><td>1</td><td>32</td><td>64</td><td>~2个月</td><td>自研框架</td></tr>
+<tr><td>GPT-4 (推测)</td><td>~25,000</td><td>8</td><td>~16</td><td>~200</td><td>~3个月</td><td>自研框架</td></tr>
+</table>
+
+<div class="box deep"><div class="label">🔬 深入探讨</div>
+<h3>DeepSeek-V3 的创新并行策略</h3>
+<p>DeepSeek-V3 在 2,048 张 H800 GPU 上训练时，采用了一种非常独特的并行策略。由于其 Multi-head Latent Attention（MLA）机制大幅减少了注意力层的 KV Cache 和参数量，DeepSeek-V3 将张量并行度设为 TP=1（即不做张量并行），而使用 EP（Expert Parallelism）来并行化 MoE 层的专家计算。具体配置为：PP=32（32 个流水线阶段），DP=64（64 组数据并行）。</p>
+<p>这种配置的优势在于：(1) TP=1 消除了张量并行的通信开销，这对于 MLA 架构特别有利；(2) EP 允许每个专家在不同的 GPU 上计算，天然适合 MoE 架构；(3) 较大的 DP 度允许使用较大的全局 Batch Size（约 60M tokens），有利于训练稳定性。但代价是流水线气泡比例较高（约 32/(32+micro_batches-1)），需要足够多的 micro-batch 来填充流水线。</p>
+</div>
+
+<div class="box exercise"><div class="label">🎯 练习</div>
+<strong>练习 1</strong>：使用 PyTorch FSDP 在 2 张 GPU 上训练一个 LLaMA-7B 模型，对比 DDP 和 FSDP 的显存占用。<br>
+<strong>练习 2</strong>：修改 FSDP 的 sharding_strategy 为 SHARD_GRAD_OP（相当于 ZeRO Stage 2），观察显存和速度的变化。<br>
+<strong>练习 3</strong>：尝试不同的 auto_wrap_policy（按层、按模块、手动指定），比较通信开销的差异。
+<pre><code><span class="comment"># 练习参考代码框架</span>
+<span class="keyword">import</span> torch
+<span class="keyword">import</span> torch.distributed <span class="keyword">as</span> dist
+<span class="keyword">from</span> torch.distributed.fsdp <span class="keyword">import</span> FullyShardedDataParallel <span class="keyword">as</span> FSDP
+<span class="keyword">from</span> torch.distributed.fsdp <span class="keyword">import</span> ShardingStrategy
+
+<span class="comment"># 初始化分布式环境</span>
+dist.init_process_group(backend=<span class="string">"nccl"</span>)
+local_rank = int(os.environ[<span class="string">"LOCAL_RANK"</span>])
+torch.cuda.set_device(local_rank)
+
+<span class="comment"># 创建并包装模型</span>
+model = create_model()
+fsdp_model = FSDP(
+    model,
+    sharding_strategy=ShardingStrategy.FULL_SHARD,
+    <span class="comment"># 尝试其他策略: SHARD_GRAD_OP, NO_SHARD</span>
+)
+
+<span class="comment"># 训练并观察显存: torch.cuda.max_memory_allocated()</span>
+<span class="comment"># 运行: torchrun --nproc_per_node=2 exercise.py</span></code></pre>
+</div>
+
+<h2>学习路径建议</h2>
+<p>数据并行与 FSDP 是分布式训练的基础。建议的学习路径如下：</p>
+<ul>
+<li><strong>第一步</strong>：理解 DDP 的基本原理，动手用 PyTorch DDP 训练一个简单模型</li>
+<li><strong>第二步</strong>：学习 ZeRO 的三个阶段，理解显存与通信的权衡</li>
+<li><strong>第三步</strong>：掌握 FSDP 的使用，包括 auto_wrap_policy 和混合精度配置</li>
+<li><strong>第四步</strong>：了解 Activation Checkpointing，学会在显存不足时的应对策略</li>
+<li><strong>第五步</strong>：<a href="02-张量并行.html">继续学习张量并行</a>，了解模型内部的并行策略</li>
+</ul>
+
+<div class="next-prev"><span></span><a href="02-张量并行.html">02-张量并行 →</a></div>
+</div>
+<div class="highlight">
+<strong>🔗 相关深入章节：</strong><br>
+• <a href="../../../../03-训练技术/分布式训练系统/index.html">分布式训练系统</a> — 3D并行/DeepSpeed/Megatron-LM完整指南<br>
+• <a href="../../../../06-硬件生态/集合通信入门指南/index.html">集合通信入门</a> — AllReduce/NCCL/InfiniBand通信原理
+</div>
+
+<div class="footer"><p>LLM 系统学习 · 01-数据并行与FSDP</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="tip"><strong>相关章节：</strong>
+数据并行的基本原理与以下内容密切相关：<a href="02-张量并行.html">02-张量并行</a> | <a href="03-流水线并行.html">03-流水线并行</a> | <a href="04-3D并行与框架.html">04-3D并行与框架</a>。建议结合学习。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+建议先在2-4张GPU上对比DDP和FSDP训练Llama-3-8B的显存占用和吞吐量差异。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+从数据并行的<strong>核心原理</strong>出发，每个GPU持有一份完整模型副本，处理不同的mini-batch数据后同步梯度。<strong>为什么</strong>需要FSDP？<strong>推导</strong>：标准数据并行要求每张GPU存完整模型，当模型超过单卡显存时无法工作。FSDP将参数、梯度、优化器状态分片到N张GPU，前向和反向时按需All-Gather收集参数，计算后Reduce-Scatter同步梯度。<strong>数学本质</strong>上，FSDP将单卡显存需求从O(P)降至O(P/N)，代价是增加了N倍的通信量，通过计算-通信重叠可部分掩盖此开销。
+</div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释数据并行的基本原理的核心原理，并举一个实际应用场景。</li>
+<li>数据并行的基本原理在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比数据并行的基本原理与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+数据并行的基本原理的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+从数据并行的<strong>核心原理</strong>出发，每个GPU持有一份完整模型副本，处理不同的mini-batch数据后同步梯度。<strong>为什么</strong>需要FSDP？<strong>推导</strong>：标准数据并行要求每张GPU存完整模型，当模型超过单卡显存时无法工作。FSDP将参数、梯度、优化器状态分片到N张GPU，前向和反向时按需All-Gather收集参数，计算后Reduce-Scatter同步梯度。<strong>数学本质</strong>上，FSDP将单卡显存需求从O(P)降至O(P/N)，代价是增加了N倍的通信量，通过计算-通信重叠可部分掩盖此开销。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习FSDP时，很多人只看架构图不实际测量通信开销。建议用PyTorch Profiler分析FSDP训练中All-Gather和Reduce-Scatter的耗时占比，观察计算-通信重叠的效果。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为FSDP就是简单的参数分片可以直接上手大规模训练。分片策略、混合精度、梯度累积等配置直接影响训练效率和收敛性。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+数据并行的基本原理与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

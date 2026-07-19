@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM 推理竞速可视化</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif}
+.navbar{background:#161b22;border-bottom:1px solid #30363d;padding:10px 20px;display:flex;align-items:center;gap:20px;position:sticky;top:0;z-index:100}
+.navbar .logo{color:#58a6ff;font-size:1.2em;font-weight:bold}
+.navbar .tabs{display:flex;gap:5px}
+.navbar .tab{padding:8px 16px;border-radius:6px;cursor:pointer;color:#8b949e;transition:all 0.2s}
+.navbar .tab:hover{background:#21262d;color:#c9d1d9}
+.navbar .tab.active{background:#0d1d30;color:#58a6ff;border:1px solid #1f6feb}
+.main{display:flex;height:calc(100vh - 50px)}
+.canvas-area{flex:1;position:relative;overflow:auto}
+.controls{width:300px;background:#161b22;border-left:1px solid #30363d;padding:15px;overflow-y:auto}
+.control-group{margin-bottom:15px}
+.control-group h3{color:#58a6ff;font-size:0.85em;margin-bottom:8px}
+.control-row{display:flex;align-items:center;gap:10px;margin:5px 0}
+.control-row label{color:#8b949e;font-size:0.85em;min-width:70px}
+.control-row input[type=range]{flex:1}
+.control-row .value{color:#58a6ff;min-width:40px;text-align:right;font-size:0.85em}
+.btn{padding:8px 16px;border:1px solid #30363d;border-radius:6px;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:0.85em}
+.btn:hover{border-color:#58a6ff}
+.btn-primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
+.btn-primary:hover{background:#388bfd}
+.btn-group{display:flex;gap:5px;flex-wrap:wrap}
+.tech-tree{padding:30px;overflow:auto;height:100%}
+.tree-layer{margin:20px 0}
+.tree-layer-title{color:#58a6ff;font-size:1.1em;margin-bottom:10px;padding-bottom:5px;border-bottom:1px solid #21262d}
+.tree-nodes{display:flex;flex-wrap:wrap;gap:10px}
+.tree-node{background:#161b22;border:2px solid #30363d;border-radius:8px;padding:10px 14px;cursor:pointer;transition:all 0.3s;min-width:120px}
+.tree-node:hover{border-color:#58a6ff;transform:translateY(-2px)}
+.tree-node.active{border-color:#3fb950;background:#0d2818}
+.tree-node .name{color:#f0f6fc;font-weight:bold;font-size:0.9em}
+.tree-node .desc{color:#8b949e;font-size:0.75em;margin-top:4px}
+.race-track{height:100%;display:flex;flex-direction:column;justify-content:center;padding:30px}
+.race-lane{margin:10px 0;display:flex;align-items:center;gap:10px}
+.race-label{min-width:140px;color:#c9d1d9;font-size:0.9em;text-align:right}
+.race-bar-container{flex:1;height:36px;background:#21262d;border-radius:4px;position:relative;overflow:hidden}
+.race-bar{height:100%;border-radius:4px;transition:width 0.3s;display:flex;align-items:center;padding:0 10px;font-size:0.8em;color:#fff}
+.race-time{min-width:60px;color:#58a6ff;font-weight:bold}
+.pipeline{padding:30px;height:100%;overflow:auto}
+.pipeline-stage{display:flex;align-items:center;margin:15px 0;flex-wrap:wrap}
+.pipeline-box{background:#161b22;border:2px solid #30363d;border-radius:8px;padding:15px;min-width:120px;text-align:center}
+.pipeline-box.active{border-color:#58a6ff}
+.pipeline-box .stage-name{color:#f0f6fc;font-weight:bold}
+.pipeline-box .stage-time{color:#58a6ff;font-size:0.85em}
+.pipeline-arrow{color:#30363d;font-size:1.5em;margin:0 8px}
+.token-flow{display:flex;gap:3px;margin-top:8px;flex-wrap:wrap}
+.token{width:22px;height:22px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:0.55em;color:#fff}
+.dashboard{padding:20px;height:100%;overflow:auto}
+.dash-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px}
+.dash-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:15px}
+.dash-card .title{color:#8b949e;font-size:0.8em;margin-bottom:5px}
+.dash-card .value{color:#58a6ff;font-size:1.8em;font-weight:bold}
+.dash-card .unit{color:#8b949e;font-size:0.8em}
+.chart-container{margin:20px 0;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:15px}
+.chart-title{color:#f0f6fc;margin-bottom:10px}
+.bar-chart{display:flex;align-items:flex-end;gap:10px;height:150px;padding:10px 0}
+.bar-item{display:flex;flex-direction:column;align-items:center;flex:1}
+.bar{width:100%;border-radius:4px 4px 0 0;transition:height 0.5s}
+.bar-label{color:#8b949e;font-size:0.7em;margin-top:5px;text-align:center}
+.bar-value{color:#58a6ff;font-size:0.75em;margin-bottom:3px}
+.detail-popup{position:fixed;background:#161b22;border:1px solid #30363d;border-radius:8px;padding:15px;max-width:400px;z-index:200;display:none}
+.detail-popup .close{position:absolute;top:5px;right:10px;cursor:pointer;color:#8b949e;font-size:1.2em}
+.detail-popup h4{color:#58a6ff;margin-bottom:8px}
+.detail-popup p{color:#c9d1d9;font-size:0.85em;line-height:1.6}
+.info-bar{position:fixed;bottom:0;left:0;right:300px;background:#161b22;border-top:1px solid #30363d;padding:8px 20px;display:flex;gap:20px;font-size:0.8em;color:#8b949e}
+.info-item{display:flex;align-items:center;gap:5px}
+.info-dot{width:8px;height:8px;border-radius:50%}
+select.btn{width:100%}
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+
+<div class="navbar">
+  <div class="logo">🏎️ LLM 推理竞速可视化</div>
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('techtree',this)">🌳 技术树</div>
+    <div class="tab" onclick="switchTab('race',this)">🏁 赛道竞速</div>
+    <div class="tab" onclick="switchTab('pipeline',this)">🔬 流水线透视</div>
+    <div class="tab" onclick="switchTab('dashboard',this)">📊 性能仪表盘</div>
+  </div>
+</div>
+
+<div class="main">
+  <div class="canvas-area">
+    <div class="tech-tree" id="techtreeView">
+      <h2 style="color:#58a6ff;margin-bottom:20px">🌳 技术演进树</h2>
+      
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>就像建筑工具从斧头发展到3D打印机，前端技术也从纯HTML演变到React/Vue。每一代工具都在解决上一代的痛点，但新工具不意味着旧工具无用。</div>
+<div class="warn"><strong>常见误区：</strong>新手常犯的错误是盲目追求最新框架。在项目初期，一个简单的HTML+CSS可能比引入复杂框架更高效，过度优化反而增加维护成本。</div>
+<div class="deep"><strong>深入探讨：</strong>前端技术栈的演进周期约为2-3年。以状态管理为例：早期jQuery直接操作DOM → 2013年Backbone.js兴起 → 2015年Redux出现 → 2023年Zustand等轻量方案。每次迭代减少约30%样板代码。</div>
+<div class="ascii"><pre>HTML<br/>  ↓ (DOM操作困难)<br/>jQuery<br/>  ↓ (代码组织差)<br/>MVVM框架(React/Vue)<br/>  ↓ (状态管理复杂)<br/>现代轻量方案</pre></div>
+<table><tr><th>技术世代</th><th>代表工具</th><th>核心痛点</th></tr><tr><td>1.0</td><td>HTML+CSS</td><td>无交互能力</td></tr><tr><td>2.0</td><td>jQuery</td><td>代码混乱</td></tr><tr><td>3.0</td><td>React/Vue</td><td>状态管理复杂</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p style="color:#8b949e;margin-bottom:20px">点击节点查看详情，勾选右侧技术看组合效果</p>
+      <div class="tree-layer"><div class="tree-layer-title">第1层：算法设计 — 算什么</div><div class="tree-nodes" id="layer1"></div></div>
+      <div class="tree-layer"><div class="tree-layer-title">第2层：计算优化 — 怎么算</div><div class="tree-nodes" id="layer2"></div></div>
+      <div class="tree-layer"><div class="tree-layer-title">第3层：内存管理 — 怎么存</div><div class="tree-nodes" id="layer3"></div></div>
+      <div class="tree-layer"><div class="tree-layer-title">第4层：调度策略 — 什么先算</div><div class="tree-nodes" id="layer4"></div></div>
+      <div class="tree-layer"><div class="tree-layer-title">第5层：系统框架 — 组装一切</div><div class="tree-nodes" id="layer5"></div></div>
+    </div>
+    <div class="race-track" id="raceView" style="display:none"></div>
+    <div class="pipeline" id="pipelineView" style="display:none"></div>
+    <div class="dashboard" id="dashboardView" style="display:none"></div>
+  </div>
+
+  <div class="controls">
+    <h3 style="color:#58a6ff;margin-bottom:15px">⚙️ 控制面板</h3>
+    <div class="control-group">
+      <h3>技术选择</h3>
+      <div id="techCheckboxes"></div>
+    </div>
+    <div class="control-group">
+      <h3>参数调节</h3>
+      <div class="control-row"><label>Batch Size</label><input type="range" id="batchSize" min="1" max="32" value="8" oninput="updateParam()"><span class="value" id="batchSizeVal">8</span></div>
+      <div class="control-row"><label>Seq Length</label><input type="range" id="seqLen" min="128" max="4096" step="128" value="512" oninput="updateParam()"><span class="value" id="seqLenVal">512</span></div>
+      <div class="control-row"><label>Chunk Size</label><input type="range" id="chunkSize" min="16" max="256" step="16" value="64" oninput="updateParam()"><span class="value" id="chunkSizeVal">64</span></div>
+    </div>
+    <div class="control-group">
+      <h3>模型选择</h3>
+      <select id="modelSelect" class="btn" onchange="updateParam()"><option value="7b">Llama-7B</option><option value="13b">Llama-13B</option><option value="70b">Llama-70B</option></select>
+    </div>
+    <div class="control-group">
+      <h3>播放控制</h3>
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="startRace()">▶ 开始</button>
+        <button class="btn" onclick="pauseRace()">⏸ 暂停</button>
+        <button class="btn" onclick="resetRace()">🔄 重置</button>
+      </div>
+      <div class="control-row" style="margin-top:10px"><label>速度</label>
+        <div class="btn-group"><button class="btn" onclick="setSpeed(1)">1x</button><button class="btn" onclick="setSpeed(2)">2x</button><button class="btn" onclick="setSpeed(4)">4x</button></div>
+      </div>
+    </div>
+    <div class="control-group">
+      <h3>当前配置预估</h3>
+      <div id="perfEstimate" style="font-size:0.85em;color:#8b949e">加载中...</div>
+    </div>
+  </div>
+</div>
+
+<div class="detail-popup" id="detailPopup">
+  <span class="close" onclick="closePopup()">×</span>
+  <h4 id="popupTitle"></h4>
+  <p id="popupContent"></p>
+</div>
+
+<div class="info-bar">
+  <div class="info-item"><div class="info-dot" style="background:#58a6ff"></div>Prefill</div>
+  <div class="info-item"><div class="info-dot" style="background:#3fb950"></div>Decode</div>
+  <div class="info-item"><div class="info-dot" style="background:#d29922"></div>GPU计算</div>
+  <div class="info-item"><div class="info-dot" style="background:#f85149"></div>内存访问</div>
+</div>
+
+<script>
+const TECH={
+  gqa:{name:"GQA",layer:1,desc:"分组查询注意力",su:1.3,icon:"🧠",det:"将 Query 头分组共享 KV，减少 KV Cache。Llama 2/3 使用。"},
+  mla:{name:"MLA",layer:1,desc:"多潜注意力",su:1.5,icon:"🧠",det:"DeepSeek V2 提出，KV 压缩到低维潜空间。"},
+  speculative:{name:"Speculative Decoding",layer:1,desc:"小模型猜+大模型验",su:2.0,icon:"🎯",det:"小模型快速生成候选，大模型并行验证，2-3x 加速。"},
+  medusa:{name:"Medusa/Eagle",layer:1,desc:"多头并行猜测",su:2.5,icon:"🦅",det:"大模型上加多个预测头，同时猜测多个 token。"},
+  moe:{name:"MoE",layer:1,desc:"混合专家",su:3.0,icon:"👥",det:"Mixtral/DeepSeek 使用，每次只激活 Top-K 专家。"},
+  flashattn:{name:"FlashAttention",layer:2,desc:"IO感知注意力",su:1.8,icon:"⚡",det:"Tiling+Kernel Fusion 减少 HBM 访问，2-4x 加速。"},
+  flashdec:{name:"FlashDecoding",layer:2,desc:"Decode并行化",su:1.5,icon:"⚡",det:"Decode 阶段 KV 并行化，解决长序列瓶颈。"},
+  fp8:{name:"FP8 量化",layer:2,desc:"8位浮点",su:1.5,icon:"📦",det:"H100 原生支持，几乎无精度损失的 2x 吞吐提升。"},
+  int4:{name:"INT4 量化",layer:2,desc:"4位整数",su:2.0,icon:"📦",det:"GPTQ/AWQ，4bit 量化减半计算量。"},
+  pagedattn:{name:"PagedAttention",layer:3,desc:"KV分页管理",su:1.4,icon:"📄",det:"vLLM 首创，KV Cache 分页消除内存碎片。"},
+  prefixcache:{name:"Prefix Caching",layer:3,desc:"共享前缀KV",su:1.3,icon:"💾",det:"相同 system prompt 共享 KV Cache。"},
+  radixattn:{name:"RadixAttention",layer:3,desc:"Radix Tree管理",su:1.5,icon:"🌳",det:"SGLang 使用，更灵活的前缀共享。"},
+  contbatch:{name:"Continuous Batching",layer:4,desc:"迭代级调度",su:1.6,icon:"🔄",det:"完成的请求立即替换，GPU 不空闲。"},
+  chunked:{name:"Chunked Prefill",layer:4,desc:"分块Prefill",su:1.3,icon:"✂️",det:"长 prompt 分块，避免阻塞 decode。"},
+  vllm:{name:"vLLM",layer:5,desc:"PagedAttn+Cont.Batch",su:3.0,icon:"🚀",det:"组合 PagedAttention + Continuous Batching + Prefix Caching。"},
+  sglang:{name:"SGLang",layer:5,desc:"RadixAttn+复杂流程",su:3.2,icon:"🚀",det:"RadixAttention + Continuous Batching + Constrained Decoding。"},
+  trtllm:{name:"TensorRT-LLM",layer:5,desc:"NVIDIA极致优化",su:3.5,icon:"🚀",det:"FlashAttention + FP8 + In-flight Batching + Graph Optimization。"}
+};
+
+let sel=new Set(),raceOn=false,raceProg={},spd=1;
+
+function init(){
+  for(let l=1;l<=5;l++){
+    const c=document.getElementById('layer'+l);c.innerHTML='';
+    Object.entries(TECH).filter(([_,t])=>t.layer===l).forEach(([id,t])=>{
+      const d=document.createElement('div');d.className='tree-node';d.id='node-'+id;
+      d.innerHTML='<div class="name">'+t.icon+' '+t.name+'</div><div class="desc">'+t.desc+'</div>';
+      d.onclick=()=>showDetail(id);c.appendChild(d);
+    });
+  }
+  const box=document.getElementById('techCheckboxes');let h='';
+  Object.entries(TECH).forEach(([id,t])=>{
+    h+='<label style="display:flex;align-items:center;gap:5px;margin:3px 0;font-size:0.85em;cursor:pointer"><input type="checkbox" id="ck-'+id+'" onchange="tog(\''+id+'\')"> '+t.icon+' '+t.name+'</label>';
+  });
+  box.innerHTML=h;updateParam();
+}
+
+function tog(id){
+  const cb=document.getElementById('ck-'+id),nd=document.getElementById('node-'+id);
+  if(cb.checked){sel.add(id);nd.classList.add('active')}else{sel.delete(id);nd.classList.remove('active')}
+  updEst();
+}
+
+function updEst(){
+  let s=1;sel.forEach(id=>{s*=TECH[id].su});
+  document.getElementById('perfEstimate').innerHTML='<div>已选: '+sel.size+' 项</div><div>加速: <span style="color:#3fb950">'+s.toFixed(1)+'x</span></div><div>延迟: <span style="color:#58a6ff">'+Math.round(500/s)+'ms</span></div>';
+}
+
+function showDetail(id){
+  const t=TECH[id],p=document.getElementById('detailPopup');
+  document.getElementById('popupTitle').textContent=t.icon+' '+t.name;
+  document.getElementById('popupContent').innerHTML='<p><b>描述：</b>'+t.desc+'</p><p><b>加速比：</b>'+t.su+'x</p><p><b>说明：</b>'+t.det+'</p><p style="margin-top:8px"><em>第'+t.layer+'层</em></p>';
+  p.style.display='block';p.style.left='50%';p.style.top='50%';p.style.transform='translate(-50%,-50%)';
+}
+function closePopup(){document.getElementById('detailPopup').style.display='none'}
+
+// Race
+const STRATS=[
+  {name:'Naive',techs:[],c:'#f85149'},
+  {name:'+FlashAttn',techs:['flashattn'],c:'#d29922'},
+  {name:'+Cont.Batch',techs:['flashattn','contbatch'],c:'#58a6ff'},
+  {name:'+PagedAttn',techs:['flashattn','contbatch','pagedattn'],c:'#3fb950'},
+  {name:'vLLM',techs:['flashattn','contbatch','pagedattn','prefixcache','gqa'],c:'#bc8cff'},
+  {name:'SGLang',techs:['flashattn','contbatch','radixattn','gqa','speculative'],c:'#f778ba'},
+  {name:'TRT-LLM',techs:['flashattn','contbatch','pagedattn','fp8','gqa','medusa'],c:'#79c0ff'}
+];
+
+function renderRace(){
+  const ct=document.getElementById('raceView');
+  ct.innerHTML='<h2 style="color:#58a6ff;margin-bottom:20px">🏁 推理策略竞速</h2>
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>如同快递选择：平邮便宜但慢，加急快但贵。浏览器渲染也有策略：首次加载用服务端渲染(SSR)提速，交互后用客户端渲染(CSR)增强体验。</div>
+<div class="warn"><strong>常见误区：</strong>不要忽视渐进式渲染。很多开发者只追求首屏速度，却忘了骨架屏、懒加载等策略能让用户感觉更快，即使实际数据加载时间相同。</div>
+<div class="deep"><strong>深入探讨：</strong>以Next.js为例，SSR可在200ms内输出HTML，但需要服务器支持；CSR初始加载可能需500ms，但后续导航接近瞬时。Hydration过程通常占TTI(可交互时间)的30%-50%。</div>
+<div class="ascii"><pre>请求 → 首屏(SSR) → 用户交互<br/>        ↓ 快速但受限<br/>        客户端接管(CSR)<br/>        ↓ 复杂但灵活</pre></div>
+<table><tr><th>策略</th><th>首屏时间</th><th>适用场景</th></tr><tr><td>SSR</td><td>200-500ms</td><td>SEO关键页</td></tr><tr><td>CSR</td><td>500ms+</td><td>复杂交互应用</td></tr><tr><td>SSG</td><td>50-100ms</td><td>静态内容页</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p style="color:#8b949e;margin-bottom:20px">对比不同技术组合的推理延迟</p>';
+  STRATS.forEach((s,i)=>{
+    let su=1;s.techs.forEach(id=>{su*=TECH[id].su});
+    const t=Math.round(500/su),p=raceProg[i]||0;
+    ct.innerHTML+='<div class="race-lane"><div class="race-label">'+s.name+'</div><div class="race-bar-container"><div class="race-bar" style="width:'+p+'%;background:'+s.c+'">'+(p>10?s.techs.length+' 项技术':'')+'</div></div><div class="race-time">'+t+'ms</div></div>';
+  });
+}
+
+function startRace(){raceOn=true;raceProg={};animRace()}
+function pauseRace(){raceOn=false}
+function resetRace(){raceOn=false;raceProg={};renderRace()}
+function animRace(){
+  if(!raceOn)return;
+  const speeds=[1,1.8,2.88,4.03,6.32,9.48,12.68];
+  speeds.forEach((s,i)=>{if(!raceProg[i])raceProg[i]=0;raceProg[i]=Math.min(100,raceProg[i]+s*spd)});
+  renderRace();
+  if(Object.values(raceProg).some(p=>p<100))setTimeout(animRace,50);else raceOn=false;
+}
+function setSpeed(s){spd=s}
+
+// Pipeline
+function renderPipeline(){
+  const sl=document.getElementById('seqLen').value,bt=document.getElementById('batchSize').value;
+  const ct=document.getElementById('pipelineView');
+  const tokens=Array.from({length:Math.min(Math.floor(sl/16),32)},(_,i)=>'<div class="token" style="background:#58a6ff">T'+(i+1)+'</div>').join('');
+  const decTokens='<div class="token" style="background:#3fb950">t1</div><span style="color:#30363d">→</span><div class="token" style="background:#3fb950">t2</div><span style="color:#30363d">→</span><div class="token" style="background:#3fb950">t3</div><span style="color:#30363d">→</span><div class="token" style="background:#3fb950">...</div>';
+  ct.innerHTML='<h2 style="color:#58a6ff;margin-bottom:20px">🔬 推理流水线透视</h2>
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>就像工厂流水线：原料(代码)经过编译、打包、优化各工站。任何一站卡顿都会影响最终产品(网页)的交付速度。</div>
+<div class="warn"><strong>常见误区：</strong>避免流水线中存在单点故障。例如：不要把所有类型检查都放在构建时，开发阶段就应通过ESLint实时检查，否则构建失败会让调试变困难。</div>
+<div class="deep"><strong>深入探讨：</strong>现代构建流水线通常包含：1)语法检查(ESLint, ~100ms) → 2)类型检查(TypeScript, ~500ms) → 3)代码转译(Babel, ~200ms) → 4)打包(Webpack, ~1s)。优化后可将总时间从2s压缩到800ms内。</div>
+<div class="ascii"><pre>源码<br/>  ↓ (语法检查)<br/>  ↓ (类型检查)<br/>  ↓ (转译压缩)<br/>  ↓ (打包优化)<br/>部署文件</pre></div>
+<table><tr><th>阶段</th><th>工具示例</th><th>耗时占比</th></tr><tr><td>检查</td><td>ESLint/TS</td><td>15-30%</td></tr><tr><td>转译</td><td>Babel/SWC</td><td>10-20%</td></tr><tr><td>打包</td><td>Webpack/Vite</td><td>50-70%</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p style="color:#8b949e;margin-bottom:20px">单个请求的完整处理过程 | Seq: '+sl+' tokens</p>'
+    +'<div class="pipeline-stage"><div class="pipeline-box"><div class="stage-name">📥 输入</div><div class="stage-time">'+sl+' tokens</div></div><div class="pipeline-arrow">→</div><div class="pipeline-box active"><div class="stage-name">⚡ Prefill</div><div class="stage-time">'+Math.round(sl*0.5)+'ms</div></div><div class="pipeline-arrow">→</div><div class="pipeline-box"><div class="stage-name">🔄 Decode</div><div class="stage-time">~3ms/tok</div></div><div class="pipeline-arrow">→</div><div class="pipeline-box"><div class="stage-name">📤 输出</div><div class="stage-time">~200 tok</div></div></div>'
+    +'<h3 style="color:#79c0ff;margin:25px 0 10px">⚡ Prefill 阶段（并行处理所有 token）</h3><div class="token-flow">'+tokens+'</div><p style="color:#8b949e;margin-top:8px;font-size:0.85em">计算密集型 | GPU 利用率高 | 并行处理 '+sl+' 个 token</p>'
+    +'<h3 style="color:#79c0ff;margin:25px 0 10px">🔄 Decode 阶段（逐个生成 token）</h3><div class="token-flow" style="gap:8px">'+decTokens+'</div><p style="color:#8b949e;margin-top:8px;font-size:0.85em">访存密集型 | GPU 利用率低 | 每次只生成 1 个 token</p>'
+    +'<h3 style="color:#79c0ff;margin:25px 0 10px">💾 KV Cache 增长</h3><div style="background:#21262d;border-radius:4px;height:30px;overflow:hidden"><div style="background:linear-gradient(90deg,#58a6ff,#3fb950);height:100%;width:60%;display:flex;align-items:center;padding:0 10px;font-size:0.8em">KV Cache: '+Math.round(sl*0.8)+' MB</div></div><p style="color:#8b949e;margin-top:8px;font-size:0.85em">每生成一个 token，KV Cache 增长约 0.5MB</p>';
+}
+
+// Dashboard
+function renderDashboard(){
+  const bs=+document.getElementById('batchSize').value,sl=+document.getElementById('seqLen').value,md=document.getElementById('modelSelect').value;
+  const base={7b:{ttft:45,tps:480,gpu:68,mem:14},13b:{ttft:85,tps:280,gpu:75,mem:26},70b:{ttft:350,tps:65,gpu:85,mem:140}}[md];
+  const bf=Math.log2(bs)*0.3,sf=sl/512;
+  const ct=document.getElementById('dashboardView');
+  const names=['Naive','+Flash','+Batch','+Page','vLLM','SGLang','TRT'];
+  const colors=['#f85149','#d29922','#58a6ff','#3fb950','#bc8cff','#f778ba','#79c0ff'];
+  const times=[500,280,175,125,80,70,55].map(t=>Math.round(t/sf));
+  const utils=[25,45,58,68,75,78,82];
+  ct.innerHTML='<h2 style="color:#58a6ff;margin-bottom:20px">📊 性能仪表盘</h2>
+
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>就像汽车仪表盘显示速度、油量，网页性能也有指标：LCP(最大内容绘制)好比加速时间，FID(首次输入延迟)类似刹车反应。</div>
+<div class="warn"><strong>常见误区：</strong>不要只看单一指标。一个LCP很好的页面，如果TTI(可交互时间)很长，用户会觉得"看起来快但用起来卡"，这种体验割裂更伤体验。</div>
+<div class="deep"><strong>深入探讨：</strong>Core Web Vitals基准：LCP优秀标准为<2.5s，FID应<100ms，CLS(累积布局偏移)<0.1。监测工具如Lighthouse会计算综合分数，90分以上为优秀。</div>
+<div class="ascii"><pre>┌─────────────────┐<br/>│ LCP: 1.8s (优)  │<br/>│ FID: 50ms (优)  │<br/>│ CLS: 0.05 (优)  │<br/>└─────────────────┘</pre></div>
+<table><tr><th>指标</th><th>优秀</th><th>需改进</th></tr><tr><td>LCP</td><td><2.5s</td><td><4.0s</td></tr><tr><td>FID</td><td><100ms</td><td><300ms</td></tr><tr><td>CLS</td><td><0.1</td><td><0.25</td></tr></table>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<p style="color:#8b949e;margin-bottom:20px">模型: '+md.toUpperCase()+' | Batch: '+bs+' | Seq: '+sl+'</p>'
+    +'<div class="dash-grid"><div class="dash-card"><div class="title">TTFT</div><div class="value">'+Math.round(base.ttft*sf)+'</div><div class="unit">ms</div></div><div class="dash-card"><div class="title">吞吐量</div><div class="value">'+Math.round(base.tps*bf)+'</div><div class="unit">tok/s</div></div><div class="dash-card"><div class="title">GPU 利用率</div><div class="value">'+Math.min(95,Math.round(base.gpu*bf*0.8))+'</div><div class="unit">%</div></div><div class="dash-card"><div class="title">显存占用</div><div class="value">'+base.mem+'</div><div class="unit">GB</div></div></div>'
+    +'<div class="chart-container"><div class="chart-title">延迟对比 (ms)</div><div class="bar-chart">'+names.map((n,i)=>'<div class="bar-item"><div class="bar-value">'+times[i]+'ms</div><div class="bar" style="height:'+times[i]/3+'px;background:'+colors[i]+'"></div><div class="bar-label">'+n+'</div></div>').join('')+'</div></div>'
+    +'<div class="chart-container"><div class="chart-title">GPU 利用率 (%)</div><div class="bar-chart">'+names.map((n,i)=>'<div class="bar-item"><div class="bar-value">'+utils[i]+'%</div><div class="bar" style="height:'+utils[i]+'px;background:'+colors[i]+'"></div><div class="bar-label">'+n+'</div></div>').join('')+'</div></div>';
+}
+
+function switchTab(tab,el){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  ['techtree','race','pipeline','dashboard'].forEach(v=>{
+    document.getElementById(v+'View').style.display=v===tab?'block':'none';
+  });
+  if(tab==='race')renderRace();
+  if(tab==='pipeline')renderPipeline();
+  if(tab==='dashboard')renderDashboard();
+}
+
+function updateParam(){
+  document.getElementById('batchSizeVal').textContent=document.getElementById('batchSize').value;
+  document.getElementById('seqLenVal').textContent=document.getElementById('seqLen').value;
+  document.getElementById('chunkSizeVal').textContent=document.getElementById('chunkSize').value;
+  renderPipeline();renderDashboard();updEst();
+}
+
+init();
+</script>
+</body>
+</html>

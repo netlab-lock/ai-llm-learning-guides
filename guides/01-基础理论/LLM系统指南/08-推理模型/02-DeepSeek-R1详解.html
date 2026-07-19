@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02-DeepSeek-R1详解 | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.deep{background:rgba(188,140,255,0.08);border-left:4px solid var(--purple)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+</head>
+<body>
+<div class="nav"><a href="01-Test-Time-Compute.html">&larr; 01-Test-Time-Compute</a><span>08-推理 / DeepSeek-R1详解</span><a href="03-PRM与搜索策略.html">03-PRM与搜索策略 &rarr;</a></div>
+<div class="container">
+
+<h1>🔬 2. DeepSeek-R1 详解</h1>
+
+<div class="box tip"><div class="label">💡 通俗类比</div>DeepSeek-R1的故事就像培养一个天才学生。R1-Zero相当于把一个聪明孩子扔进图书馆，只告诉他"考试答对就有奖励"，结果这孩子自己摸索出了做题的方法——画图、验算、回头检查，全都没人教。而R1则是在这基础上，先给他看了几本"优秀解题范例"，让他更快上路，少走弯路。</div>
+
+<h2>2.1 R1-Zero: 纯 RL 涌现推理</h2>
+<div class="ascii">训练流程:
+  基座: DeepSeek-V3 (671B MoE)
+  数据: 数学+代码 (可验证)
+  奖励: 答案正确性 (自动)
+  算法: GRPO (Group Relative Policy Optimization)
+  CoT数据: 无! ← 这是关键
+
+涌现行为:
+  ✓ 自发长链推理
+  ✓ 自发自我验证
+  ✓ 自发反思纠错
+  ✓ 尝试多种方法</div>
+
+<p>R1-Zero 的核心创新在于<strong>完全移除了人类标注的思维链（Chain-of-Thought）数据</strong>。传统观点认为，要让模型学会"分步推理"，必须先用大量人类书写的推理过程来微调。R1-Zero 用实验证明这个假设是错误的——只需要一个可验证的奖励信号（答案对不对），模型就能自主发展出复杂的推理策略。这一发现具有深远的理论意义：它表明大语言模型在预训练阶段已经积累了丰富的推理知识，而强化学习的作用是"激活"和"组织"这些已有的知识，而非从头创造推理能力。</p>
+
+<p>GRPO（Group Relative Policy Optimization）是 R1-Zero 使用的强化学习算法。与传统的 PPO 不同，GRPO 不需要一个独立的 Critic 模型来估计价值函数，而是通过<strong>组内相对比较</strong>来估计优势值：对同一个问题生成一组回答，以组内平均奖励为基准，奖励高于均值的回答被强化，低于均值的被抑制。这种方式大幅降低了训练的计算开销和工程复杂度。</p>
+
+<div class="ascii">GRPO 核心机制:
+  问题 Q → 生成 N 个回答 {o1, o2, ..., oN}
+  每个回答获得奖励 {r1, r2, ..., rN}
+  优势值 Ai = (ri - mean(r)) / std(r)
+  优化策略: 最大化加权对数概率的期望
+
+  对比 PPO:
+  PPO 需要: Actor + Critic + RM + RefModel (4个模型)
+  GRPO 需要: Actor + RM (2个模型) ← 更省显存</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区</div>很多人以为 R1-Zero 是"从零训练出推理能力"。实际上 R1-Zero 的起点是 DeepSeek-V3——一个已经预训练好的 671B MoE 模型。RL 只是"激活"了模型在预训练阶段已经学到的推理潜质，而不是从头创造推理能力。如果换一个很小的基座模型，同样的 RL 训练可能什么都涌现不出来。基座模型的知识储备是推理涌现的必要条件。</div>
+
+<h3>R1-Zero 的涌现行为详解</h3>
+<p>R1-Zero 在训练过程中展现出了多种令人惊叹的涌现行为，这些行为没有被显式编程或通过数据引导：</p>
+<ul>
+<li><strong>自发长链推理</strong>：模型的回答长度随训练自然增长，从几十字逐渐增长到数百甚至上千字的详细推理链。这不是因为有人教它"写长一点"，而是因为更详细的推理往往带来更高的正确率和更高的奖励。</li>
+<li><strong>自发自我验证</strong>：模型开始在回答末尾检查自己的答案，例如"让我验算一下"、"代入原式检验"。这种行为完全是 RL 训练过程中自然出现的。</li>
+<li><strong>自发反思纠错</strong>：更惊人的是，模型学会了在推理过程中识别错误并自我纠正，例如"等等，这一步好像有误，让我重新来"。这类似于人类的"元认知"能力。</li>
+<li><strong>尝试多种方法</strong>：面对困难问题，模型会尝试一种方法后发现行不通，然后切换到另一种方法，展现出"迂回策略"的能力。</li>
+</ul>
+
+<h3>R1-Zero 的"Aha Moment"</h3>
+<p>论文中特别提到了一个被研究者称为"Aha Moment"的现象——在训练中期，模型突然开始系统性地使用反思和验证策略。这不是渐进的变化，而是一个突然的相变（phase transition）。模型仿佛"顿悟"了推理的本质：不只是一步一步算，还可以回过头来检查和修正。这种相变现象在深度学习中并不罕见——BERT 的掩码预训练也会导致模型在某个训练阶段突然"理解"语法结构。但在 R1-Zero 中，这种相变的观察特别令人兴奋，因为它意味着 RL 训练可以自发地教会模型"元认知"——即"思考自己是如何思考的"能力。研究者通过监控训练过程中的推理链长度、验证行为频率和正确率的变化曲线，精确地定位了这个相变点。在相变之前，模型的推理链长度和正确率都在缓慢增长；相变之后，两者都出现了跳跃式的提升。</p>
+
+<div class="box deep"><div class="label">🔬 深入探讨：涌现能力的理论解释</div>R1-Zero 的涌现现象引发了一个深刻的问题：这些推理能力在预训练阶段是"已经存在但被抑制"的，还是 RL 真正创造了新能力？目前的证据倾向于前者。预训练数据中包含了大量数学推导和代码逻辑，模型在语言建模目标下已经学会了这些模式的"表层统计特征"。RL 训练的作用更像是提供了一个聚焦机制——告诉模型"什么时候该调用这些能力"。这就像一个读了无数棋谱但从未正式比赛的棋手，第一次参加比赛后突然爆发出惊人的棋力。关键的启发是：预训练阶段的"知识储备"可能比我们想象的更丰富，而 RL 的作用是"激活"和"组织"这些知识。从数学角度看，GRPO 的优化目标可以表示为：J(θ) = E[Σ_t A_t · log π_θ(a_t|s_t)]，其中 A_t 是通过组内相对排名计算的优势值。这一公式的巧妙之处在于：它不需要显式估计价值函数 V(s)，而是通过同一问题的多个采样来隐式估计"什么是好的"。</div>
+
+<h2>2.2 R1: 加 SFT 冷启动</h2>
+<h3>SFT 冷启动的三阶段训练流程</h3>
+<p>R1-Zero 虽然证明了纯 RL 的可行性，但存在两个明显问题：(1) 训练早期不稳定，模型输出混乱，经常出现重复、自相矛盾或格式错误的推理链；(2) 输出格式不规范，不利于实际部署，例如推理链可能包含大量冗余的"嗯"、"让我想想"等填充词。R1 通过引入 SFT（Supervised Fine-Tuning）冷启动来解决这些问题。这种"先教格式再提能力"的策略在大模型训练中非常常见，其核心思想是：SFT 提供了一个良好的初始化点，使得后续的 RL 训练能够在一个更稳定的起点上进行，从而更快收敛到更优的解。</p>
+
+<ol>
+<li><strong>阶段一：SFT 冷启动</strong>——使用少量高质量 CoT 数据（数千条）对 DeepSeek-V3 进行微调，让模型先学会"正确的推理格式"。这些数据由人工精心筛选和编辑，包含清晰的分步推理、验证步骤和规范的输出格式。</li>
+<li><strong>阶段二：GRPO + RLVR 推理训练</strong>——在冷启动模型的基础上，使用与 R1-Zero 类似的 GRPO 算法进行强化学习训练。但这一次，训练的起点是一个"已经会推理格式"的模型，因此训练更加稳定，收敛更快。</li>
+<li><strong>阶段三：拒绝采样 + SFT 格式对齐</strong>——从 RL 训练后的模型中采样大量推理轨迹，筛选出答案正确的样本，再加上通用任务（写作、问答等）的 SFT 数据，进行最终的微调。这一步确保模型不仅会推理，还能处理日常任务并保持良好的对话体验。</li>
+</ol>
+
+<div class="ascii">R1 完整训练流程:
+
+  DeepSeek-V3 (基座, 671B MoE)
+       │
+       ▼
+  ┌─────────────────┐
+  │ 阶段1: SFT冷启动 │ ← 少量高质量CoT数据
+  │ (学习推理格式)    │    (数千条精心筛选)
+  └────────┬────────┘
+           │
+           ▼
+  ┌─────────────────┐
+  │ 阶段2: GRPO RL   │ ← 数学+代码 RLVR
+  │ (提升推理能力)    │    (可验证奖励)
+  └────────┬────────┘
+           │
+           ▼
+  ┌─────────────────┐
+  │ 阶段3: 拒绝采样   │ ← 筛选正确推理轨迹
+  │ + SFT 对齐       │   + 通用任务数据
+  └────────┬────────┘
+           │
+           ▼
+      DeepSeek-R1 (最终模型)</div>
+
+<div class="box tip"><div class="label">💡 通俗类比</div>如果把 R1-Zero 比作"野生天才"，那 R1 就是"科班出身的天才"。野生天才可能有很多惊人的想法，但表达混乱、缺乏章法。科班训练让他学会规范的表达方式，同时保留了天才的创造力。R1 的 SFT 冷启动就像给天才上的"第一堂课"——不教你思考，只教你如何把想法表达清楚。这种"格式对齐"的方法在大模型训练中非常常见，其核心思想是：先让模型学会输出格式，再通过 RL 提升能力。</div>
+
+<h2>2.3 关键发现与技术突破</h2>
+<div class="box info"><div class="label">💡 R1-Zero 的意义</div>不需要人工教模型"如何思考"，只需给正确奖励信号，模型自己学会推理。证明了 RLVR 的强大威力。这一发现改变了大模型训练的范式——从"教模型思考"到"让模型自己学思考"。</div>
+
+<div class="box warn"><div class="label">⚠️ R1 的局限</div>R1 在非推理任务（如创意写作、开放对话）上表现不如专门优化过的模型。推理模型的"思维习惯"有时会成为负担——回答简单问题时也会进行冗长的推理。此外，R1 的推理过程完全透明（显式 CoT），这虽然有利于调试和理解，但也意味着推理过程可能被恶意利用——例如通过分析推理链来提取训练数据中的敏感信息。</div>
+
+<h3>知识蒸馏：小模型也能推理</h3>
+<p>R1 团队还做了另一个重要实验：用 R1 生成的推理数据对小模型（1.5B 到 70B）进行 SFT 蒸馏。结果表明，蒸馏后的小模型在推理任务上甚至超过了直接用 RL 训练的同规模模型。这意味着推理能力可以通过"教科书"（高质量推理数据）有效传递，而不一定需要每个模型都经历昂贵的 RL 训练。蒸馏的关键在于数据质量而非数据数量——数千条高质量推理链就能显著提升小模型的推理能力。具体来说，蒸馏过程是这样的：首先使用 R1-671B 对大量数学和代码问题生成推理轨迹，然后筛选出答案正确的轨迹（拒绝采样），最后用这些高质量轨迹对小模型进行 SFT 训练。整个过程不需要 RL，只需要标准的监督微调，因此工程复杂度远低于从头训练一个推理模型。蒸馏的成功也揭示了一个重要事实：推理能力更多地体现在"推理模式"而非"模型规模"上——只要小模型能够理解和模仿正确的推理模式，就能展现出超越其规模的推理能力。</p>
+
+<table>
+<tr><th>模型</th><th>参数量</th><th>MATH-500</th><th>AIME 2024</th><th>方法</th></tr>
+<tr><td>DeepSeek-R1 (671B)</td><td>671B MoE</td><td>97.3%</td><td>79.8%</td><td>SFT+RL</td></tr>
+<tr><td>R1-Distill-Qwen-32B</td><td>32B</td><td>94.3%</td><td>72.6%</td><td>蒸馏</td></tr>
+<tr><td>R1-Distill-Qwen-14B</td><td>14B</td><td>93.9%</td><td>69.7%</td><td>蒸馏</td></tr>
+<tr><td>R1-Distill-Qwen-7B</td><td>7B</td><td>92.8%</td><td>55.5%</td><td>蒸馏</td></tr>
+<tr><td>R1-Distill-Qwen-1.5B</td><td>1.5B</td><td>83.9%</td><td>28.9%</td><td>蒸馏</td></tr>
+<tr><td>QwQ-32B (RL直接训练)</td><td>32B</td><td>90.6%</td><td>50.0%</td><td>RL</td></tr>
+</table>
+
+<div class="box warn"><div class="label">⚠️ 蒸馏概念辨析</div>蒸馏 ≠ 知识蒸馏的传统含义。在大模型领域，"蒸馏"有时指的是用大模型的输出数据来训练小模型（数据蒸馏），而不是传统意义上对齐 softmax 输出分布。R1 的蒸馏就是前者——用 R1 生成的推理链作为训练数据来微调小模型。不要和 Hinton 提出的知识蒸馏（Knowledge Distillation）混淆，后者通过匹配教师模型的软标签分布来进行知识传递。两种方法的数学原理不同，但在目标上是相似的：将大模型的能力传递给小模型。</div>
+
+<h3>GRPO vs PPO 深度对比</h3>
+<table>
+<tr><th>特性</th><th>PPO</th><th>GRPO</th><th>技术分析</th></tr>
+<tr><td>Critic 网络</td><td>需要（额外模型）</td><td>不需要</td><td>GRPO 用组内统计替代</td></tr>
+<tr><td>优势估计</td><td>GAE (λ-return)</td><td>组内相对排名</td><td>更简单但同样有效</td></tr>
+<tr><td>显存需求</td><td>高（4个模型）</td><td>低（2个模型）</td><td>节省约50%显存</td></tr>
+<tr><td>训练稳定性</td><td>需精细调参</td><td>更稳定</td><td>对超参数不敏感</td></tr>
+<tr><td>适用场景</td><td>通用 RL</td><td>有可验证奖励的任务</td><td>GRPO 适用范围较窄</td></tr>
+<tr><td>提出者</td><td>Schulman 2017</td><td>DeepSeek 2024</td><td>算法演进</td></tr>
+</table>
+
+<div class="box deep"><div class="label">🔬 深入探讨：GRPO 的自动课程学习机制</div>GRPO 的"组内相对排名"思想其实有一个深层含义——它隐式地实现了一种"自动课程学习"（automatic curriculum）。对于简单问题，所有生成的回答可能都正确，此时奖励差异很小，梯度更新也很小，模型几乎不学习。而对于中等难度的问题，部分回答正确、部分错误，此时奖励差异最大，梯度更新也最大，模型学得最多。这意味着 GRPO 天然地把学习重心放在了"模型刚好能做但还不稳定的"难度区间——这正是最高效的学习区间，类似于人类学习中的"最近发展区"（Zone of Proximal Development）概念。从数学角度看，GRPO 的梯度更新与奖励的标准差成正比：∇J ∝ std(r) · Σ_i (ri - mean(r)) · ∇log π(ai|q)，当 std(r) 接近零时（所有回答一样好或一样差），梯度也接近零，模型停止学习。这种自动调节机制使得 GRPO 在训练过程中自然地聚焦于最有价值的学习样本。</div>
+
+<h3>R1 的影响与启示</h3>
+<p>DeepSeek-R1 的发布在 AI 领域产生了深远影响，推动了整个行业的技术方向转变。从产业角度来看，R1 的开源性质降低了推理模型的技术门槛，使得中小团队和研究机构也能参与到推理模型的研究和应用中。从学术角度来看，R1 的论文提供了大量可复现的实验细节，为后续研究提供了宝贵的参考基线。以下是 R1 带来的几个关键影响：</p>
+<ul>
+<li><strong>证明了开源推理模型的可行性</strong>：R1 是第一个在推理能力上接近 o1 的开源模型，打破了闭源模型的垄断地位。</li>
+<li><strong>推动了 RL 在 LLM 中的复兴</strong>：R1 之后，几乎所有主要实验室都开始重新重视 RL 训练。之前社区普遍认为 SFT 就够了，R1 证明了 RL 能带来质的飞跃。</li>
+<li><strong>蒸馏范式的普及</strong>：R1 的蒸馏实验表明，大模型的推理能力可以高效传递给小模型，推动了"大模型生成数据→小模型学习"的范式。</li>
+<li><strong>GRPO 算法的广泛采用</strong>：GRPO 因其简洁高效，被众多后续工作采用和改进，成为推理模型训练的标准算法之一。</li>
+<li><strong>推理成本的民主化</strong>：R1 的蒸馏版本（1.5B-70B）使得推理能力不再局限于超大模型，普通开发者也能在消费级硬件上运行推理模型。一个 R1-Distill-7B 模型可以在单张 RTX 3090 上运行，推理速度约为 30-50 tokens/s，足以支持大多数推理任务。这种成本的大幅降低使得推理模型从"研究玩具"变成了"实用工具"，推动了推理模型在教育、科研、工程等领域的广泛应用。</li>
+</ul>
+
+<div class="ascii">R1 的历史定位:
+
+  时间线:
+  2024.09  OpenAI o1 ─── 首个推理模型（闭源）
+  2025.01  DeepSeek-R1 ─── 首个开源推理模型（追赶）
+  2025.01  R1蒸馏系列 ─── 小模型也能推理
+  2025.Q2  各厂跟进 ─── QwQ, Kimi k1.5, Gemini Flash Thinking...
+
+  技术影响:
+  RLVR → 成为标准训练范式
+  GRPO → 成为标准RL算法
+  蒸馏推理数据 → 成为标准方法
+
+  行业格局:
+  ┌──────────────────────────────────────────────┐
+  │ 闭源推理模型: o1, o3, Gemini 2.5 Pro         │
+  │ 开源推理模型: R1, QwQ, Kimi k1.5             │
+  │ 蒸馏小模型: R1-Distill (1.5B-70B)           │
+  └──────────────────────────────────────────────┘</div>
+
+<h2>2.4 R1 与 o1 的技术路线对比</h2>
+<h3>OpenAI o1 的推理链训练方法</h3>
+<p>DeepSeek-R1 和 OpenAI o1 是推理模型领域的两个标志性产品，它们在技术路线上既有相似之处，也有显著差异。理解这些差异有助于把握推理模型的发展方向，也有助于在实际应用中做出合理的技术选型。</p>
+
+<p>从训练方法来看，两者都使用了强化学习来提升模型的推理能力，但具体的算法和数据策略有所不同。o1 的训练细节尚未公开，但根据其行为特征推测，它可能使用了大规模的 PPO 或类似算法，并结合了海量的推理数据。R1 则公开了完整的训练流程：先用少量高质量 CoT 数据进行 SFT 冷启动，再用 GRPO 进行 RL 训练，最后通过拒绝采样和 SFT 进行格式对齐。</p>
+
+<p>从推理过程来看，o1 使用隐式推理链（用户不可见），而 R1 使用显式推理链（用户可见）。这一差异的根源可能在于训练数据和目标的不同：o1 的训练目标可能包含了"隐藏推理过程"的信号，而 R1 的训练目标主要是"产出正确答案"，对推理过程的可见性没有特殊要求。显式推理链的优势在于：(1) 用户可以理解模型的思考过程；(2) 开发者可以调试和分析推理质量；(3) 推理链可以作为训练数据用于蒸馏。隐式推理链的优势在于：(1) 推理过程更简洁，用户体验更好；(2) 避免推理过程被恶意利用。</p>
+
+<table>
+<tr><th>维度</th><th>OpenAI o1</th><th>DeepSeek-R1</th><th>差异分析</th></tr>
+<tr><td>基座模型</td><td>未知（推测GPT-4级别）</td><td>DeepSeek-V3 (671B MoE)</td><td>R1公开了基座信息</td></tr>
+<tr><td>训练算法</td><td>大规模RL（具体未知）</td><td>GRPO + SFT冷启动</td><td>R1公开了训练细节</td></tr>
+<tr><td>推理过程</td><td>隐式（用户不可见）</td><td>显式（用户可见）</td><td>R1更透明</td></tr>
+<tr><td>开源程度</td><td>完全闭源</td><td>完全开源（模型+论文）</td><td>R1开放度远高于o1</td></tr>
+<tr><td>推理能力</td><td>强（AIME 83.3%）</td><td>强（AIME 79.8%）</td><td>接近但o1略优</td></tr>
+<tr><td>通用能力</td><td>全面</td><td>推理强，其他稍弱</td><td>o1更均衡</td></tr>
+</table>
+
+<div class="box tip"><div class="label">💡 选型建议</div>选择推理模型时需要考虑具体需求：如果需要最强的推理能力和全面的通用能力，o1/o3 是更好的选择；如果需要本地部署、完全控制、或研究用途，R1 及其蒸馏版本更合适。对于成本敏感的场景，R1-Distill-Qwen-32B 是一个很好的折中——在推理能力上接近 R1 但推理成本低得多。对于移动端或边缘设备，R1-Distill-Qwen-1.5B 或 7B 是唯一可行的选择。</div>
+
+<div class="box exercise"><div class="label">🎯 动手练习</div>
+<p>使用 DeepSeek-R1 API 体验推理过程的可见性，并与标准模型进行对比：</p>
+<pre><code><span class="keyword">from</span> openai <span class="keyword">import</span> OpenAI
+client = OpenAI()
+
+<span class="comment"># 使用 DeepSeek-R1 解数学题</span>
+response = client.chat.completions.create(
+    model=<span class="string">"deepseek-reasoner"</span>,
+    messages=[{
+        <span class="string">"role"</span>: <span class="string">"user"</span>,
+        <span class="string">"content"</span>: <span class="string">"证明: 对于任意正整数 n, n³ - n 能被 6 整除"</span>
+    }]
+)
+
+<span class="comment"># R1 会先给出思考过程</span>
+<span class="keyword">print</span>(<span class="string">"=== 推理过程 ==="</span>)
+<span class="keyword">print</span>(response.choices[0].message.reasoning_content)
+<span class="keyword">print</span>(<span class="string">"=== 最终答案 ==="</span>)
+<span class="keyword">print</span>(response.choices[0].message.content)
+
+<span class="comment"># 思考题:</span>
+<span class="comment"># 1. 对比 R1 和 GPT-4o 在数学证明题上的推理链质量</span>
+<span class="comment"># 2. 观察 R1 是否出现了"自发自我验证"行为</span>
+<span class="comment"># 3. 分析推理链长度与问题难度的关系</span></code></pre></div>
+
+<div class="box tip"><div class="label">💡 继续学习</div>接下来请学习 <a href="03-PRM与搜索策略.html">PRM与搜索策略</a>，了解如何通过过程奖励模型和搜索算法进一步提升推理质量。然后完成 <a href="04-总结与练习.html">总结与练习</a> 来巩固所学知识。</div>
+
+<h2>学习路径</h2>
+<div class="box info"><div class="label">📚 推荐学习路径</div>
+<ul>
+<li><strong>第一步</strong>：理解 <a href="01-Test-Time-Compute.html">Test-Time Compute</a>——推理时多花计算可以提升性能</li>
+<li><strong>第二步</strong>：深入学习 DeepSeek-R1（本文）——理解 RL 训练推理能力的具体方法</li>
+<li><strong>第三步</strong>：学习 <a href="03-PRM与搜索策略.html">PRM与搜索策略</a>——理解推理时计算的具体实现</li>
+<li><strong>第四步</strong>：完成 <a href="04-总结与练习.html">总结与练习</a>——巩固所学知识</li>
+</ul></div>
+
+<div class="box tip"><div class="label">💡 R1 训练的工程经验</div>基于社区复现 R1 训练的经验总结：(1) GRPO 的采样数量 N 对训练效果影响显著，通常 N=8~16 即可获得稳定的效果，过小会导致方差过大，过大则增加计算开销；(2) 奖励函数设计是关键——对于数学任务，答案精确匹配（Exact Match）是最简单有效的奖励信号，而代码任务需要通过执行测试用例来验证正确性；(3) 冷启动数据的质量远比数量重要，数千条精心筛选的 CoT 数据就足够了；(4) 训练过程中需要监控推理链长度的变化趋势——如果推理链持续变长但正确率不提升，可能存在"奖励黑客"（Reward Hacking）现象。此外，RL 训练的超参数调优也至关重要——学习率通常设为 1e-6 量级，KL 散度惩罚系数需要根据模型规模和任务难度动态调整，过大的 KL 惩罚会限制模型探索新策略的能力，过小则可能导致训练不稳定。在工程实现上，GRPO 的训练流程可以完全复用现有的 SFT 基础设施，只需额外增加采样和奖励计算模块，这大大降低了从 SFT 迁移到 RL 训练的门槛。目前开源社区已经有多个基于 GRPO 的推理模型训练框架，如 OpenRLHF、TRL 等，使得中小团队也能复现 R1 的训练流程。</div>
+
+<div class="next-prev"><a href="01-Test-Time-Compute.html">&larr; 01-TTC</a><a href="03-PRM与搜索策略.html">03-PRM &rarr;</a></div>
+</div>
+<p>DeepSeek-R1的训练流程展示了大规模强化学习在推理能力培养上的巨大潜力。其核心创新在于将GRPO算法应用于数学和代码推理任务，通过自生成数据和验证器反馈实现能力的持续提升。R1-Zero阶段完全摒弃了SFT，直接从基座模型开始RL训练，发现模型自发涌现了思维链、自我纠错和反思等高级推理行为。R1阶段则结合了冷启动数据和多阶段RL，显著提升了推理质量和可读性。在工程实践中，R1的成功依赖于精心设计的奖励函数、大规模分布式训练基础设施以及高效的采样策略。其蒸馏版本在多个推理基准上超越了同等规模的闭源模型，证明了推理能力可以通过知识迁移有效传递。</p>
+<div class="footer"><p>LLM 系统学习 · 02-DeepSeek-R1详解</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="deep"><strong>深入探讨：</strong>
+GRPO 的"组内相对排名"机制隐式实现了自动课程学习。对于简单问题，所有生成的回答可能都正确，奖励差异小→梯度更新小→模型几乎不学习；对于中等难度问题，部分正确部分错误→奖励差异最大→梯度更新最大→模型学得最多。这意味着 GRPO 天然聚焦于"模型刚好能做但还不稳定的"难度区间，类似于人类学习中的"最近发展区"。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为 R1-Zero 是"从零训练出推理能力"。R1-Zero 的起点是 DeepSeek-V3——一个已预训练好的 671B MoE 模型。RL 只是"激活"了预训练阶段已学到的推理潜质。如果换一个很小的基座模型，同样的 RL 训练可能什么都涌现不出来。基座模型的知识储备是推理涌现的必要条件。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+R1 的蒸馏 ≠ Hinton 的知识蒸馏。R1 的蒸馏是"数据蒸馏"——用大模型生成的推理链作为训练数据来微调小模型（SFT），不需要对齐 softmax 输出分布。两者数学原理不同，但目标相似：将大模型能力传递给小模型。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+DeepSeek-R1 是推理模型的里程碑。理解 GRPO 算法、SFT 冷启动、蒸馏范式这三个关键创新，是掌握推理模型训练和部署的基础。建议结合 PRM 与搜索策略章节深入学习推理时计算优化。
+</div>
+</body>
+</html>

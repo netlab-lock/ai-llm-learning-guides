@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🏗️ 推理服务高级架构 | 学习指南</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+h1 { color: #58a6ff; font-size: 2.2em; margin: 32px 0 16px; text-align: center; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 12px; margin: 32px 0 16px; }
+.card-grid { display: grid; grid-template-columns: 1fr; gap: 16px; margin: 16px 0; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; transition: border-color 0.2s; }
+.card:hover { border-color: #58a6ff; }
+.card h3 { color: #58a6ff; margin: 0 0 8px; }
+.card p { color: #8b949e; font-size: 0.95em; }
+.card a { text-decoration: none; color: inherit; display: block; }
+.card .tags { margin-top: 8px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; margin: 2px; }
+.badge-blue { background: #1f6feb33; color: #58a6ff; }
+.badge-green { background: #23863633; color: #3fb950; }
+.stats { display: flex; gap: 24px; justify-content: center; margin: 24px 0; flex-wrap: wrap; }
+.stat { text-align: center; }
+.stat .num { font-size: 2em; font-weight: 700; color: #58a6ff; }
+.stat .label { color: #8b949e; font-size: 0.9em; }
+.footer { text-align: center; color: #484f58; margin-top: 48px; padding: 24px 0; border-top: 1px solid #21262d; font-size: 0.9em; }
+.footer a { color: #58a6ff; }
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>🏗️ 推理服务高级架构</h1>
+<p style="text-align: center; color: #8b949e;">从一体架构到分离架构 — 掌握大规模 LLM 推理服务的系统设计</p>
+
+<div class="stats">
+<div class="stat"><div class="num">6</div><div class="label">模块</div></div>
+<div class="stat"><div class="num">~60KB</div><div class="label">总内容</div></div>
+<div class="stat"><div class="num">2-3h</div><div class="label">学习时长</div></div>
+</div>
+
+<div style="background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin: 16px 0;">
+<strong>学习目标</strong>
+<ul style="margin: 8px 0 0 20px;">
+<li>理解 Prefill 和 Decode 的本质差异及分离架构的动机</li>
+<li>掌握 Splitwise/DistServe/Mooncake 三大分离架构的设计</li>
+<li>理解 KV Cache 感知路由与分布式缓存架构</li>
+<li>掌握 Serverless 推理的 Cold Start 优化策略</li>
+<li>能设计 LLM 推理服务的成本优化方案和监控体系</li>
+</ul>
+</div>
+
+<h2>📋 学习路线</h2>
+
+<div class="tip"><strong>通俗类比：</strong>LLM推理就像去餐厅吃饭——训练阶段是厨师学艺（花几个月学几千道菜），推理阶段是给客人上菜（每道菜几秒钟出）。虽然学艺很贵，但餐厅每天营业的水电煤气费（推理成本）才是最大的开销。</div>
+<div class="warn"><strong>常见误区：</strong>很多人以为推理比训练简单——恰恰相反，推理的工程挑战更大。训练可以离线跑几天，推理必须实时响应（<100ms）；训练batch固定，推理请求随时来随时走；训练出错可以重来，推理出错用户就流失了。不要低估推理系统的复杂度。</div>
+<div class="deep"><strong>深入探讨：</strong>从经济学角度看，推理成本的优化本质上是"计算密度"的提升。以GPT-4级别模型为例，单次推理约消耗0.001-0.01 kWh电力，但当QPS达到百万级时，年电力消耗可达数亿度。Google报告显示，推理已占其AI计算总成本的60%以上。这就是为什么推理优化不只是技术问题，更是商业可持续性问题。</div>
+<div class="ascii"><pre>LLM 推理全流程
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
+│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
+└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
+                                       └──────────────┘    └────┬─────┘
+                     ┌──────────────┐    ┌──────────────┐      │
+                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
+                     │  "你好！..." │    │  解码        │
+                     └──────────────┘    └──────────────┘</pre></div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<div class="card-grid">
+<div class="card"><a href="01-推理服务架构总览.html">
+<h3>01 🏗️ 推理服务架构总览</h3>
+<p>Prefill vs Decode 的本质差异，核心指标（TTFT/TPS/Goodput），推理架构演进时间线，一体 vs 分离架构对比。</p>
+<div class="tags"><span class="badge badge-blue">总览</span><span class="badge badge-green">必读</span></div>
+</a></div>
+
+<div class="card"><a href="02-Disaggregated-Prefill-Decode.html">
+<h3>02 🔀 Disaggregated Prefill-Decode</h3>
+<p>阶段干扰问题，Splitwise/DistServe/Mooncake 三大论文，KV Cache 传输量分析与延迟计算，vLLM 分离架构配置。</p>
+<div class="tags"><span class="badge badge-blue">核心</span><span class="badge badge-blue">架构</span></div>
+</a></div>
+
+<div class="card"><a href="03-KV-Cache调度与路由.html">
+<h3>03 🗂️ KV Cache 调度与路由</h3>
+<p>Cache-盲路由的问题，Prefix Caching 路由，LMCache/llm-d，Cache Affinity Scheduling，Eviction 策略，分布式 KV Cache。</p>
+<div class="tags"><span class="badge badge-blue">核心</span><span class="badge badge-blue">调度</span></div>
+</a></div>
+
+<div class="card"><a href="04-多模型与Serverless推理.html">
+<h3>04 ☁️ 多模型与 Serverless 推理</h3>
+<p>GPU 分区技术（MIG/MPS），模型复用策略，Serverless Cold Start 优化，自动扩缩容，多模型调度架构。</p>
+<div class="tags"><span class="badge badge-blue">进阶</span><span class="badge badge-blue">部署</span></div>
+</a></div>
+
+<div class="card"><a href="05-成本优化策略.html">
+<h3>05 💰 成本优化策略</h3>
+<p>成本构成分析，量化/Prompt Caching/Batch API/多级缓存优化，成本建模公式，成本优化决策树。</p>
+<div class="tags"><span class="badge badge-green">实战</span><span class="badge badge-blue">成本</span></div>
+</a></div>
+
+<div class="card"><a href="06-监控与可观测性.html">
+<h3>06 📡 监控与可观测性</h3>
+<p>三层监控指标（用户体验/系统/硬件），请求级 Tracing，Prometheus+Grafana 配置，A/B 测试，故障排查流程。</p>
+<div class="tags"><span class="badge badge-green">实战</span><span class="badge badge-blue">运维</span></div>
+</a></div>
+</div>
+
+<h2>📖 推荐资源</h2>
+
+<div class="tip"><strong>通俗类比：</strong>LLM推理就像去餐厅吃饭——训练阶段是厨师学艺（花几个月学几千道菜），推理阶段是给客人上菜（每道菜几秒钟出）。虽然学艺很贵，但餐厅每天营业的水电煤气费（推理成本）才是最大的开销。</div>
+<div class="warn"><strong>常见误区：</strong>很多人以为推理比训练简单——恰恰相反，推理的工程挑战更大。训练可以离线跑几天，推理必须实时响应（<100ms）；训练batch固定，推理请求随时来随时走；训练出错可以重来，推理出错用户就流失了。不要低估推理系统的复杂度。</div>
+<div class="deep"><strong>深入探讨：</strong>从经济学角度看，推理成本的优化本质上是"计算密度"的提升。以GPT-4级别模型为例，单次推理约消耗0.001-0.01 kWh电力，但当QPS达到百万级时，年电力消耗可达数亿度。Google报告显示，推理已占其AI计算总成本的60%以上。这就是为什么推理优化不只是技术问题，更是商业可持续性问题。</div>
+<div class="ascii"><pre>LLM 推理全流程
+┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
+│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
+│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
+└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
+                                       └──────────────┘    └────┬─────┘
+                     ┌──────────────┐    ┌──────────────┐      │
+                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
+                     │  "你好！..." │    │  解码        │
+                     └──────────────┘    └──────────────┘</pre></div>
+<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
+<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
+<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
+<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
+<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
+<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+
+<ul>
+<li><a href="https://arxiv.org/abs/2401.02038">Splitwise: Efficient Generative LLM Inference (Microsoft, 2024)</a></li>
+<li><a href="https://arxiv.org/abs/2407.00066">DistServe: Disaggregating Prefill and Decode (OSDI 2024)</a></li>
+<li><a href="https://arxiv.org/abs/2407.00069">Mooncake: KVCache-centric Disaggregated Architecture (Moonshot AI)</a></li>
+<li><a href="https://github.com/LMCache/LMCache">LMCache: Distributed KV Cache</a></li>
+<li><a href="https://docs.vllm.ai/">vLLM 官方文档</a></li>
+</ul>
+
+<div class="footer">
+<p><a href="../index.html">← 返回学习目录</a></p>
+</div>
+</div>
+</body>
+</html>

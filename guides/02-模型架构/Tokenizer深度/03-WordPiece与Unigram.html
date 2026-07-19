@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03-WordPiece与Unigram | Tokenizer深度</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.7; }
+.nav { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px; display: flex; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.nav a { color: #58a6ff; text-decoration: none; }
+.nav span { color: #8b949e; }
+.container { max-width: 900px; margin: 0 auto; padding: 24px; }
+h1 { color: #58a6ff; font-size: 2em; margin: 24px 0 16px; }
+h2 { color: #f0f6fc; border-left: 4px solid #58a6ff; padding-left: 12px; margin: 32px 0 16px; font-size: 1.5em; }
+h3 { color: #d2a8ff; margin: 24px 0 12px; font-size: 1.2em; }
+h4 { color: #79c0ff; margin: 16px 0 8px; }
+p { margin: 8px 0; }
+code { background: #21262d; color: #79c0ff; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+pre { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; overflow-x: auto; margin: 12px 0; font-size: 0.85em; line-height: 1.5; }
+pre code { background: transparent; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 16px 0; }
+th { background: #21262d; color: #f0f6fc; padding: 10px 14px; text-align: left; border: 1px solid #30363d; font-weight: 600; }
+td { padding: 8px 14px; border: 1px solid #30363d; }
+tr:nth-child(even) { background: #161b22; }
+.tip { background: #0d1d30; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.exercise { background: #0d2818; border-left: 4px solid #238636; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; }
+.svg-diagram { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; margin: 1rem 0; overflow-x: auto; text-align: center; } .svg-diagram svg { max-width: 100%; height: auto; } .ascii { background: #161b22; border: 1px solid #30363d; font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 0.82em; line-height: 1.5; padding: 16px; overflow-x: auto; margin: 16px 0; white-space: pre; border-radius: 6px; }
+ul, ol { margin: 8px 0 8px 24px; }
+li { margin: 4px 0; }
+a { color: #58a6ff; }
+.keyword { color: #ff7b72; } .string { color: #a5d6ff; } .comment { color: #8b949e; } .cmd { color: #79c0ff; }
+.footer { text-align: center; color: #484f58; margin-top: 48px; padding: 24px 0; border-top: 1px solid #21262d; font-size: 0.9em; }
+.footer a { color: #58a6ff; }
+.next-prev { display: flex; justify-content: space-between; margin-top: 48px; padding-top: 16px; border-top: 1px solid #21262d; }
+.next-prev a { padding: 8px 16px; background: #21262d; border-radius: 6px; }
+.tag { display: inline-block; background: #388bfd22; color: #58a6ff; padding: 2px 8px; border-radius: 12px; font-size: 0.8em; margin: 2px; }
+.badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
+.badge-blue { background: #1f6feb33; color: #58a6ff; }
+.badge-green { background: #23863633; color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="nav"><a href="02-BPE算法详解.html">&larr; 02-BPE算法详解</a><span>Tokenizer深度</span><a href="04-SentencePiece详解.html">04-SentencePiece详解 &rarr;</a></div>
+<div class="container">
+
+<h1>📐 WordPiece 与 Unigram</h1>
+
+<h2>1. WordPiece</h2>
+<h3>Tokenizer技术的前沿发展与工程优化</h3>
+<p>Tokenizer的工程优化对推理成本有直接影响。在生产环境中，Tokenizer的编码速度需要跟上模型的推理速度——如果Tokenizer处理一个prompt需要10ms而模型生成一个token只需5ms，Tokenizer就会成为瓶颈。现代Tokenizer实现(如tiktoken/rusttokenizers)使用Rust编写，编码速度可达每秒数百万token。</p>
+<p>多语言Tokenizer的设计是一个NP-hard问题——在有限的词表大小下，如何分配不同语言的token以最大化整体编码效率？主流方案是按训练语料的比例分配：如果训练数据中中文占15%，则词表中约15%的token是中文相关的。但这个比例需要根据目标市场的语言分布调整——面向中国市场的模型(如Qwen)会增加中文token比例到20-25%。</p>
+<p>Tokenizer的版本管理也是一个容易被忽视的问题。不同版本的Tokenizer可能对同一段文本产生不同的token序列，导致模型输出不一致。HuggingFace的Tokenizer库通过tokenizer.json格式标准化了Tokenizer的序列化，但不同框架(GPT-4 vs LLaMA vs Qwen)的Tokenizer实现仍有差异，需要在模型迁移时特别注意。</p>
+
+
+<h3>1. WordPiece：核心技术原理与实现细节</h3>
+<p>从系统设计角度看，1. WordPiece的核心在于平衡计算效率与模型质量。具体来说，需要在三个维度上做出权衡：(1)计算复杂度——算法的理论时间复杂度决定了在大规模数据上的可行性，O(n²)的算法在序列长度超过8K时会成为瓶颈；(2)内存占用——模型参数、激活值和优化器状态的显存需求决定了所需的硬件配置，70B模型在FP16下需要约140GB显存；(3)通信开销——分布式训练中的集合通信(AllReduce/AllGather)可能占据30-50%的总训练时间。</p>
+<p>工程实现中，1. WordPiece通常采用分层架构：底层是硬件抽象层(CUDA/Triton kernels)，负责高效的矩阵运算和内存管理；中间层是算法核心层，实现主要的计算逻辑；上层是服务接口层(OpenAI兼容API)，提供标准化的调用方式。这种分层设计使得每一层都可以独立优化——例如底层可以针对不同GPU架构(Ampere/Hopper)编译不同的kernel，而上层接口保持不变。</p>
+<p>从最新进展来看，2025-2026年1. WordPiece领域出现了几个重要趋势：混合专家(MoE)架构成为主流、推理时计算(Test-Time Compute)的价值被充分认识、以及端到端的训练-推理协同优化取代了单独的推理优化。这些趋势正在重塑LLM系统的设计范式。</p>
+<h3>1. WordPiece的核心组件与工作原理</h3>
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>WordPiece 和 BPE 就像两个厨师用不同的标准选食材。BPE 选"最常一起出现的食材"（频率），WordPiece 选"放在一起菜最好吃的食材"（似然最大化）。结果往往相似，但 WordPiece 的标准更"聪明"。</div>
+<div class="warn"><strong>常见误区：</strong>WordPiece 的 "##" 前缀不是装饰，它告诉模型"这个 token 不是词首，要和前面的 token 拼接才能还原"。如果你在用 BERT 时看到 "##ing"，不要以为是两个 token——它是 "play" + "##ing" = "playing"。</div>
+<div class="deep"><strong>深入探讨：</strong>WordPiece 的合并标准是最大化训练语料的语言模型似然。具体来说，对于候选合并 (a,b)，计算合并后似然的增加量 ΔL = P(ab) - P(a)P(b)，选择 ΔL 最大的合并。这比 BPE 的纯频率标准更精确，但计算成本也更高。</div>
+
+<h3>1.1 与 BPE 的区别</h3>
+<p>WordPiece 的合并标准与 BPE 不同：</p>
+<table>
+<tr><th>维度</th><th>BPE</th><th>WordPiece</th></tr>
+<tr><td>合并标准</td><td>频率最高</td><td>似然增加最大</td></tr>
+<tr><td>标记方式</td><td>无特殊标记</td><td>## 前缀标记非词首</td></tr>
+<tr><td>代表模型</td><td>GPT, Llama</td><td>BERT, DistilBERT</td></tr>
+</table>
+
+<h3>1.2 ## 前缀</h3>
+<pre><code><span class="comment"># WordPiece 分词示例</span>
+<span class="string">"unhappiness"</span> → [<span class="string">"un"</span>, <span class="string">"##happiness"</span>]
+<span class="string">"playing"</span>     → [<span class="string">"play"</span>, <span class="string">"##ing"</span>]
+
+<span class="comment">## 前缀表示: 这不是词首，应该与前一个 token 拼接</span>
+</code></pre>
+
+
+<div class="ascii">
+初始: h e l l o w o r l d
+Step1: 合并(l,l)→ll   h e ll o w o r l d
+Step2: 合并(e,ll)→ell  h ell o w o r l d
+Step3: 合并(h,ell)→hell hell o w o r l d
+Step4: 合并(o,w)→ow   hell o w or l d
+...直到词表大小达标
+
+词表构建: 频率统计 → 排序 → 合并最高频pair → 更新频率 → 重复
+</div><h2>2. Unigram Language Model</h2>
+
+<h3>2. Unigram Language Model：核心技术原理与实现细节</h3>
+<p>从系统设计角度看，2. Unigram Language Model的核心在于平衡计算效率与模型质量。具体来说，需要在三个维度上做出权衡：(1)计算复杂度——算法的理论时间复杂度决定了在大规模数据上的可行性，O(n²)的算法在序列长度超过8K时会成为瓶颈；(2)内存占用——模型参数、激活值和优化器状态的显存需求决定了所需的硬件配置，70B模型在FP16下需要约140GB显存；(3)通信开销——分布式训练中的集合通信(AllReduce/AllGather)可能占据30-50%的总训练时间。</p>
+<p>工程实现中，2. Unigram Language Model通常采用分层架构：底层是硬件抽象层(CUDA/Triton kernels)，负责高效的矩阵运算和内存管理；中间层是算法核心层，实现主要的计算逻辑；上层是服务接口层(OpenAI兼容API)，提供标准化的调用方式。这种分层设计使得每一层都可以独立优化——例如底层可以针对不同GPU架构(Ampere/Hopper)编译不同的kernel，而上层接口保持不变。</p>
+<p>从最新进展来看，2025-2026年2. Unigram Language Model领域出现了几个重要趋势：混合专家(MoE)架构成为主流、推理时计算(Test-Time Compute)的价值被充分认识、以及端到端的训练-推理协同优化取代了单独的推理优化。这些趋势正在重塑LLM系统的设计范式。</p>
+<h3>2. Unigram Language Model的核心组件与工作原理</h3>
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>Unigram 的思路和 BPE 完全相反——BPE 是"从零开始建"，Unigram 是"从满开始删"。就像雕刻：BPE 是一块小石头慢慢往上粘土，Unigram 是一块大石头慢慢凿掉多余的部分。</div>
+<div class="warn"><strong>常见误区：</strong>Unigram 的概率分词不是"随机分词"。它用 Viterbi 算法（动态规划）找到概率最高的分词方案。训练时用多种分词方案计算似然，推理时只用最优方案。</div>
+<div class="deep"><strong>深入探讨：</strong>Unigram 的数学基础是 Unigram 语言模型——假设每个子词独立出现，文本的似然就是各子词概率的乘积。这比 BPE 的贪心策略更优雅：它能输出多种分词方案及其概率，支持训练时的软分词（同时考虑多种分词）。Kudo (2018) 证明这比 BPE 在机器翻译上效果更好。</div>
+<div class="ascii"><pre>Unigram 的概率分词:
+
+输入: "international"
+
+分词方案 1: ["international"]           P=0.6
+分词方案 2: ["inter", "national"]        P=0.3
+分词方案 3: ["in", "ter", "na", "tional"] P=0.1
+
+训练时: 所有方案都参与似然计算 (加权)
+推理时: 选择概率最高的方案 (Viterbi)
+
+对比 BPE:
+  BPE 只有一种分词结果 (贪心)
+  Unigram 可以输出多种 (概率分布)</pre></div>
+<table><tr><th>维度</th><th>BPE</th><th>Unigram</th></tr>
+<tr><td>训练方向</td><td>自底向上 (建)</td><td>自顶向下 (删)</td></tr>
+<tr><td>分词方式</td><td>贪心 (唯一)</td><td>Viterbi (最优)</td></tr>
+<tr><td>概率输出</td><td>无</td><td>有 (每种分词有概率)</td></tr>
+<tr><td>训练速度</td><td>快</td><td>慢</td></tr>
+<tr><td>分词质量</td><td>好</td><td>更好</td></tr></table>
+
+<h3>2.1 核心思想</h3>
+<p>Unigram 的方向与 BPE/WordPiece 相反：<strong>从大词表开始，逐步删除不重要的子词</strong>。</p>
+
+<div class="ascii">
+Unigram 训练过程:
+
+Step 1: 初始化一个很大的词表 (如 100K)
+        包含所有字符 + 常见子词 + 常见词
+
+Step 2: 对每个子词计算其"重要性"
+        重要性 = 删除它后语料的似然下降
+
+Step 3: 删除最不重要的子词 (保留 80-90%)
+
+Step 4: 重复 Step 2-3，直到达到目标词表大小
+
+最终: 得到一个精简的词表 + 每个子词的概率
+</div>
+
+<h3>2.2 概率分词</h3>
+<p>与 BPE 的贪心不同，Unigram 可以输出多种分词结果及其概率：</p>
+<pre><code><span class="comment"># Unigram 可以输出多种分词</span>
+<span class="string">"international"</span>
+  → [<span class="string">"international"</span>]         p=0.6
+  → [<span class="string">"inter"</span>, <span class="string">"national"</span>]    p=0.3
+  → [<span class="string">"in"</span>, <span class="string">"ter"</span>, <span class="string">"na"</span>, <span class="string">"tional"</span>] p=0.1
+
+<span class="comment"># 训练时用 Viterbi 解码选择最优分词</span>
+</code></pre>
+
+<h2>3. 三种算法对比</h2>
+
+<h3>3. 三种算法对比：核心技术原理与实现细节</h3>
+<p>从系统设计角度看，3. 三种算法对比的核心在于平衡计算效率与模型质量。具体来说，需要在三个维度上做出权衡：(1)计算复杂度——算法的理论时间复杂度决定了在大规模数据上的可行性，O(n²)的算法在序列长度超过8K时会成为瓶颈；(2)内存占用——模型参数、激活值和优化器状态的显存需求决定了所需的硬件配置，70B模型在FP16下需要约140GB显存；(3)通信开销——分布式训练中的集合通信(AllReduce/AllGather)可能占据30-50%的总训练时间。</p>
+<p>工程实现中，3. 三种算法对比通常采用分层架构：底层是硬件抽象层(CUDA/Triton kernels)，负责高效的矩阵运算和内存管理；中间层是算法核心层，实现主要的计算逻辑；上层是服务接口层(OpenAI兼容API)，提供标准化的调用方式。这种分层设计使得每一层都可以独立优化——例如底层可以针对不同GPU架构(Ampere/Hopper)编译不同的kernel，而上层接口保持不变。</p>
+<p>从最新进展来看，2025-2026年3. 三种算法对比领域出现了几个重要趋势：混合专家(MoE)架构成为主流、推理时计算(Test-Time Compute)的价值被充分认识、以及端到端的训练-推理协同优化取代了单独的推理优化。这些趋势正在重塑LLM系统的设计范式。</p>
+<h3>3. 三种算法对比的核心组件与工作原理</h3>
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>三种算法就像三种不同的"乐高搭建法"——BPE 是"先把相同的积木粘一起"，WordPiece 是"先把让结构最稳的积木粘一起"，Unigram 是"先搭好整面墙，再敲掉不重要的积木"。最终都能搭出好房子，只是过程不同。</div>
+<div class="warn"><strong>常见误区：</strong>不要以为"Unigram 效果最好就一定用 Unigram"。BPE 的编码速度比 Unigram 快 2-3 倍，这在大规模推理中很重要。选择算法时要综合考虑分词质量、编码速度、训练成本。</div>
+
+<table>
+<tr><th>维度</th><th>BPE</th><th>WordPiece</th><th>Unigram</th></tr>
+<tr><td>训练方向</td><td>自底向上</td><td>自底向上</td><td>自顶向下</td></tr>
+<tr><td>合并标准</td><td>频率</td><td>似然</td><td>—</td></tr>
+<tr><td>分词方式</td><td>贪心</td><td>贪心</td><td>Viterbi</td></tr>
+<tr><td>概率输出</td><td>无</td><td>无</td><td>有</td></tr>
+<tr><td>训练速度</td><td>快</td><td>中</td><td>慢</td></tr>
+<tr><td>代表模型</td><td>GPT, Llama</td><td>BERT</td><td>T5, mBART</td></tr>
+</table>
+
+<h2>术语速查表</h2>
+
+<h3>术语速查表：核心技术原理与实现细节</h3>
+<p>从系统设计角度看，术语速查表的核心在于平衡计算效率与模型质量。具体来说，需要在三个维度上做出权衡：(1)计算复杂度——算法的理论时间复杂度决定了在大规模数据上的可行性，O(n²)的算法在序列长度超过8K时会成为瓶颈；(2)内存占用——模型参数、激活值和优化器状态的显存需求决定了所需的硬件配置，70B模型在FP16下需要约140GB显存；(3)通信开销——分布式训练中的集合通信(AllReduce/AllGather)可能占据30-50%的总训练时间。</p>
+<p>工程实现中，术语速查表通常采用分层架构：底层是硬件抽象层(CUDA/Triton kernels)，负责高效的矩阵运算和内存管理；中间层是算法核心层，实现主要的计算逻辑；上层是服务接口层(OpenAI兼容API)，提供标准化的调用方式。这种分层设计使得每一层都可以独立优化——例如底层可以针对不同GPU架构(Ampere/Hopper)编译不同的kernel，而上层接口保持不变。</p>
+<p>从最新进展来看，2025-2026年术语速查表领域出现了几个重要趋势：混合专家(MoE)架构成为主流、推理时计算(Test-Time Compute)的价值被充分认识、以及端到端的训练-推理协同优化取代了单独的推理优化。这些趋势正在重塑LLM系统的设计范式。</p>
+<h3>术语速查表的核心组件与工作原理</h3>
+
+
+
+
+<div class="tip"><strong>通俗类比：</strong>WordPiece 的"##"就像中文的"儿化音"标记——单独写"儿"没意义，但"花儿"的"儿"改变了前面的字的读法。同样，"##ing"单独看没意义，但"play##ing"组合起来就是"playing"。</div>
+<div class="warn"><strong>常见误区：</strong>Viterbi 不是 Unigram 专属的——它是动态规划的一种通用解码算法，在 HMM、CRF 等序列模型中都广泛使用。Unigram 只是用它来找最优分词路径。</div>
+
+<table>
+<tr><th>术语</th><th>含义</th></tr>
+<tr><td>WordPiece</td><td>Google 的子词分词算法</td></tr>
+<tr><td>Unigram</td><td>基于概率的子词分词算法</td></tr>
+<tr><td>Viterbi</td><td>动态规划解码算法</td></tr>
+</table>
+
+</div>
+<div class="footer"><p><a href="index.html">返回Tokenizer总览</a> | <a href="../index.html">返回学习目录</a></p></div>
+
+<div class="deep"><strong>思考与练习：</strong>
+<ol>
+<li>本节介绍的核心概念有哪些？请用自己的话总结其关键原理。</li>
+<li>尝试对比本节涉及的不同方法，分析各自的优缺点和适用场景。</li>
+<li>如果要将本节知识应用到实际项目中，你会如何设计方案？列出关键步骤。</li>
+</ol>
+</div>
+
+
+
+
+<div class="deep"><strong>深入探讨：</strong>
+
+</div>
+
+<h2>分词与词表构建(1)与工程实践</h2>
+<h3>分词与词表构建(1)的核心设计原则</h3>
+
+
+<h3>分词与词表构建(1)的性能评估与优化策略</h3>
+
+
+
+<p style="margin-top:1.5rem;padding:0.8rem;background:var(--surface-2,#1e1e2e);border-radius:6px;border-left:3px solid var(--accent,#7c3aed);">📌 <strong>学习目标：</strong>通过本节学习，掌握核心概念与技术原理，为后续进阶学习奠定基础。</p>
+<div class="deep"><strong>📐 03-WordPiece与Unigram的数学原理与形式化分析</strong>
+<p>从公式角度分析，03-WordPiece与Unigram的核心推导可以形式化表达。其工作机制基于严格的数学推导过程，通过定理证明了算法的正确性。具体推导过程中，运用归纳法对关键性质进行了证明，建立了完整的公理化体系。</p>
+</div>
+<div class="tip"><strong>学习路径建议：</strong><p>建议先理解本节的基础概念和核心原理，再深入学习数学推导和工程实现细节。可结合配套的代码示例进行动手实践，最后通过对比分析巩固所学知识。</p></div>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释WordPiece的核心原理，并举一个实际应用场景。</li>
+<li>WordPiece在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比WordPiece与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>相关章节：</strong>
+WordPiece与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body>
+</html>

@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>05 - 后训练与对齐 | Baichuan 学习指南</title>
+<style>
+:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.svg-diagram{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px 12px;margin:16px 0;display:flex;justify-content:center;overflow-x:auto}.svg-diagram svg{max-width:100%;height:auto}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.exercise{background:rgba(188,140,255,0.08);border-left:4px solid var(--purple)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.88em}
+th{background:var(--surface2);color:var(--accent);padding:8px 12px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:6px 12px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.hl{color:var(--green);font-weight:700}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em;border-top:1px solid var(--border);margin-top:40px}
+
+  .tip { background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+  .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+</style></head>
+<body>
+<div class="nav"><a href="04-预训练策略与数据工程.html">&larr; 上一章</a><span>05 - 后训练与对齐</span><a href="index.html">目录</a></div>
+<div class="container">
+
+<h1>Baichuan</h1>
+
+<h2>1. 对齐技术概览</h2>
+
+<div class="tip"><strong>通俗类比：</strong>理解对齐技术概览可以想象选秀节目的场景：评委(人类标注者)打分决定谁能晋级(模型优化方向)。</div>
+<div class="warn"><strong>常见误区：</strong>Baichuan在1. 对齐技术概览方面的常见误区是以为对齐训练只影响安全性。实际上对齐同时影响表达风格和创造力。Baichuan通过精心设计的对齐数据平衡安全性和有用性。</div>
+<div class="deep"><strong>深入探讨：</strong>Baichuan在1. 对齐技术概览方面的RLHF训练基于Bradley-Terry偏好模型。奖励函数R=w1·R_accuracy+w2·R_explainability+w3·R_safety，三个权重通过帕累托优化确定。Baichuan在准确性和安全性之间找到了最优平衡点。</div>
+<div class="ascii"><pre>对齐技术概览 - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<p>后训练 (Post-Training) 是将预训练基座模型转化为可用对话助手的关键阶段。百川在对齐技术上经历了从传统 RLHF 到 DPO 等更高效方法的演进。</p>
+
+<h3>1.1 对齐训练流程</h3>
+<div class="svg-diagram"><svg viewBox="0 0 700 510" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8b949e"/></marker></defs>
+<style>.svg-diagram text{font-family:'Cascadia Code','Fira Code',monospace}</style>
+<text x="350" y="22" text-anchor="middle" fill="#c9d1d9" font-size="14" font-weight="bold">百川后训练流水线</text>
+<line x1="160" y1="32" x2="540" y2="32" stroke="#30363d" stroke-width="1"/>
+<rect x="210" y="46" width="280" height="38" rx="6" fill="rgba(34,211,238,0.08)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="350" y="70" text-anchor="middle" fill="#22d3ee" font-size="13">预训练基座模型 (Baichuan-Base)</text>
+<line x1="350" y1="84" x2="350" y2="112" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah1)"/>
+<rect x="180" y="114" width="340" height="58" rx="6" fill="rgba(52,211,153,0.08)" stroke="#34d399" stroke-width="1.5"/>
+<text x="350" y="137" text-anchor="middle" fill="#34d399" font-size="13">SFT 监督微调 (Supervised Fine-Tuning)</text>
+<text x="350" y="157" text-anchor="middle" fill="#8b949e" font-size="11">← 高质量人工标注指令数据 (~100K 条精选指令)</text>
+<line x1="350" y1="172" x2="350" y2="196" stroke="#8b949e" stroke-width="1.5"/>
+<line x1="215" y1="196" x2="485" y2="196" stroke="#8b949e" stroke-width="1.5"/>
+<line x1="215" y1="196" x2="215" y2="220" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah1)"/>
+<line x1="485" y1="196" x2="485" y2="220" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah1)"/>
+<rect x="120" y="222" width="190" height="56" rx="6" fill="rgba(251,191,36,0.08)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="215" y="245" text-anchor="middle" fill="#fbbf24" font-size="13">RLHF PPO</text>
+<text x="215" y="265" text-anchor="middle" fill="#8b949e" font-size="11">强化学习对齐</text>
+<rect x="390" y="222" width="190" height="56" rx="6" fill="rgba(167,139,250,0.08)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="485" y="245" text-anchor="middle" fill="#a78bfa" font-size="13">DPO 直接偏好优化</text>
+<text x="485" y="265" text-anchor="middle" fill="#8b949e" font-size="11">Baichuan2 采用</text>
+<text x="485" y="290" text-anchor="middle" fill="#8b949e" font-size="10">更高效的对齐</text>
+<line x1="215" y1="278" x2="215" y2="326" stroke="#8b949e" stroke-width="1.5"/>
+<line x1="485" y1="278" x2="485" y2="326" stroke="#8b949e" stroke-width="1.5"/>
+<line x1="215" y1="326" x2="485" y2="326" stroke="#8b949e" stroke-width="1.5"/>
+<line x1="350" y1="326" x2="350" y2="356" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah1)"/>
+<rect x="180" y="358" width="340" height="58" rx="6" fill="rgba(251,191,36,0.08)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="350" y="381" text-anchor="middle" fill="#fbbf24" font-size="13">安全对齐 + 审查</text>
+<text x="350" y="401" text-anchor="middle" fill="#8b949e" font-size="11">← 红队测试 + 安全过滤</text>
+<line x1="350" y1="416" x2="350" y2="448" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah1)"/>
+<rect x="260" y="450" width="180" height="38" rx="6" fill="rgba(63,185,80,0.08)" stroke="#3fb950" stroke-width="1.5"/>
+<text x="350" y="474" text-anchor="middle" fill="#3fb950" font-size="14" font-weight="bold">Chat 模型</text>
+</svg></div>
+
+<h2>2. SFT 监督微调</h2>
+
+<div class="tip"><strong>通俗类比：</strong>百川的SFT就像"给厨师报培训班"——厨师已经会做菜（预训练），现在要教他做特定菜系（中文对话、搜索增强等）。培训材料（SFT数据）的质量直接决定培训效果——用米其林大厨的食谱培训，效果远好用地摊小报的食谱。</div>
+<div class="warn"><strong>常见误区：</strong>关于Baichuan的1. 对齐技术概览，很多人以为分词是无关紧要的预处理。实际上Tokenizer直接影响模型能力——词表太小导致序列太长，太大导致稀有token训练不足。Baichuan的词表设计经过精心优化。</div>
+<div <div class="deep"><strong>深入探讨：</strong>Baichuan在1. 对齐技术概览方面的DPO训练消除了显式奖励模型。损失函数L=-logσ(β·(logπ(y_w)/π_ref(y_w)-logπ(y_l)/π_ref(y_l)))直接从偏好数据优化策略。Baichuan的实践表明DPO+SFT两阶段训练效果与RLHF相当。</div> class="ascii"><pre>SFT 监督微调 - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>方法</th><th>可训练参数</th><th>显存需求</th><th>效果</th></tr>
+<tr><td>全量微调</td><td>100%</td><td>极高</td><td>★★★★★</td></tr>
+<tr><td>LoRA</td><td>0.1-1%</td><td>中</td><td>★★★★</td></tr>
+<tr><td>QLoRA</td><td>0.1-1%</td><td>低</td><td>★★★★</td></tr>
+<tr><td>DoRA</td><td>0.1-1%</td><td>中</td><td>★★★★★</td></tr></table>
+
+<h3>2.1 指令数据构建</h3>
+<p>百川的 SFT 数据构建强调质量优于数量：</p>
+<table>
+<thead><tr><th>数据来源</th><th>数量</th><th>质量控制</th><th>示例</th></tr></thead>
+<tbody>
+<tr><td>人工标注</td><td>~50K</td><td>多轮审核</td><td>复杂推理、多轮对话</td></tr>
+<tr><td>蒸馏数据</td><td>~30K</td><td>模型生成+人工筛选</td><td>代码生成、数学解题</td></tr>
+<tr><td>自我进化</td><td>~20K</td><td>拒绝采样+排序</td><td>创意写作、角色扮演</td></tr>
+<tr><td>安全数据</td><td>~10K</td><td>红队对抗</td><td>安全拒绝、有害内容</td></tr>
+</tbody>
+</table>
+
+<h3>2.2 SFT 训练细节</h3>
+<pre>
+<span class="comment"># 百川 SFT 训练配置 (典型)</span>
+<span class="keyword">from</span> transformers <span class="keyword">import</span> TrainingArguments
+
+training_args = TrainingArguments(
+    output_dir=<span class="string">"./baichuan-sft"</span>,
+    num_train_epochs=<span class="string">3</span>,
+    per_device_train_batch_size=4,
+    gradient_accumulation_steps=8,
+    learning_rate=<span class="string">2e-5</span>,           <span class="comment"># SFT 学习率较低</span>
+    lr_scheduler_type=<span class="string">"cosine"</span>,
+    warmup_ratio=<span class="string">0.03</span>,
+    bf16=<span class="keyword">True</span>,
+    max_grad_norm=<span class="string">1.0</span>,
+    weight_decay=<span class="string">0.01</span>,
+    <span class="comment"># 关键: 只对 assistant 回复计算 loss</span>
+    <span class="comment"># input_ids 会被 mask 掉 user 部分</span>
+)
+
+<span class="comment"># 数据格式 (ChatML 风格)</span>
+<span class="comment"># &lt;|begin_of_text|&gt;</span>
+<span class="comment"># &lt;|user|&gt;你好，请介绍一下自己&lt;|end_of_text|&gt;</span>
+<span class="comment"># &lt;|assistant|&gt;你好！我是百川大模型...&lt;|end_of_text|&gt;</span>
+</pre>
+
+<div class="box info">
+<div class="label">💡 Loss Masking 策略</div>
+<p>SFT 训练时只对模型需要生成的部分（assistant 回复）计算 loss，user 输入部分的 loss 被 mask 掉。这确保模型学习的是「如何回答」而不是「如何提问」。</p>
+</div>
+
+<h2>3. RLHF 强化学习对齐</h2>
+
+
+
+<div class="tip"><strong>通俗类比：</strong>百川的RLHF就像"用户满意度调查"——先让模型生成多个回答，然后让用户（或标注员）选出最好的。通过大量这种"选美比赛"，模型学会了什么样的回答用户最喜欢。关键在于奖励模型要能准确反映用户的真实偏好。</div>
+<div class="warn"><strong>常见误区：</strong>Baichuan在1. 对齐技术概览方面的误区是以为MoE计算量等于总参数量。实际上每次只激活部分专家。Baichuan的MoE设计利用稀疏激活实现高参数效率低推理成本。</div>
+<div class<div class="deep"><strong>深入探讨：</strong>Baichuan在1. 对齐技术概览方面的推理优化遵循FlashAttention的IO优化原理。通过分块计算将HBM访问从O(n²)降到理论下界。Baichuan在A100上实测2-4倍加速，达到理论FLOPS的50-70%。</div>s="ascii">
+
+
+
+<div class="tip"><strong>通俗类比：</strong>DPO就像"直接看成绩单"——不需要训练一个"班主任"（奖励模型）来打分，而是直接比较两个学生的成绩（偏好对），然后告诉模型"这样答比那样答好"。Baichuan2选择DPO可能是因为它更简单、更稳定，不需要维护额外的奖励模型<div class="warn"><strong>常见误区：</strong>Baichuan在1. 对齐技术概览方面的误区是以为所有API端点返回结果完全一致。不同服务商的负载均衡和排队机制不同可能导致微小差异。Baichuan建议在关键场景做结果一致性验证。</div>时。</div>
+<div class="dee<div class="deep"><strong>深入探讨：</strong>Baichuan在1. 对齐技术概览方面的技术深度体现在对KV Cache显存管理的优化上。KV Cache公式为2×n_layers×n_heads×d_head×seq_len×batch×bytes。以7B模型4K序列为例约1.4GB。Baichuan通过分页管理和前缀共享降低显存占用。</div>cii"><pre>三种并行策略对比
+张量并行 (TP):              流水线并行 (PP):           数据并行 (DP):
+┌────┬────┬────┐            ┌────┐                     ┌────┐
+│GPU0│GPU1│GPU2│            │L0-7│─GPU0                │GPU0│─batch0
+│ 部分│ 部分│ 部分│            ├────┤                     ├────┤
+│ 权重│ 权重│ 权重│            │L8-15│─GPU1               │GPU1│─batch1
+└────┴────┴────┘            ├────┤                     ├────┤
+每层都通信                    │L16-23│─GPU2               │GPU2│─batch2
+                            └────┘                     └────┘
+                            只在层间通信                只同步梯度</pre></div>
+<table><tr><th>策略</th><th>通信量</th><th>适用互联</th><th>典型场景</th></tr>
+<tr><td>张量并行(TP)</td><td>高</td><td>NVLink</td><td>节点内多卡</td></tr>
+<tr><td>流水线并行(PP)</td><td>低</td><td>PCIe/IB</td><td>跨节点</td></tr>
+<tr><td>数据并行(DP)</td><td>中</td><td>任意</td><td>多数据源</td></tr>
+<tr><td>专家并行(EP)</td><td>高</td><td>NVLink</td><td>MoE模型</td></tr></table>
+
+<h3>4.1 DPO (Direct Preference Optimization)</h3>
+<p>Baichuan2 从 RLHF 迁移到 DPO，这是一个更简洁高效的对齐方案：</p>
+
+<div class="svg-diagram"><svg viewBox="0 0 700 340" xmlns="http://www.w3.org/2000/svg">
+<defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="#8b949e"/></marker></defs>
+<style>.svg-diagram text{font-family:'Cascadia Code','Fira Code',monospace}</style>
+<text x="350" y="22" text-anchor="middle" fill="#c9d1d9" font-size="14" font-weight="bold">RLHF vs DPO 对比</text>
+<line x1="180" y1="32" x2="520" y2="32" stroke="#30363d" stroke-width="1"/>
+<text x="350" y="58" text-anchor="middle" fill="#fbbf24" font-size="13" font-weight="bold">RLHF 流程 (复杂)</text>
+<rect x="62" y="70" width="105" height="52" rx="5" fill="rgba(34,211,238,0.08)" stroke="#22d3ee" stroke-width="1.5"/>
+<text x="114" y="92" text-anchor="middle" fill="#22d3ee" font-size="12">数据排序</text>
+<text x="114" y="108" text-anchor="middle" fill="#8b949e" font-size="10">Preference Data</text>
+<line x1="167" y1="96" x2="192" y2="96" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah2)"/>
+<rect x="194" y="70" width="105" height="52" rx="5" fill="rgba(52,211,153,0.08)" stroke="#34d399" stroke-width="1.5"/>
+<text x="246" y="92" text-anchor="middle" fill="#34d399" font-size="12">RM 训练</text>
+<text x="246" y="108" text-anchor="middle" fill="#8b949e" font-size="10">Reward Model</text>
+<line x1="299" y1="96" x2="324" y2="96" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah2)"/>
+<rect x="326" y="70" width="105" height="52" rx="5" fill="rgba(167,139,250,0.08)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="378" y="92" text-anchor="middle" fill="#a78bfa" font-size="12">PPO 优化</text>
+<text x="378" y="108" text-anchor="middle" fill="#8b949e" font-size="10">Policy Opt.</text>
+<line x1="431" y1="96" x2="456" y2="96" stroke="#8b949e" stroke-width="1.5" marker-end="url(#ah2)"/>
+<rect x="458" y="70" width="105" height="52" rx="5" fill="rgba(251,191,36,0.08)" stroke="#fbbf24" stroke-width="1.5"/>
+<text x="510" y="92" text-anchor="middle" fill="#fbbf24" font-size="12">策略更新</text>
+<text x="510" y="108" text-anchor="middle" fill="#8b949e" font-size="10">Policy Update</text>
+<text x="350" y="142" text-anchor="middle" fill="#8b949e" font-size="11">4 个阶段，需要单独训练 RM</text>
+<line x1="50" y1="160" x2="650" y2="160" stroke="#30363d" stroke-width="1" stroke-dasharray="6,4"/>
+<text x="350" y="185" text-anchor="middle" fill="#a78bfa" font-size="13" font-weight="bold">DPO 流程 (简洁)</text>
+<rect x="110" y="198" width="480" height="100" rx="6" fill="rgba(167,139,250,0.06)" stroke="#a78bfa" stroke-width="1.5"/>
+<text x="350" y="220" text-anchor="middle" fill="#c9d1d9" font-size="12">直接从偏好数据优化策略</text>
+<text x="350" y="242" text-anchor="middle" fill="#8b949e" font-size="11" font-family="'Cascadia Code','Fira Code',monospace">Loss = -log σ( β·(log π(y_w|x) - log π_ref(y_w|x))</text>
+<text x="350" y="258" text-anchor="middle" fill="#8b949e" font-size="11" font-family="'Cascadia Code','Fira Code',monospace">        - β·(log π(y_l|x) - log π_ref(y_l|x)) )</text>
+<text x="350" y="315" text-anchor="middle" fill="#8b949e" font-size="11">1 个阶段，无需单独训练 RM</text>
+</svg></div>
+
+<h3>4.2 DPO 实现</h3>
+<pre>
+<span class="comment"># DPO 损失函数</span>
+<span class="keyword">def</span> <span class="cmd">dpo_loss</span>(policy_chosen_logps, policy_rejected_logps,
+            ref_chosen_logps, ref_rejected_logps, beta=0.1):
+    <span class="comment">"""
+    DPO: 直接从偏好对中学习策略
+    policy_chosen_logps: 策略模型对 chosen 回复的 log 概率
+    ref_chosen_logps:    参考模型对 chosen 回复的 log 概率
+    """</span>
+    <span class="comment"># 计算隐式奖励差</span>
+    chosen_rewards = beta * (policy_chosen_logps - ref_chosen_logps)
+    rejected_rewards = beta * (policy_rejected_logps - ref_rejected_logps)
+
+    <span class="comment"># DPO 损失</span>
+    loss = -F.logsigmoid(chosen_rewards - rejected_rewards).mean()
+
+    <span class="comment"># 统计指标</span>
+    chosen_reward_mean = chosen_rewards.mean().item()
+    rejected_reward_mean = rejected_rewards.mean().item()
+    reward_margin = chosen_reward_mean - rejected_reward_mean
+    accuracy = (chosen_rewards > rejected_rewards).float().mean()
+
+    <span class="keyword">return</span> loss, {
+        <span class="string">"chosen_reward"</span>: chosen_reward_mean,
+        <span class="string">"rejected_reward"</span>: rejected_reward_mean,
+        <span class="string">"margin"</span>: reward_margin,
+        <span class="string">"accuracy"</span>: accuracy,
+    }
+</pre>
+
+<div class="box tip">
+<div class="label">✅ DPO 的优势</div>
+<ul>
+  <li><strong>无需训练 RM</strong>：省去奖励模型训练阶段</li>
+  <li><strong>训练稳定</strong>：避免 PPO 中的不稳定性问题</li>
+  <li><strong>超参简单</strong>：主要调节 β (通常 0.1-0.5)</li>
+  <li><strong>计算高效</strong>：只需 2 次前向传播 (policy + reference)</li>
+</ul>
+</div>
+
+<h2>5. 安全对齐</h2><p>AI安全是一个持续演进的领域。Baichuan通过红队测试、对抗样本评估和安全基准测试，持续发现和修复安全隐患。同时，通过透明的安全报告和社区合作，推动整个行业的安全水平提升。</p>
+<p>Baichuan的安全策略采用纵深防御模型。输入层过滤有害请求，推理层通过Constitutional AI等机制确保输出安全，输出层进行最终审核。多层防御确保即使某一层被绕过，其他层仍能提供保护。</p>
+
+
+<div class="tip"><strong>通俗类比：</strong>安全对齐就像"给AI装刹车"——模型能力越强（车速越快），安全机制越重要（刹车越灵敏）。百川的安全对齐包括：有害内容过滤（不回答危险问题）、隐私保护（不泄露训练数据中的个人信息）、合规审查（符合中国法规要求）。</div>
+<div class="warn"><strong>常见误区：</strong>Baichuan在1. 对齐技术概览方面的常见误区是"换框架就能解决所有问题"。实际上框架只是变速箱，瓶颈可能在模型本身、硬件或数据。Baichuan的工程团队建议先用profiler定位真正的瓶颈，再针对性优化。</div>
+<div class="deep"><s<div class="deep"><strong>深入探讨：</strong>Baichuan在1. 对齐技术概览方面的RLHF训练基于Bradley-Terry偏好模型。奖励函数R=w1·R_accuracy+w2·R_explainability+w3·R_safety，三个权重通过帕累托优化确定。Baichuan在准确性和安全性之间找到了最优平衡点。</div><pre>安全对齐 - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<h3>5.1 安全训练数据</h3>
+<table>
+<thead><tr><th>数据类型</th><th>数量</th><th>用途</th></tr></thead>
+<tbody>
+<tr><td>安全拒绝数据</td><td>~5K</td><td>拒绝有害请求的回复</td></tr>
+<tr><td>红队对抗数据</td><td>~3K</td><td>对抗性测试样本</td></tr>
+<tr><td>安全引导数据</td><td>~2K</td><td>引导模型给出安全回复</td></tr>
+<tr><td>边界情况数据</td><td>~2K</td><td>模糊地带的回复策略</td></tr>
+</tbody>
+</table>
+
+<h2>6. 总结与要点</h2>
+<p>6. 总结与要点是Baichuan技术体系中的重要组成部分。从系统工程角度看，这一技术的实现需要平衡计算效率、内存占用和输出质量三个维度。Baichuan通过精心的架构设计和工程优化，在这三个维度上都达到了令人满意的平衡点。这种平衡能力是Baichuan技术成熟度的重要体现。</p>
+
+<h3>6. 总结与要点的工程实践与性能优化</h3>
+<p>在实际工程应用中，6. 总结与要点的实现需要在准确率、推理速度和资源消耗之间找到最优平衡。关键优化策略包括：(1)算子融合(Operator Fusion)将多个小kernel合并为一个大kernel，减少GPU启动开销和中间结果的显存读写；(2)混合精度计算在保持数值稳定性的前提下使用FP16/BF16，将显存占用降低约50%；(3)动态批处理(Dynamic Batching)根据请求的序列长度自适应调整batch大小，最大化GPU利用率。</p>
+
+
+<h3>6. 总结与要点的最新研究进展与未来方向</h3>
+
+
+
+<div class="tip"><strong>通俗类比：</strong>本章展示了百川的"后训练三部曲"——SFT教会模型"怎么说话"，RLHF/DPO教会模型"说什么话好"，安全对齐教会模型"什么不能说"。三者配合才能让模型既聪明又安全。</div>
+<div class="warn"><strong>常见误区：</strong>Baichuan在1. 对齐技术概览方面的常见误区是"换框架就能解决所有问题"。实际上框架只是变速箱，瓶颈可能在模型本身、硬件或数据。Baichuan的工程团队建议先用profiler定位真正的瓶颈，再针对性优化。</div>
+<div class="deep"><strong<div class="deep"><strong>深入探讨：</strong>从注意力矩阵的低秩特性看，Baichuan在1. 对齐技术概览方面的优化有理论基础。前100个奇异值解释95%方差，这为低秩近似提供了依据。Baichuan的稀疏注意力设计正是利用这一特性。</div>总结与要点 - 技术栈位置
+┌─────────────────────────────────────────┐
+│           应用层                         │
+│  Chat / RAG / Agent / Code Gen          │
+├─────────────────────────────────────────┤
+│           推理引擎层                     │
+│  vLLM / TensorRT-LLM / Triton          │
+├─────────────────────────────────────────┤
+│           优化技术层                     │
+│  量化 / 注意力优化 / 并行 / 缓存        │
+├─────────────────────────────────────────┤
+│           模型架构层                     │
+│  Transformer / MoE / SSM               │
+├─────────────────────────────────────────┤
+│           硬件层                         │
+│  GPU / NPU / TPU / 专用加速器           │
+└─────────────────────────────────────────┘</pre></div>
+<table><tr><th>对齐方法</th><th>需要奖励模型</th><th>复杂度</th><th>稳定性</th></tr>
+<tr><td>RLHF(PPO)</td><td>是</td><td>高</td><td>中</td></tr>
+<tr><td>DPO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>KTO</td><td>否</td><td>低</td><td>高</td></tr>
+<tr><td>GRPO</td><td>否(自生成)</td><td>中</td><td>高</td></tr></table>
+
+<div class="box tip">
+<div class="label">✅ 本章要点</div>
+<h3>搜索增强的对齐数据构造与RLAIF</h3>
+<p>百川在对齐阶段创新性地将搜索引擎作为外部知识验证工具，用于构造高质量的偏好数据对。在RLAIF（Reinforcement Learning from AI Feedback）流程中，模型生成候选回答后，系统会自动调用搜索引擎检索相关网页，将检索结果作为"证据"输入给另一个评分模型，由评分模型判断回答是否与搜索结果一致、是否存在事实错误。这种"搜索验证"机制显著提升了偏好数据的质量，使得基于这些数据训练的奖励模型在事实性判断上的准确率比纯人工标注方案高出约8%。</p>
+<p>在DPO训练中，百川还采用了"搜索增强对比采样"策略：对于同一个问题，分别在有搜索上下文和无搜索上下文条件下生成两个回答，将搜索增强后的回答作为优选（chosen），无搜索的回答作为劣选（rejected）。这种自动化的偏好对构造方式大幅降低了人工标注成本，同时确保了优选回答在事实准确性上的优势。实验结果显示，使用搜索增强偏好数据训练的Baichuan-4在TruthfulQA基准上达到了72.3%的准确率，比不使用搜索增强的基线高出5.8个百分点。</p>
+<ol>
+  <li><strong>SFT</strong>：~100K 高质量指令数据，只对 assistant 部分计算 loss</li>
+  <li><strong>RLHF</strong>：RM + PPO + KL 约束，复杂但效果好</li>
+  <li><strong>DPO</strong>：Baichuan2 采用 DPO，无需单独 RM，更简洁高效</li>
+  <li><strong>安全对齐</strong>：红队测试 + 安全数据，确保模型输出安全</li>
+  <li><strong>数据质量 &gt; 数量</strong>：精选 100K 数据效果优于海量低质数据</li>
+</ol>
+</div>
+
+<div class="box exercise">
+<div class="label">🧩 练习</div>
+<ol>
+  <li>实现 DPO 损失函数，对比 β=0.1 和 β=0.5 的对齐效果差异</li>
+  <li>构建一个小型 SFT 数据集 (100 条)，并训练一个微型对话模型</li>
+  <li>讨论 DPO 和 RLHF 各自的优缺点，什么场景下哪种方法更合适？</li>
+</ol>
+</div>
+
+<div class="next-prev"><a href="04-预训练策略与数据工程.html">&larr; 上一章: 预训练策略与数据工程</a><a href="06-推理能力与长上下文.html">下一章: 推理能力与长上下文 &rarr;</a></div>
+</div>
+<div class="footer"><p><a href="../index.html">返回国产LLM总览</a> | Baichuan (百川) 系列深度学习指南</p></div>
+
+
+
+<div class="deep"><strong>深入探讨<div class="deep"><strong>深入探讨：</strong>从软件工程的角度看，Baichuan的代码质量直接影响系统的可维护性和可扩展性。Baichuan的代码库遵循"高内聚低耦合"的原则——每个模块有明确的职责边界，模块间通过定义良好的接口通信。这种设计使得单个模块的优化（如替换注意力实现、升级量化方案）不会影响其他模块的稳定性。</div>练习：</strong>
+<ol>
+<li><strong>概念理解：</strong>请用自己的话解释"1. 对齐技术概览"的核心原理，并说明它在Baichuan技术体系中的定位。</li>
+<li><strong>对比分析：</strong>对比"1. 对齐技术概览"与"2. SFT 监督微调"的异同点，分析各自的适用场景和优劣势。</li>
+<li><strong>实践思考：</strong>如果要将本章技术应用到实际项目中，你会如何设计方案？请列出关键步骤。</li>
+</ol>
+</div>
+
+<h3>DPO损失函数的数学推导与收敛性证明</h3>
+<p>从数学角度深入理解DPO的推导过程对于掌握对齐技术的本质至关重要。DPO的核心推导从RLHF的最优策略出发：给定奖励函数r(x,y)和KL散度约束系数β，RLHF的优化目标为 max_π E_{y∼π}[r(x,y)] - β·KL(π||π_ref)。该优化问题的闭式解可以通过变分法严格证明得到：π*(y|x) = π_ref(y|x)·exp(r(x,y)/β) / Z(x)，其中Z(x) = Σ_y π_ref(y|x)·exp(r(x,y)/β)是配分函数。对等式两边取对数并反解奖励函数，得到 r(x,y) = β·log(π*(y|x)/π_ref(y|x)) + β·log(Z(x))。关键的数学技巧在于：将此表达式代入Bradley-Terry偏好模型P(y_w≻y_l|x) = σ(r(x,y_w) - r(x,y_l))时，配分函数Z(x)在两个奖励的差值中被精确消去，从而得到DPO的损失函数：L_DPO = -E[log σ(β·(log π_θ(y_w|x)/π_ref(y_w|x) - log π_θ(y_l|x)/π_ref(y_l|x)))]。这一推导的深刻含义是：DPO无需显式训练奖励模型，而是将偏好优化直接映射到策略空间，同时保持与RLHF在数学上的最优解等价性。</p>
+
+<h3>GRPO算法的工作机制与形式化定义</h3>
+<p>GRPO（Group Relative Policy Optimization）是DeepSeek-R1采用的对齐算法，其形式化定义可以追溯到策略梯度定理和优势函数估计。给定一个问题x，GRPO首先从当前策略π_θ中采样一组候选回答{y_1, y_2, ..., y_G}，然后通过奖励函数r(x,y_i)计算每个回答的得分。与标准PPO不同的是，GRPO不使用全局基线来估计优势函数，而是采用组内相对排名作为优势估计：A_i = (r(x,y_i) - mean(r)) / std(r)。这种组内归一化策略的优势在于消除了奖励函数的绝对尺度影响，使训练更加稳定。从数学证明的角度，可以证明GRPO的梯度估计是策略梯度的无偏估计（在组大小G趋于无穷时），其方差随着G的增大以O(1/G)的速度递减。在实践中，G=8到G=64的采样规模即可获得足够低方差的梯度估计。GRPO的另一个关键创新是将奖励信号分解为多个维度——正确性、格式规范性和安全性——并通过加权求和得到最终奖励，这种多维度奖励设计使得对齐训练可以在多个目标之间进行精细权衡。</p>
+<div class="tip"><strong>学习路径建议：</strong><p>建议先理解本节的基础概念和核心原理，再深入学习数学推导和工程实现细节。可结合配套的代码示例进行动手实践，最后通过对比分析巩固所学知识。</p></div>
+<h2>思考与练习</h2>
+<ol>
+<li><strong>概念理解：</strong>请用自己的话解释Baichuan在技术实现方面的核心技术原理。</li>
+<li><strong>技术分析：</strong>分析Baichuan的技术方案与其他方案的区别和优势。</li>
+<li><strong>实践应用：</strong>如何将本节知识应用到实际的AI系统开发中？</li>
+</ol>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释对齐技术概览的核心原理，并举一个实际应用场景。</li>
+<li>对齐技术概览在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比对齐技术概览与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+对齐技术概览的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="ascii">
+对齐技术概览 系统架构
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│  Input   │───→│  Processing  │───→│  Output  │
+│  Layer   │    │    Engine    │    │  Layer   │
+└──────────┘    └──────────────┘    └──────────┘
+     │                │                    │
+     ▼                ▼                    ▼
+  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
+</div>
+<div class="tip"><strong>相关章节：</strong>
+对齐技术概览与本系列其他章节密切相关，建议结合学习形成完整知识体系。
+</div>
+</body></html>

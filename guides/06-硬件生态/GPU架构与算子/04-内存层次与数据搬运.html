@@ -1,0 +1,428 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04 · 内存层次与数据搬运</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.7}a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}.nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;justify-content:space-between;position:sticky;top:0;z-index:100}.nav span{color:#8b949e;font-size:0.9em}.nav a{color:#58a6ff}.container{max-width:900px;margin:0 auto;padding:30px 20px}h1{color:#58a6ff;font-size:2em;margin:20px 0 10px}h2{color:#f0f6fc;border-left:4px solid #58a6ff;padding-left:14px;margin:35px 0 15px;font-size:1.4em}h3{color:#d2a8ff;margin:20px 0 10px;font-size:1.15em}p{margin:10px 0}ul,ol{margin:10px 0 10px 24px}li{margin:4px 0}code{background:#21262d;color:#79c0ff;padding:2px 6px;border-radius:4px;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;overflow-x:auto;margin:12px 0}pre code{background:none;color:#c9d1d9;padding:0}table{border-collapse:collapse;width:100%;margin:12px 0}th{background:#161b22;color:#58a6ff;text-align:left;padding:10px 14px;border:1px solid #30363d}td{padding:10px 14px;border:1px solid #21262d}tr:nth-child(even){background:#161b2233}.tip{background:#0d1d30;border-left:4px solid #58a6ff;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.tip strong{color:#58a6ff}.warn{background:#2d1b00;border-left:4px solid #d29922;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.warn strong{color:#d29922}.exercise{background:#0d2818;border-left:4px solid #238636;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.exercise strong{color:#3fb950}.deep{background:#1a1024;border-left:4px solid #a371f7;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.deep strong{color:#a371f7}.ascii{background:#161b22;border:1px solid #30363d;padding:16px;font-family:monospace;font-size:0.85em;line-height:1.4;overflow-x:auto;margin:12px 0;white-space:pre}.formula{background:#161b22;border:1px solid #30363d;padding:14px 18px;border-radius:6px;margin:12px 0;text-align:center;font-size:1.1em;color:#d2a8ff}.footer{text-align:center;padding:30px;border-top:1px solid #21262d;margin-top:30px;color:#8b949e;font-size:0.85em}.glossary{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin:16px 0}.glossary dt{color:#58a6ff;font-weight:bold;margin-top:8px}.glossary dd{color:#8b949e;margin-left:16px}</style>
+</head>
+<body>
+<div class="nav"><a href="03-TensorCore深度解析.html">&larr; 03-TensorCore深度解析</a><span>模块 04/08 · 内存层次</span><a href="05-Triton编程入门.html">05-Triton编程入门 &rarr;</a></div>
+<div class="container">
+
+<h1>💾 04 · 内存层次与数据搬运 — 让数据跟上计算</h1>
+<p style="color:#8b949e;font-size:1.05em;">合并访问 · bank conflict · TMA异步搬运 · Prefetch · 内存带宽瓶颈分析</p>
+
+<h2>一、背景与动机</h2>
+<h3>一、背景与动机</h3>S)增长远快于内存带宽(TB/s)。H100 的 FP16 算力是 989 TFLOPS，但 HBM 带宽只有 3.35 TB/s——算力和带宽的差距约 300:1。这意味着<strong>大多数 kernel 是内存瓶颈</strong>，而不是计算瓶颈。</p>
+<p>优化内存访问是 GPU 性能优化的核心：如何减少数据搬运量、如何利用更快的内存层次、如何让数据加载和计算重
+<pre><code class="language-python"># 一、背景与动机 - 核心实现示例
+import torch
+import numpy as np
+
+class 一、背景与动机Config:
+    """配置类：定义一、背景与动机的关键参数"""
+    def __init__(self):
+        self.batch_size = 32
+        self.max_seq_len = 2048
+        self.dtype = torch.float16
+        
+    def validate(self):
+        """参数验证"""
+        assert self.batch_size > 0, "batch_size must be positive"
+        assert self.max_seq_len > 0, "max_seq_len must be positive"
+        return True
+
+def benchmark(func, iterations=100):
+    """性能基准测试"""
+    import time
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iterations):
+        func()
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iterations
+    print(f"Average latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+叠。</p>
+
+<div class="tip"><strong>💡 核心原则：</strong>数据离计算单元越近，访问速度越快。优化目标是：把数据从 HBM 搬到 Shared Memory，再搬到寄存器，然后让 Tensor Core 高效计算。</div>
+
+<h2>二、核心原理</h2>
+
+<h3>2.1 内存层次详解</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 620 310" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="310" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">GPU 内存层次 (H100)</text>
+  <!-- Speed arrow -->
+  <line x1="590" y1="42" x2="590" y2="280" stroke="#8b949e" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="595" y="52" fill="#fb7185" font-size="8" text-anchor="end">快</text>
+  <text x="595" y="278" fill="#fbbf24" font-size="8" text-anchor="end">慢</text>
+  <!-- Register -->
+  <rect x="30" y="38" width="540" height="44" rx="6" fill="rgba(167,139,250,0.1)" stroke="#a78bfa" stroke-width="1.5"/>
+  <text x="50" y="56" fill="#a78bfa" font-size="11" font-weight="bold">寄存器 (Register File)</text>
+  <text x="50" y="72" fill="#8b949e" font-size="9">容量: 每SM 256KB | 延迟: 1 cycle | 带宽: ~80 TB/s | 存储局部变量和中间结果</text>
+  <!-- Shared Memory -->
+  <rect x="30" y="90" width="540" height="44" rx="6" fill="rgba(34,211,238,0.1)" stroke="#22d3ee" stroke-width="1.5"/>
+  <text x="50" y="108" fill="#22d3ee" font-size="11" font-weight="bold">共享内存 (Shared Memory)</text>
+  <text x="50" y="124" fill="#8b949e" font-size="9">容量: 每SM 最大 228KB | 延迟: 20-30 cycles | 带宽: ~19 TB/s | Block内线程共享</text>
+  <!-- L1 Cache -->
+  <rect x="30" y="142" width="540" height="44" rx="6" fill="rgba(52,211,153,0.1)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="50" y="160" fill="#34d399" font-size="11" font-weight="bold">L1 Cache</text>
+  <text x="50" y="176" fill="#8b949e" font-size="9">容量: 与Shared Memory共享228KB | 延迟: 30-40 cycles | 自动缓存全局内存访问</text>
+  <!-- L2 Cache -->
+  <rect x="30" y="194" width="540" height="44" rx="6" fill="rgba(251,191,36,0.1)" stroke="#fbbf24" stroke-width="1.5"/>
+  <text x="50" y="212" fill="#fbbf24" font-size="11" font-weight="bold">L2 Cache</text>
+  <text x="50" y="228" fill="#8b949e" font-size="9">容量: 50MB (所有SM共享) | 延迟: ~200 cycles | 带宽: ~12 TB/s</text>
+  <!-- HBM -->
+  <rect x="30" y="246" width="540" height="44" rx="6" fill="rgba(251,113,133,0.1)" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="50" y="264" fill="#fb7185" font-size="11" font-weight="bold">HBM (高带宽内存)</text>
+  <text x="50" y="280" fill="#8b949e" font-size="9">容量: 80GB | 延迟: ~400-600 cycles | 带宽: 3.35 TB/s | 全局数据存储</text>
+</svg>
+</div>
+
+<h3>2.2 合并访问 (Coalesced Access)</h3>
+<div class="ascii">全局内存合并访问:
+
+合并访问(好): 一个 Warp 的 32 个线程访问连续地址
+  Thread 0: addr 0
+  Thread 1: addr 1
+  Thread 2: addr 2
+  ...
+  Thread 31: addr 31
+  → 合并为 1 次内存事务 (128 bytes)
+
+非合并访问(差): 访问不连续的地址
+  Thread 0: addr 0
+  Thread 1: addr 100
+  Thread 2: addr 200
+  ...
+  → 需要 32 次独立内存事务!
+
+性能差异: 合并 vs 非合并可达 10-30× 速度差</div>
+
+<h3>2.3 Bank Conflict</h3>
+<div class="ascii">Shared Memory 的 Bank 结构:
+
+Shared Memory 被分成 32 个 bank (每个 bank 4 字节宽)
+Bank 0: [0, 32, 64, ...]
+Bank 1: [1, 33, 65, ...]
+...
+Bank 31: [31, 63, 95, ...]
+
+无 Bank Conflict (好):
+  32 个线程访问 32 个不同的 bank → 1 个周期完成
+
+Bank Conflict (差):
+  多个线程访问同一个 bank → 串行化
+  2-way conflict: 2 个周期
+  32-way conflict: 32 个周期 (最差情况)
+
+解决方法:
+  1. Padding: 在数组末尾加 1 个元素改变对齐
+  2. Swizzle: 重新排列数据布局
+  3. 避免跨行访问</div>
+
+<h3>2.4 TMA (Tensor Memory Accelerator)</h3>
+<div class="ascii">TMA: Hopper 的异步数据搬运引擎
+
+传统数据搬运(同步):
+  CPU/GPU 发出 load 指令 → 等待数据到达 → 使用数据
+  (计算单元在等待时闲置)
+
+TMA 数据搬运(异步):
+  1. 发出 TMA 异步拷贝指令
+  2. 计算单元继续做其他计算
+  3. 数据在后台从 HBM → Shared Memory
+  4. 数据到达后通知计算单元
+  5. 计算单元使用数据
+
+TMA 支持:
+  • 1D/2D/3D 张量拷贝
+  • 自动处理边界和填充
+  • 与 WGMMA 配合: TMA 加载 → WGMMA 计算
+  • 多级流水线: TMA 和 WGMMA 重叠执行</div>
+
+<h3>2.5 Prefetch 与 Double Buffering</h3>
+<div class="svg-diagram">
+<svg viewBox="0 0 620 200" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="310" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">Double Buffering (双缓冲)</text>
+  <text x="310" y="40" text-anchor="middle" fill="#8b949e" font-size="10">Shared Memory 分成两个 buffer (A 和 B)，计算和数据加载重叠执行</text>
+  <!-- Timeline -->
+  <text x="40" y="68" fill="#8b949e" font-size="9">时间 →</text>
+  <line x1="90" y1="65" x2="580" y2="65" stroke="#30363d" stroke-width="1"/>
+  <!-- Buffer A row -->
+  <rect x="90" y="78" width="130" height="32" rx="4" fill="rgba(34,211,238,0.15)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="155" y="99" text-anchor="middle" fill="#22d3ee" font-size="9">Load tile 1 → A</text>
+  <rect x="225" y="78" width="130" height="32" rx="4" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1"/>
+  <text x="290" y="99" text-anchor="middle" fill="#a78bfa" font-size="9">Compute 1 (A)</text>
+  <rect x="360" y="78" width="110" height="32" rx="4" fill="rgba(167,139,250,0.15)" stroke="#a78bfa" stroke-width="1"/>
+  <text x="415" y="99" text-anchor="middle" fill="#a78bfa" font-size="9">Compute 3 (A)</text>
+  <!-- Buffer B row -->
+  <rect x="225" y="120" width="130" height="32" rx="4" fill="rgba(52,211,153,0.15)" stroke="#34d399" stroke-width="1"/>
+  <text x="290" y="141" text-anchor="middle" fill="#34d399" font-size="9">Load tile 2 → B</text>
+  <rect x="360" y="120" width="110" height="32" rx="4" fill="rgba(52,211,153,0.15)" stroke="#34d399" stroke-width="1"/>
+  <text x="415" y="141" text-anchor="middle" fill="#34d399" font-size="9">Load tile 3 → A</text>
+  <rect x="475" y="78" width="105" height="32" rx="4" fill="rgba(52,211,153,0.15)" stroke="#34d399" stroke-width="1"/>
+  <text x="527" y="99" text-anchor="middle" fill="#34d399" font-size="9">Compute 2 (B)</text>
+  <rect x="475" y="120" width="105" height="32" rx="4" fill="rgba(52,211,153,0.15)" stroke="#34d399" stroke-width="1"/>
+  <text x="527" y="141" text-anchor="middle" fill="#34d399" font-size="9">Compute 4 (B)</text>
+  <!-- Labels -->
+  <text x="40" y="99" fill="#22d3ee" font-size="8">Buffer A</text>
+  <text x="40" y="141" fill="#34d399" font-size="8">Buffer B</text>
+  <!-- Bottom note -->
+  <text x="310" y="178" text-anchor="middle" fill="#fbbf24" font-size="10">→ 隐藏内存延迟，提高 Tensor Core 利用率</text>
+</svg>
+</div>
+
+<h3>2.6 LLM 的内存瓶颈分析</h3>
+<div class="ascii">LLM 推理的内存访问模式:
+
+Decode 阶段 (逐token生成):
+  • 每个 token 只做一次前向传播
+  • 需要读取全部模型参数 (70B × 2 bytes = 140GB)
+  • HBM 带宽: 3.35 TB/s
+  • 理论最大: 3350 / 140 ≈ 24 tokens/s
+  → 内存瓶颈!
+
+Prefill 阶段 (处理输入):
+  • 一次处理整个输入序列
+  • 大量矩阵乘法 (batch × seq_len × hidden)
+  • 计算量大，Tensor Core 利用率高
+  → 计算瓶颈!
+
+  优化方向:
+  Decode: 量化(FP8/INT4减少参数大小), KV Cache优化
+  Prefill: FlashAttention, 算子融合</div>
+
+<h2>三、技术细节</h2>
+
+<h3>3.1 内存带宽利用率计算</h3>
+<div class="formula">带宽利用率 = 实际带宽 / 理论峰值带宽 × 100%<br>
+目标: > 80% 为良好</div>
+
+<h3>3.2 各级内存的典型用途</h3>
+<table>
+<tr><th>内存级别</th><th>存储内容</th><th>优化目标</th></tr>
+<tr><td>寄存器</td><td>循环变量、累加器、临时值</td><td>减少寄存器溢出</td></tr>
+<tr><td>Shared Memory</td><td>当前tile的Q/K/V数据</td><td>最大化数据复用</td></tr>
+<tr><td>L2 Cache</td><td>频繁访问的权重</td><td>提高命中率</td></tr>
+<tr><td>HBM</td><td>全部模型参数、KV Cache</td><td>减少访问次数</td></tr>
+</table>
+
+<h2>四、使用场景</h2>
+合理的技术选择和优化决策。</p>
+
+<h3>四、使用场景</h3>
+<ul>
+<li><strong>Attention kernel</strong>：Q/K/V 从 HBM 加载到 Shared Memory</li>
+<li><strong>GEMM kernel</strong>：矩阵分块加载，double buffering</li>
+<li><strong>Embedding lookup</strong>：稀疏访问，需要 coalesced access</li>
+<li><strong>KV Cache 管理</strong>：推理时的内存分配和访问优化</li>
+</ul>
+
+<h2>五、相似技术对比</h2>
+<h3>五、相似技术对比</h3>
+<table>
+<tr><th>对比</th><th>同步加载</th><th>TMA异步</th><th>CUDA Graphs</th></tr>
+<tr><td>粒度</td><td>单个元素</td><td>张量块</td><td>整个kernel序列</td></tr>
+<tr><td>延迟隐藏</td><td>无</td><td>好</td><td>好</td></tr>
+<tr><td>适用场景</td><td>简单访问</td><td>规则张量</td><td>重复执行模式</td></tr>
+</table>
+
+<h2>六、实际效果</h2>
+<h3>六、实际效果</h3>
+</tr>
+<tr><td>合并访问 vs 非合并</td><td>10-30× 速度提升</td></tr>
+<tr><td>消除 Bank Conflict</td><td>2-4× 速度提升</td></tr>
+<tr><td>Double Buffering</td><td>20-50% 速度提升</td></tr>
+<tr><td>TMA 异步搬运</td><td>10-30% 速度提升</td></tr>
+</table>
+
+<h3>📖 术语速查表</h3>
+<dl class="glossary">
+<dt>Coalesced Access</dt><dd>合并访问，Warp内线程访问连续内存地址</dd>
+<dt>Bank Conflict</dt><dd>多个线程同时访问同一bank导致的串行化</dd>
+<dt>TMA</dt><dd>Tensor Memory Accelerator，Hopper的异步数据搬运引擎</dd>
+<dt>Double Buffering</dt><dd>双缓冲技术，数据加载和计算重叠执行</dd>
+<dt>Memory-bound</dt><dd>性能受限于内存带宽而非计算能力</dd>
+</dl>
+
+
+<pre><code class="language-python"># 一、背景与动机 - 性能基准测试与分析
+import time
+import torch
+
+def profile_inference(model, input_data, warmup=10, iterations=100):
+    """推理性能分析：测量延迟、吞吐和显存"""
+    # Warmup
+    for _ in range(warmup):
+        with torch.no_grad():
+            model(input_data)
+    torch.cuda.synchronize()
+    
+    # Measure latency
+    latencies = []
+    for _ in range(iterations):
+        start = time.perf_counter()
+        with torch.no_grad():
+            output = model(input_data)
+        torch.cuda.synchronize()
+        latencies.append(time.perf_counter() - start)
+    
+    # Statistics
+    avg_ms = sum(latencies) / len(latencies) * 1000
+    p50 = sorted(latencies)[len(latencies)//2] * 1000
+    p99 = sorted(latencies)[int(len(latencies)*0.99)] * 1000
+    mem_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+    
+    print(f"Latency: avg={avg_ms:.2f}ms, p50={p50:.2f}ms, p99={p99:.2f}ms")
+    print(f"Peak Memory: {mem_mb:.0f}MB")
+    print(f"Throughput: {1000/avg_ms:.0f} req/s")
+    return {"avg_ms": avg_ms, "p50": p50, "p99": p99, "mem_mb": mem_mb}
+</code></pre>
+<pre><code class="language-bash"># 一、背景与动机 - 环境配置与快速验证
+#!/bin/bash
+set -e
+
+# 1. 环境检查
+echo "=== GPU信息 ==="
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+
+# 2. 依赖安装
+pip install torch transformers accelerate
+
+# 3. 快速验证脚本
+python3 -c "
+import torch
+print(f'PyTorch: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+print(f'GPU: {torch.cuda.get_device_name(0)}')
+print(f'GPU Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB')
+
+# 验证推理
+from transformers import AutoTokenizer, AutoModelForCausalLM
+model_name = 'gpt2'
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name).cuda()
+inputs = tokenizer('Hello world', return_tensors='pt').to('cuda')
+with torch.no_grad():
+    outputs = model.generate(**inputs, max_new_tokens=20)
+print(f'Generated: {tokenizer.decode(outputs[0])}')
+print('验证通过!')
+"
+</code></pre>
+<div class="exercise"><strong>✏️ 练习题：</strong>
+<ol>
+<li>为什么 H100 的 Decode 推理是内存瓶颈？计算理论上 H100 能达到的最大 decode 速度。</li>
+<li>解释 Bank Conflict 的产生原因和解决方案。为什么 Padding 能消除 2-way conflict？</li>
+<li>设计一个使用 Double Buffering 的 GEMM kernel 的 Shared Memory 布局。</li>
+</ol></div>
+
+<div class="warn"><strong>⚠️ 常见误区：Shared Memory越大越好：</strong>Shared Memory和L1 Cache共享物理SRAM(每SM共228KB)。如果把全部228KB分配给Shared Memory，L1 Cache就没了。某些访问模式下，让L1 Cache自动缓存可能比手动管理Shared Memory更高效。关键是根据具体workload做trade-off。</div>
+
+<div class="warn"><strong>⚠️ 常见误区：合并访问只对全局内存重要：</strong>合并访问(Coalesced Access)确实主要针对全局内存(HBM)，但Shared Memory的Bank Conflict也是类似问题——都是多个线程同时访问同一物理资源导致的串行化。两者都需要关注。</div>
+
+<div class="deep"><strong>🔬 深入探讨：TMA的2D/3D张量拷贝</strong><br><br>
+TMA不只是一次简单的内存拷贝。它支持<strong>多维张量拷贝</strong>，可以高效地从不连续的内存布局中提取数据块。例如，矩阵在HBM中行主序存储，取出一个16×16的tile需要16次独立拷贝(每行一次)。TMA可以<strong>一次操作</strong>完成2D tile拷贝——硬件自动处理行间的stride跳转。这对FlashAttention尤其重要——Q、K、V矩阵的tile提取完全由TMA硬件完成。</div>
+
+<div class="deep"><strong>🔬 深入探讨：L2 Cache Partitioning与Persistence</strong><br><br>
+Hopper的L2 Cache支持<strong>cache partitioning</strong>。你可以通过CUDA API将L2 Cache的一部分"钉住"给特定数据，不让其他数据驱逐。这对Attention的KV Cache特别有用——推理时KV Cache被频繁访问，通过持久化在L2中可以避免每次decode都从HBM重新加载。<br><br>
+注意：L2 Cache是所有SM共享的(50MB)，持久化策略需要谨慎——过度持久化会导致其他数据频繁cache miss。</div>
+
+<div class="ascii">TMA 2D 张量拷贝示意:
+
+  HBM中的矩阵 (行主序, M=8, N=8):
+  ┌──┬──┬──┬──┬──┬──┬──┬──┐
+  │00│01│02│03│04│05│06│07│ ← row 0
+  ├──┼──┼──┼──┼──┼──┼──┼──┤
+  │10│11│12│13│14│15│16│17│ ← row 1
+  ├──┼──┼──┼──┼──┼──┼──┼──┤
+  │20│21│22│23│24│25│26│27│ ← row 2
+  ├──┼──┼──┼──┼──┼──┼──┼──┤
+  │30│31│32│33│34│35│36│37│ ← row 3
+  ├──┼──┼──┼──┼──┼──┼──┼──┤
+  │...                       │
+  └──┴──┴──┴──┴──┴──┴──┴──┘
+
+  TMA拷贝一个4×4的tile (从[1,2]开始):
+  ┌──┬──┬──┬──┐
+  │12│13│14│15│
+  ├──┼──┼──┼──┤
+  │22│23│24│25│  → 一次TMA操作直接搬运到Shared Memory
+  ├──┼──┼──┼──┤    硬件自动处理行间stride
+  │32│33│34│35│    无需软件循环
+  ├──┼──┼──┼──┤
+  │42│43│44│45│
+  └──┴──┴──┴──┘
+
+  传统方式: 需要4次独立memcpy(每行一次)
+  TMA方式:  1次异步操作，硬件完成所有地址计算</div>
+
+<table>
+<tr><th>优化技术</th><th>原理</th><th>适用场景</th><th>实现复杂度</th></tr>
+<tr><td>合并访问</td><td>Warp内线程访问连续地址→合并为1次事务</td><td>所有全局内存访问</td><td>低(注意数据布局)</td></tr>
+<tr><td>Bank Conflict消除</td><td>Padding/Swizzle避免同bank冲突</td><td>Shared Memory访问</td><td>中(需要理解bank映射)</td></tr>
+<tr><td>Double Buffering</td><td>2个buffer交替: 计算一个,加载另一个</td><td>GEMM/Attention tile加载</td><td>中(2倍Shared Memory)</td></tr>
+<tr><td>TMA异步拷贝</td><td>硬件数据搬运引擎,与计算重叠</td><td>Hopper+, 规则张量访问</td><td>中(需要TMA API)</td></tr>
+<tr><td>L2持久化</td><td>将频繁数据钉在L2 Cache中</td><td>KV Cache等热点数据</td><td>低(CUDA API)</td></tr>
+</table>
+
+<div class="tip"><strong>💡 通俗类比：内存层次就像图书馆：</strong>HBM是总书库(大但远)，L2是楼层书架(中等)，Shared Memory是你的书桌(小但近)，寄存器是手中的书(最小但最快)。优化就是：把常看的书从书库搬到书桌上。Double Buffering就像在你看第1章的同时，管理员帮你把第2章取过来。</div>
+
+<div class="ascii">内存层次延迟可视化 (相对尺度):
+
+  寄存器:     █ 1 cycle (1ns)
+  Shared Mem: ██████████████████████ 30 cycles (15ns)
+  L1 Cache:   ████████████████████████████ 40 cycles (20ns)
+  L2 Cache:   ████████████████████████████████████████ 200 cycles (100ns)
+  HBM:        ██████████████████████████████████████████████████████ 500 cycles (250ns)
+
+  速度比:
+  寄存器 vs HBM = 500:1 → 如果每个寄存器访问都变成HBM访问, 代码慢500倍!
+  Shared Mem vs HBM = 17:1 → 把数据搬到Shared Memory可以快17倍
+  L2 vs HBM = 2.5:1 → L2命中也能节省不少
+
+  → 优化核心: 减少HBM访问次数, 最大化数据复用</div>
+
+</div>
+<div class="footer"><p>🖥️ GPU架构与算子 · 04 · 内存层次与数据搬运</p><p><a href="index.html">返回目录</a> · <a href="../index.html">返回总览</a></p></div>
+
+<div class="tip"><strong>向前串联：</strong>
+一、背景与动机的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+<div class="tip"><strong>相关章节：</strong>
+一、背景与动机与以下内容密切相关：建议结合推理框架总览、量化技术、编译优化等章节一起学习。
+</div>
+<div class="deep"><strong>内存层次的数学本质与推导：</strong>
+GPU内存层次的设计<strong>原理</strong>可以用存储金字塔理论<strong>推导</strong>。
+设第i层容量为C_i、带宽为B_i、延迟为L_i，则理想情况下：
+C_1 << C_2 << ... << C_n 且 B_1 >> B_2 >> ... >> B_n。
+<strong>为什么</strong>要这样设计？<strong>数学本质</strong>是利用局部性原理——
+时间局部性（最近访问的数据 likely 被再次访问）和空间局部性（相邻数据 likely 被一起访问）。
+从<strong>底层</strong>硬件看，A100的存储层次：寄存器(每SM 256KB, ~19TB/s) →
+共享内存(每SM 164KB, ~19TB/s) → L2 Cache(40MB, ~5TB/s) → HBM(80GB, 2TB/s)。
+每一级的<strong>工作机制</strong>是：容量×10, 带宽÷4, 延迟×5。
+FlashAttention的<strong>原理</strong>正是利用这一层次结构——将注意力计算分块到SRAM中完成，
+避免将N×N的注意力矩阵写入HBM，将IO从O(N²)降低到O(N²d²/M)。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+GPU内存层次与以下内容密切相关：
+<a href="../集合通信入门指南/07-GPUDirect技术.html">GPUDirect技术</a> |
+<a href="../../05-推理优化/推理框架/02-内存管理/00-总览.html">内存管理总览</a> |
+<a href="../../05-推理优化/推理框架/05-注意力优化/01-FlashAttention.html">FlashAttention</a>
+</div>
+</body>
+</html>

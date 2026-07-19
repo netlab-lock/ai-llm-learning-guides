@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 · TensorCore深度解析</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.7}a{color:#58a6ff;text-decoration:none}a:hover{text-decoration:underline}.nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 20px;display:flex;justify-content:space-between;position:sticky;top:0;z-index:100}.nav span{color:#8b949e;font-size:0.9em}.nav a{color:#58a6ff}.container{max-width:900px;margin:0 auto;padding:30px 20px}h1{color:#58a6ff;font-size:2em;margin:20px 0 10px}h2{color:#f0f6fc;border-left:4px solid #58a6ff;padding-left:14px;margin:35px 0 15px;font-size:1.4em}h3{color:#d2a8ff;margin:20px 0 10px;font-size:1.15em}p{margin:10px 0}ul,ol{margin:10px 0 10px 24px}li{margin:4px 0}code{background:#21262d;color:#79c0ff;padding:2px 6px;border-radius:4px;font-size:0.9em}pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;overflow-x:auto;margin:12px 0}pre code{background:none;color:#c9d1d9;padding:0}table{border-collapse:collapse;width:100%;margin:12px 0}th{background:#161b22;color:#58a6ff;text-align:left;padding:10px 14px;border:1px solid #30363d}td{padding:10px 14px;border:1px solid #21262d}tr:nth-child(even){background:#161b2233}.tip{background:#0d1d30;border-left:4px solid #58a6ff;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.tip strong{color:#58a6ff}.warn{background:#2d1b00;border-left:4px solid #d29922;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.warn strong{color:#d29922}.exercise{background:#0d2818;border-left:4px solid #238636;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.exercise strong{color:#3fb950}.deep{background:#1a1024;border-left:4px solid #a371f7;padding:14px 18px;border-radius:0 6px 6px 0;margin:16px 0}.deep strong{color:#a371f7}.ascii{background:#161b22;border:1px solid #30363d;padding:16px;font-family:monospace;font-size:0.85em;line-height:1.4;overflow-x:auto;margin:12px 0;white-space:pre}.formula{background:#161b22;border:1px solid #30363d;padding:14px 18px;border-radius:6px;margin:12px 0;text-align:center;font-size:1.1em;color:#d2a8ff}.footer{text-align:center;padding:30px;border-top:1px solid #21262d;margin-top:30px;color:#8b949e;font-size:0.85em}.glossary{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:16px;margin:16px 0}.glossary dt{color:#58a6ff;font-weight:bold;margin-top:8px}.glossary dd{color:#8b949e;margin-left:16px}</style>
+</head>
+<body>
+<div class="nav"><a href="02-Ampere到Blackwell代际对比.html">&larr; 02-Ampere到Blackwell代际对比</a><span>模块 03/08 · TensorCore</span><a href="04-内存层次与数据搬运.html">04-内存层次与数据搬运 &rarr;</a></div>
+<div class="container">
+
+<h1>⚡ 03 · TensorCore 深度解析 — 矩阵乘法的硬件加速</h1>
+<p style="color:#8b949e;font-size:1.05em;">矩阵乘法硬件加速 · 数据类型演进FP16→FP8→FP4 · MMA指令 · WGMMA · 利用率计算</p>
+
+<h2>一、背景与动机</h2>
+<h3>一、背景与动机</h3>ng>矩阵乘法</strong>：Attention 的 QK^T、FFN 的线性层、Embedding 的查表，本质都是矩阵运算。NVIDIA 从 Volta(2017) 开始在 GPU 中加入 Tensor Core——<strong>专用的矩阵乘法硬件单元</strong>，每个时钟周期可以完成一个小型矩阵乘累加(D=A×B+C)。</p>
+<p>Tensor Core 的出现让 GPU 的矩阵运算性能提升了 10-100 倍，是 LLM 能够高效训练的关键硬件基础。</p>
+
+<d
+<pre><code class="language-python"># 一、背景与动机 - 核心实现示例
+import torch
+import numpy as np
+
+class 一、背景与动机Config:
+    """配置类：定义一、背景与动机的关键参数"""
+    def __init__(self):
+        self.batch_size = 32
+        self.max_seq_len = 2048
+        self.dtype = torch.float16
+        
+    def validate(self):
+        """参数验证"""
+        assert self.batch_size > 0, "batch_size must be positive"
+        assert self.max_seq_len > 0, "max_seq_len must be positive"
+        return True
+
+def benchmark(func, iterations=100):
+    """性能基准测试"""
+    import time
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iterations):
+        func()
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iterations
+    print(f"Average latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+iv class="tip"><strong>💡 核心公式：</strong>Tensor Core 的基本操作是 D = A × B + C。一个 4×4 的矩阵乘累加在一个时钟周期内完成。多个 Tensor Core 并行工作，实现大规模矩阵运算。</div>
+
+<h2>二、名字由来</h2>
+<h3>二、名字由来</h3>
+<p><strong>Tensor Core</strong>：Tensor(张量) + Core(核心)。张量是多维数组的推广，矩阵是2维张量。Tensor Core 专门做张量(矩阵)乘法。</p>
+<p><strong>MMA</strong>：Matrix Multiply Accumulate(矩阵乘累加)。Tensor Core 执行的基本指令。</p>
+<p><strong>WGMMA</strong>：Warp Group MMA(线程束组矩阵乘累加)。Hopper 新增的异步 MMA 指令，多个 Warp 协作完成更大的矩阵乘法。</p>
+
+<h2>三、核心原理</h2>
+
+<h3>3.1 Tensor Core 工作原理</h3>
+<div class="ascii">Tensor Core 的基本操作: D = A × B + C
+
+  A (M×K)     B (K×N)     C (M×N)     D (M×N)
+  ┌─────┐     ┌─────┐     ┌─────┐     ┌─────┐
+  │     │  ×  │     │  +  │     │  =  │     │
+  └─────┘     └─────┘     └─────┘     └─────┘
+
+  最小操作尺寸(1st Gen TC, Volta):
+    M=4, N=4, K=4 (FP16 输入, FP32 累加)
+    
+  每个 Tensor Core 每时钟周期:
+    完成 4×4×4 = 64 次乘累加(FMA)
+    
+  一个 SM 有 4 个 Tensor Core:
+    每时钟 4 × 64 = 256 次 FMA
+    
+  H100 有 132 个 SM, 时钟 1.83 GHz:
+    132 × 4 × 256 × 1.83G = 989 TFLOPS (FP16)</div>
+
+<h3>3.2 数据类型演进</h3>
+<table>
+<tr><th>数据类型</th><th>位宽</th><th>范围</th><th>精度</th><th>首次支持</th><th>用途</th></tr>
+<tr><td>FP32</td><td>32位</td><td>±3.4×10³⁸</td><td>高</td><td>CUDA Core</td><td>累加器</td></tr>
+<tr><td>FP16</td><td>16位</td><td>±65504</td><td>中</td><td>Volta TC</td><td>训练+推理</td></tr>
+<tr><td>BF16</td><td>16位</td><td>±3.4×10³⁸</td><td>低</td><td>Ampere TC</td><td>训练(范围大)</td></tr>
+<tr><td>TF32</td><td>19位</td><td>同FP32范围</td><td>中</td><td>Ampere TC</td><td>透明加速训练</td></tr>
+<tr><td>FP8 E4M3</td><td>8位</td><td>±448</td><td>较高</td><td>Hopper TC</td><td>推理+训练前向</td></tr>
+<tr><td>FP8 E5M2</td><td>8位</td><td>±57344</td><td>低</td><td>Hopper TC</td><td>训练梯度</td></tr>
+<tr><td>FP4</td><td>4位</td><td>极有限</td><td>极低</td><td>Blackwell TC</td><td>推理(极致压缩)</td></tr>
+</table>
+
+<div class="ascii">数据类型精度-范围权衡:
+
+  范围(动态范围)
+    ↑
+    │  BF16 ●              ● FP32
+    │       ╲            ╱
+    │        ╲          ╱
+    │    FP8E5M2●      ●TF32
+    │              ╲  ╱
+    │          FP8E4M3●
+    │                ╲
+    │            FP16 ●
+    │                  ╲
+    │              FP4  ●
+    ├─────────────────────→ 精度(有效位数)
+
+  BF16: 范围大(同FP32), 精度低 → 适合训练(梯度不会溢出)
+  FP16: 范围小, 精度高 → 适合推理(精度更好)
+  FP8:  2× 吞吐, 需要缩放 → Transformer Engine 自动处理
+  FP4:  4× 吞吐, 精度损失大 → 推理专用</div>
+
+<h3>3.3 MMA 指令详解</h3>
+<div class="ascii">MMA (Matrix Multiply Accumulate) 指令:
+
+PTX 指令: mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16
+
+  mma: 矩阵乘累加
+  sync: 同步(所有线程完成后才继续)
+  m16n8k16: 矩阵尺寸 M=16, N=8, K=16
+  row.col: A矩阵行主序, B矩阵列主序
+  f16.f16.f16.f16: A类型.B类型.C类型.D类型
+
+  一个 Warp(32线程) 协作完成 16×8×16 的矩阵乘法:
+    A: 16×16 (每个线程持有 2 个元素)
+    B: 16×8  (每个线程持有 1 个元素)
+    C/D: 16×8 (每个线程持有 1 个元素)
+
+  每个线程做的事情:
+    1. 从寄存器读取自己负责的 A, B 元素
+    2. 计算部分乘积
+    3. 累加到 C
+    4. 写入 D</div>
+
+<h3>3.4 WGMMA (Hopper 新增)</h3>
+<div class="ascii">WGMMA: Warp Group MMA (异步矩阵乘累加)
+
+传统 MMA:
+  单个 Warp(32线程) 完成一个小矩阵乘法
+  需要同步等待结果
+
+WGMMA (Hopper):
+  4个 Warp(128线程) 组成一个 Warp Group
+  协作完成更大的矩阵乘法(如 64×128×16)
+  异步执行: 发射指令后可以做其他事情
+
+优势:
+  • 更大的矩阵块 → 更好的数据复用
+  • 异步执行 → 隐藏内存延迟
+  • 与 TMA 配合 → 数据加载和计算重叠</div>
+
+<h3>3.5 Tensor Core 利用率</h3>
+<div class="formula">TC 利用率 = 实际 TFLOPS / 峰值 TFLOPS × 100%<br>
+目标: > 70% 为良好, > 85% 为优秀</div>
+
+<p>影响利用率的因素：</p>
+<table>
+<tr><th>因素</th><th>影响</th><th>优化方法</th></tr>
+<tr><td>矩阵尺寸</td><td>太小→TC空闲</td><td>增大tile size</td></tr>
+<tr><td>数据加载</td><td>加载慢→TC等待</td><td>Prefetch, double buffering</td></tr>
+<tr><td>数据格式</td><td>格式转换开销</td><td>保持FP16/BF16格式</td></tr>
+<tr><td>Bank conflict</td><td>共享内存访问冲突</td><td>Padding, swizzle</td></tr>
+</table>
+
+<h2>四、技术细节</h2>
+
+<h3>4.1 各代 Tensor Core 对比</h3>
+<table>
+<tr><th>代际</th><th>GPU</th><th>支持类型</th><th>TC/SM</th><th>FP16 TFLOPS</th></tr>
+<tr><td>1st Gen</td><td>V100</td><td>FP16</td><td>8</td><td>125</td></tr>
+<tr><td>3rd Gen</td><td>A100</td><td>TF32,FP16,BF16,INT8</td><td>4</td><td>312</td></tr>
+<tr><td>4th Gen</td><td>H100</td><td>+FP8</td><td>4</td><td>989</td></tr>
+<tr><td>5th Gen</td><td>B200</td><td>+FP4,FP6</td><td>4</td><td>2,250</td></tr>
+</table>
+
+<h3>4.2 Tensor Core Pipeline</h3>
+<div class="ascii">Tensor Core 计算流水线:
+
+  Stage 1: 数据加载
+    Shared Memory → 寄存器 (通过 ldmatrix 指令)
+
+  Stage 2: MMA 计算
+    寄存器 → Tensor Core → 累加器寄存器
+
+  Stage 3: 结果写回
+    累加器 → Shared Memory 或全局内存
+
+  流水线重叠:
+  ┌──────────────────────────────────────────┐
+  │ 时间 →                                    │
+  │ Load tile 3 │ Load tile 4 │ Load tile 5  │
+  │ Compute 2   │ Compute 3   │ Compute 4    │
+  │ Store 1     │ Store 2     │ Store 3      │
+  └──────────────────────────────────────────┘
+  数据加载、计算、写回三阶段重叠执行</div>
+
+<h2>五、使用场景</h2>
+程中做出更合理的技术选择和优化决策。</p>
+
+<h3>五、使用场景</h3>
+<ul>
+<li><strong>LLM 训练</strong>：矩阵乘法占训练 90%+ 计算量，TC 是关键</li>
+<li><strong>LLM 推理</strong>：FP8/FP4 推理大幅降低延迟和成本</li>
+<li><strong>混合精度训练</strong>：FP16/BF16 前向 + FP32 累加</li>
+<li><strong>Transformer Engine</strong>：自动选择最优精度</li>
+</ul>
+
+<h2>六、相似技术对比</h2>
+<h3>六、相似技术对比</h3>
+<table>
+<tr><th>对比</th><th>NVIDIA Tensor Core</th><th>AMD Matrix Core</th><th>Google MXU</th></tr>
+<tr><td>首次出现</td><td>2017(Volta)</td><td>2020(MI100)</td><td>2016(TPUv1)</td></tr>
+<tr><td>支持精度</td><td>FP4-FP32</td><td>FP16/BF16/INT8</td><td>BF16/INT8</td></tr>
+<tr><td>编程模型</td><td>CUDA/PTX/Triton</td><td>ROCm/HIP</td><td>JAX/XLA</td></tr>
+</table>
+
+<h2>七、关联技术</h2>
+<h3>七、关联技术</h3>
+<p></p/strong>：利用 TC 的 FP16/BF16 加速</li>
+<li><strong>FlashAttention</strong>：TC 加速 QK^T 和 AV 矩阵乘法</li>
+<li><strong>CUTLASS</strong>：封装 TC 指令的模板库</li>
+<li><strong>Triton</strong>：自动利用 TC 的编程框架</li>
+</ul>
+
+<h2>八、实际效果</h2>
+<h3>八、实际效果</h3>
+</td></tr>
+<tr><td>FP8</td><td>1,979</td><td>2×</td><td>可接受</td></tr>
+<tr><td>FP4</td><td>N/A(H100)</td><td>-</td><td>-</td></tr>
+<tr><td>FP4(B200)</td><td>9,000</td><td>~4×</td><td>需要校准</td></tr>
+</table>
+
+<h3>📖 术语速查表</h3>
+<dl class="glossary">
+<dt>Tensor Core</dt><dd>NVIDIA GPU中的矩阵乘法硬件加速单元</dd>
+<dt>MMA</dt><dd>Matrix Multiply Accumulate，矩阵乘累加指令</dd>
+<dt>WGMMA</dt><dd>Warp Group MMA，Hopper的异步矩阵乘累加</dd>
+<dt>FP8 E4M3/E5M2</dt><dd>8位浮点格式，4位指数+3位尾数 / 5位指数+2位尾数</dd>
+<dt>Transformer Engine</dt><dd>NVIDIA的自动FP8混合精度引擎</dd>
+</dl>
+
+
+<pre><code class="language-python"># 一、背景与动机 - 性能基准测试与分析
+import time
+import torch
+
+def profile_inference(model, input_data, warmup=10, iterations=100):
+    """推理性能分析：测量延迟、吞吐和显存"""
+    # Warmup
+    for _ in range(warmup):
+        with torch.no_grad():
+            model(input_data)
+    torch.cuda.synchronize()
+    
+    # Measure latency
+    latencies = []
+    for _ in range(iterations):
+        start = time.perf_counter()
+        with torch.no_grad():
+            output = model(input_data)
+        torch.cuda.synchronize()
+        latencies.append(time.perf_counter() - start)
+    
+    # Statistics
+    avg_ms = sum(latencies) / len(latencies) * 1000
+    p50 = sorted(latencies)[len(latencies)//2] * 1000
+    p99 = sorted(latencies)[int(len(latencies)*0.99)] * 1000
+    mem_mb = torch.cuda.max_memory_allocated() / 1024 / 1024
+    
+    print(f"Latency: avg={avg_ms:.2f}ms, p50={p50:.2f}ms, p99={p99:.2f}ms")
+    print(f"Peak Memory: {mem_mb:.0f}MB")
+    print(f"Throughput: {1000/avg_ms:.0f} req/s")
+    return {"avg_ms": avg_ms, "p50": p50, "p99": p99, "mem_mb": mem_mb}
+</code></pre>
+<pre><code class="language-bash"># 一、背景与动机 - 环境配置与快速验证
+#!/bin/bash
+set -e
+
+# 1. 环境检查
+echo "=== GPU信息 ==="
+nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
+
+# 2. 依赖安装
+pip install torch transformers accelerate
+
+# 3. 快速验证脚本
+python3 -c "
+import torch
+print(f'PyTorch: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+print(f'GPU: {torch.cuda.get_device_name(0)}')
+print(f'GPU Memory: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f}GB')
+
+# 验证推理
+from transformers import AutoTokenizer, AutoModelForCausalLM
+model_name = 'gpt2'
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModelForCausalLM.from_pretrained(model_name).cuda()
+inputs = tokenizer('Hello world', return_tensors='pt').to('cuda')
+with torch.no_grad():
+    outputs = model.generate(**inputs, max_new_tokens=20)
+print(f'Generated: {tokenizer.decode(outputs[0])}')
+print('验证通过!')
+"
+</code></pre>
+<div class="exercise"><strong>✏️ 练习题：</strong>
+<ol>
+<li>Tensor Core 的 D=A×B+C 操作中，A、B、C、D 各自的数据类型可以不同吗？举例说明。</li>
+<li>为什么 BF16 比 FP16 更适合 LLM 训练？从范围和精度的角度分析。</li>
+<li>计算 H100 的理论 FP16 TFLOPS：132 SM × 4 TC/SM × 64 FMA/TC × 2(乘累加) × 1.83 GHz = ?</li>
+</ol></div>
+
+<div class="warn"><strong>⚠️ 常见误区：Tensor Core不是万能加速器：</strong>很多人以为"用了Tensor Core就快了"，但实际上：① 如果矩阵太小(如&lt;16×16)，Tensor Core利用率极低；② 如果数据没有正确对齐到MMA尺寸(m16n8k16)，会有padding浪费；③ 数据从HBM到寄存器的搬运如果跟不上，Tensor Core会饿死。Tensor Core的加速效果取决于<strong>整个数据通路的效率</strong>。</div>
+
+<div class="warn"><strong>⚠️ 常见误区：BF16和FP16只是精度不同：</strong>两者都是16位，但结构完全不同：FP16是5位指数+10位尾数(精度高，范围小±65504)；BF16是8位指数+7位尾数(精度低，范围大±3.4×10³⁸)。在LLM训练中，梯度值经常很大，FP16容易溢出需要loss scaling。BF16的范围和FP32一样大，不需要loss scaling，训练更稳定。这就是为什么<strong>大多数LLM训练用BF16而不是FP16</strong>。</div>
+
+<div class="deep"><strong>🔬 深入探讨：Tensor Core的寄存器文件压力</strong><br><br>
+Tensor Core的操作数都存储在寄存器中。一个MMA m16n8k16操作需要：A矩阵8个寄存器(每线程)、B矩阵2个、C/D矩阵4个——合计14个寄存器/线程。如果做4-stage流水线的GEMM，需要4组操作数——56个寄存器。加上循环变量、地址计算等，一个GEMM kernel很容易用掉128-256个寄存器。<br><br>
+H100每SM有65536个32位寄存器。如果每线程用256个，每SM最多256个线程，而最大是2048——Occupancy只有12.5%。这就是为什么<strong>寄存器压力是kernel优化的核心挑战</strong>。CUTLASS的tile size选择本质上就是在数据复用和寄存器压力之间找平衡。</div>
+
+<div class="ascii">MMA m16n8k16 寄存器布局 (每个线程的职责):
+
+  一个 Warp(32线程) 协作完成 D[16×8] = A[16×16] × B[16×8] + C[16×8]
+
+  线程编号: t0  t1  t2  ... t15  t16  t17  ... t31
+           ─────────────────  ─────────────────────
+  A矩阵:   每线程持有8个FP16元素 (16行×16列 ÷ 32线程)
+           t0持有A[0,0:2]和A[8,0:2] (行0和行8的前2列)
+           → 8个FP16 = 4个寄存器
+
+  B矩阵:   每线程持有4个FP16元素 (16行×8列 ÷ 32线程)
+           t0持有B[0,0:2]和B[8,0:2]
+           → 4个FP16 = 2个寄存器
+
+  C/D矩阵: 每线程持有4个FP32元素 (16行×8列 ÷ 32线程)
+           t0持有C[0,0:2]和C[8,0:2]
+           → 4个FP32 = 4个寄存器
+
+  单次MMA寄存器需求: 4 + 2 + 4 = 10个寄存器/线程
+  如果做K维度累加: 需要2组A,B → 18个寄存器</div>
+
+<div class="deep"><strong>🔬 深入探讨：WGMMA的指令编码与Warp协作</strong><br><br>
+WGMMA(Warp Group MMA)是Hopper的关键创新。传统MMA由单个Warp(32线程)完成，WGMMA由4个Warp(128线程)协作：<br><br>
+<strong>指令格式</strong>：wgmma.mma_async.m64n128k16.f16.f16.f16——4个Warp共同完成64×128×16的矩阵乘法。<br><br>
+<strong>异步执行</strong>：WGMMA指令发射后不等结果就继续下一条。需要wgmma.commit_group和wgmma.wait_group显式同步。这允许在等待WGMMA结果的同时用TMA加载下一批数据。<br><br>
+<strong>操作数来源</strong>：传统MMA的操作数必须在寄存器中，WGMMA的操作数可以直接来自Shared Memory——减少寄存器压力，提高Occupancy。</div>
+
+<table>
+<tr><th>FP8格式</th><th>位分布</th><th>范围</th><th>精度</th><th>LLM中的用途</th></tr>
+<tr><td>E4M3</td><td>1+4+3</td><td>±448</td><td>较高(3位尾数)</td><td>权重存储、推理前向</td></tr>
+<tr><td>E5M2</td><td>1+5+2</td><td>±57344</td><td>较低(2位尾数)</td><td>梯度(范围更重要)</td></tr>
+</table>
+
+<div class="tip"><strong>💡 实用建议：如何验证kernel是否用了Tensor Core？</strong>
+用Nsight Compute查看"MMA Tensor Active"指标。如果接近100%说明TC全力工作；低于50%说明数据加载或格式转换在拖后腿。最常见的原因是矩阵尺寸不是MMA指令要求的整数倍(如m16n8k16的倍数)。</div>
+
+<div class="ascii">Tensor Core 利用率诊断流程:
+
+  Nsight Compute 输出:
+  ┌─────────────────────────────────────────────┐
+  │ Tensor Core Active: 35%  ← 低!               │
+  │ 瓶颈在哪?                                     │
+  ├─────────────────────────────────────────────┤
+  │ 1. 检查 HBM 带宽利用率                        │
+  │    → 高(>80%): Memory-bound, 考虑double buf  │
+  │    → 低(<50%): 继续检查                        │
+  │ 2. 检查 Shared Memory Bank Conflict           │
+  │    → 有冲突: 加padding或swizzle               │
+  │ 3. 检查寄存器压力                              │
+  │    → 寄存器溢出到Local Memory: 减少tile size  │
+  │ 4. 检查矩阵尺寸对齐                            │
+  │    → 不是m16n8k16倍数: pad到对齐              │
+  └─────────────────────────────────────────────┘</div>
+
+</div>
+<div class="footer"><p>🖥️ GPU架构与算子 · 03 · TensorCore深度解析</p><p><a href="index.html">返回目录</a> · <a href="../index.html">返回总览</a></p></div>
+
+<div class="tip"><strong>向前串联：</strong>
+一、背景与动机的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
+建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
+将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
+这些数据将成为后续优化决策的量化依据。
+</div>
+
+
+<div class="deep"><strong>学习路径建议：</strong>
+建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
+再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
+每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+</div>
+
+</body>
+</html>

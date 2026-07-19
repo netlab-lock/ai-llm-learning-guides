@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>02-连续批处理 | LLM</title>
+<style>:root{--bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;--text:#c9d1d9;--text2:#8b949e;--accent:#58a6ff;--green:#3fb950;--orange:#d29922;--red:#f85149;--purple:#bc8cff}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.75;font-size:16px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.nav{background:var(--surface);border-bottom:1px solid var(--border);padding:10px 20px;position:sticky;top:0;z-index:100;display:flex;justify-content:space-between;align-items:center;font-size:0.9em}
+.nav a{color:var(--text2)}.nav a:hover{color:var(--accent)}
+.container{max-width:900px;margin:0 auto;padding:20px}
+h1{color:var(--accent);font-size:1.8em;margin:24px 0 16px;padding-bottom:8px;border-bottom:2px solid var(--border)}
+h2{color:#f0f6fc;font-size:1.35em;margin:28px 0 12px;border-left:4px solid var(--accent);padding-left:12px}
+h3{color:#f0f6fc;font-size:1.1em;margin:20px 0 8px}
+p{margin-bottom:12px}
+ul,ol{margin:0 0 16px 24px}li{margin-bottom:6px}
+pre{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:0.9em}
+code{background:var(--surface2);color:var(--accent);padding:2px 6px;border-radius:4px;font-size:0.9em}
+pre code{background:none;padding:0}
+.keyword{color:#ff7b72}.string{color:#a5d6ff}.comment{color:#8b949e}
+.ascii{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto;margin:16px 0}
+.box{padding:14px 18px;border-radius:8px;margin:16px 0;font-size:0.92em}
+.box.info{background:rgba(88,166,255,0.08);border-left:4px solid var(--accent)}
+.box.warn{background:rgba(210,153,34,0.08);border-left:4px solid var(--orange)}
+.box.tip{background:rgba(63,185,80,0.08);border-left:4px solid var(--green)}
+.box.exercise{background:rgba(35,136,54,0.08);border-left:4px solid var(--green)}
+.box .label{font-weight:700;margin-bottom:4px}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:0.9em}
+th{background:var(--surface2);color:var(--accent);padding:10px 14px;text-align:left;border-bottom:2px solid var(--border)}
+td{padding:8px 14px;border-bottom:1px solid var(--border)}
+tr:hover td{background:rgba(88,166,255,0.03)}
+.next-prev{display:flex;justify-content:space-between;margin:40px 0 20px;padding-top:20px;border-top:1px solid var(--border)}
+.next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
+.next-prev a:hover{border-color:var(--accent);text-decoration:none}
+.footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+</head>
+<body>
+<div class="nav"><a href="01-总览.html">&larr; 01-总览</a><span>12-推理热点 / 连续批处理</span><a href="03-Chunked-Prefill.html">03-Chunked-Prefill &rarr;</a></div>
+<div class="container">
+
+<h1>🔄 2. 连续批处理 (Continuous Batching)</h1>
+
+<h2>2.1 背景：LLM 推理的"一问一答"特性</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>连续批处理就像医院急诊分诊台——静态批处理是挂号窗口，必须凑够一批人才开始看病；连续批处理是急诊室，来一个看一个，看完立刻接下一个，床位永远不空。</div>
+<div class="box warn"><div class="label">⚠️ 常见误区</div>很多人以为连续批处理只是"多线程"。实际上它解决的是GPU显存槽位的动态复用问题——即使你有100个线程，如果batch里有个超长请求，其他请求仍然要等它完成才能被替换。</div>
+<div class="box deep"><div class="label">🔬 深入探讨</div>连续批处理的调度粒度精确到每个iteration（每生成一个token），这比传统batch调度精细几个数量级。vLLM的iteration-level scheduling实现中，调度器在每一步都检查running队列和waiting队列，确保GPU槽位的利用率最大化。</div>
+<p>LLM 推理有一个独特的特点：<strong>每生成一个 token，都要完整跑一遍模型前向传播</strong>。一个 200 字的回答，需要 200+ 次前向传播。这意味着：</p>
+<ul>
+  <li><strong>单次请求的 GPU 利用率极低</strong> — 一个请求只用到 GPU 算力的一小部分</li>
+  <li><strong>必须把多个请求"批"在一起</strong> — 才能喂饱 GPU 的计算能力</li>
+</ul>
+
+<div class="box info"><div class="label">💡 为什么要批处理？</div>
+GPU 的设计哲学是"大量简单核心并行计算"。一个请求只用到一小部分核心，大部分空闲。批处理让多个请求共享 GPU 的并行计算能力，就像餐厅一张大桌同时坐多桌客人。</div>
+
+<h2>2.2 静态批处理（Static Batching）：朴素方案</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>静态批处理像电影院一场一场放映——不管观众多少，每场必须坐满才开演，散场后才能进下一批。连续批处理像自助餐——随时来随时吃，走一个补一个。</div>
+<div class="box warn"><div class="label">⚠️ 常见误区</div>静态批处理的GPU利用率不是恒定的，而是随时间递减。一个batch中最早完成的短请求会留下空槽位，但这些槽位无法被新请求填充，导致GPU利用率从100%逐步下降到30%甚至更低。</div>
+<div class="box deep"><div class="label">🔬 深入探讨</div>静态批处理的"木桶效应"在实际生产中非常严重。假设batch中有100个请求，其中1个请求需要生成5000个token，其余99个只需100个token，那么这99个请求完成后，GPU的99%槽位都会空闲，等待那1个长请求完成。</div>
+<p>最直觉的做法：攒一批请求，凑够 batch_size 个，一起送进 GPU。</p>
+
+<div class="ascii">请求A: 生成 10 个token (短回答)
+请求B: 生成 100 个token (长回答)
+请求C: 生成 5 个token  (超短回答)
+
+静态批处理:
+┌─────────────────────────────────────────────┐
+│ Step 1:  A₁ B₁ C₁  (三请求同时生成第1个token) │
+│ Step 2:  A₂ B₂ C₂                           │
+│ ...                                          │
+│ Step 5:  A₅ B₅ C₅  ← C 在这里就完成了！      │
+│ Step 6:  A₆ B₆ [空] ← C 的槽位闲置           │
+│ ...                                          │
+│ Step 10: A₁₀ B₁₀ [空] ← A 也完成了           │
+│ Step 11: [空] B₁₁ [空] ← 只剩B，大量空闲     │
+│ ...                                          │
+│ Step 100: [空] B₁₀₀ [空] ← 独自跑完          │
+└─────────────────────────────────────────────┘</div>
+
+<h2>2.3 静态批处理的三个致命问题</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>三个问题可以类比为：木桶效应像"一个慢食客拖累整桌人"；GPU利用率暴跌像"电影院只剩一个观众但全场灯还开着"；排队延迟爆炸像"高速收费站只开一条车道"。</div>
+<div class="box warn"><div class="label">⚠️ 常见误区</div>很多人认为排队延迟只影响用户体验。实际上在高并发场景下，排队延迟会导致请求超时、连接断开，甚至引发级联故障。一个被长请求阻塞的batch可能导致整个推理服务的P99延迟飙升到数十秒。</div>
+<div class="box deep"><div class="label">🔬 深入探讨</div>GPU利用率暴跌的根本原因是静态批处理将"调度"和"计算"耦合在一起——调度必须等计算完成。连续批处理的创新在于将两者解耦：调度器独立运行，每步都可以重新分配资源。</div>
+
+<h3>问题一：木桶效应</h3>
+<p>整个 batch 必须等最慢的请求完成，才能处理下一批。C 完成后它的"槽位"空了，但新请求不能插进来。</p>
+
+<h3>问题二：GPU 利用率暴跌</h3>
+<div class="ascii">时间轴 →
+请求A: ████████░░░░░░░░░░░░  (10步完成)
+请求B: ████████████████████████████████... (100步)
+请求C: █████░░░░░░░░░░░░░░░  (5步完成)
+
+GPU利用率: ████████████░░░░░░░░░░░░░░░░░░░░
+                ↑ C完成后开始下降
+                  ↑ A完成后进一步下降</div>
+
+<h3>问题三：排队延迟爆炸</h3>
+<p>新来的请求必须等当前整批完成才能进入。如果一个 batch 里有个超长回答，后面所有请求都被堵住。</p>
+
+<h2>2.4 连续批处理的解决方案</h2>
+<p>核心思想极其简单：<strong>不要等整批结束，每一步（iteration）都可以动态替换已完成的请求。</strong></p>
+
+<div class="svg-diagram">
+<svg viewBox="0 0 660 300" xmlns="http://www.w3.org/2000/svg" font-family="'Cascadia Code','Fira Code',monospace">
+  <text x="330" y="22" text-anchor="middle" fill="#f0f6fc" font-size="13" font-weight="bold">连续批处理（Continuous Batching）vs 静态批处理</text>
+  <!-- Static batching -->
+  <text x="160" y="50" text-anchor="middle" fill="#fb7185" font-size="10" font-weight="bold">静态批处理（浪费）</text>
+  <g transform="translate(20,58)">
+    <text x="0" y="15" fill="#8b949e" font-size="7">Step 1:</text>
+    <rect x="50" y="2" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="62" y="12" text-anchor="middle" fill="#22d3ee" font-size="6">A₁</text>
+    <rect x="77" y="2" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="89" y="12" text-anchor="middle" fill="#22d3ee" font-size="6">B₁</text>
+    <rect x="104" y="2" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="116" y="12" text-anchor="middle" fill="#22d3ee" font-size="6">C₁</text>
+    <text x="0" y="35" fill="#8b949e" font-size="7">Step 5:</text>
+    <rect x="50" y="22" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="62" y="32" text-anchor="middle" fill="#22d3ee" font-size="6">A₅</text>
+    <rect x="77" y="22" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="89" y="32" text-anchor="middle" fill="#22d3ee" font-size="6">B₅</text>
+    <rect x="104" y="22" width="25" height="14" rx="2" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1"/><text x="116" y="32" text-anchor="middle" fill="#34d399" font-size="6">C₅✓</text>
+    <text x="0" y="55" fill="#8b949e" font-size="7">Step 6:</text>
+    <rect x="50" y="42" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="62" y="52" text-anchor="middle" fill="#22d3ee" font-size="6">A₆</text>
+    <rect x="77" y="42" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="89" y="52" text-anchor="middle" fill="#22d3ee" font-size="6">B₆</text>
+    <rect x="104" y="42" width="25" height="14" rx="2" fill="rgba(30,41,59,0.3)" stroke="#484f58" stroke-width="1"/><text x="116" y="52" text-anchor="middle" fill="#484f58" font-size="6">空</text>
+    <text x="140" y="35" fill="#fb7185" font-size="7">C完成后槽位空闲</text>
+    <text x="140" y="47" fill="#fb7185" font-size="7">新请求不能插入！</text>
+    <text x="0" y="75" fill="#8b949e" font-size="7">Step 11:</text>
+    <rect x="50" y="62" width="25" height="14" rx="2" fill="rgba(30,41,59,0.3)" stroke="#484f58" stroke-width="1"/><text x="62" y="72" text-anchor="middle" fill="#484f58" font-size="6">空</text>
+    <rect x="77" y="62" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="89" y="72" text-anchor="middle" fill="#22d3ee" font-size="6">B₁₁</text>
+    <rect x="104" y="62" width="25" height="14" rx="2" fill="rgba(30,41,59,0.3)" stroke="#484f58" stroke-width="1"/><text x="116" y="72" text-anchor="middle" fill="#484f58" font-size="6">空</text>
+    <text x="140" y="72" fill="#fb7185" font-size="7">只剩B，2/3槽位浪费！</text>
+  </g>
+  <!-- Continuous batching -->
+  <text x="490" y="50" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">连续批处理（高效）</text>
+  <g transform="translate(350,58)">
+    <text x="0" y="15" fill="#8b949e" font-size="7">Step 1:</text>
+    <rect x="50" y="2" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="62" y="12" text-anchor="middle" fill="#22d3ee" font-size="6">A₁</text>
+    <rect x="77" y="2" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="89" y="12" text-anchor="middle" fill="#22d3ee" font-size="6">B₁</text>
+    <rect x="104" y="2" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="116" y="12" text-anchor="middle" fill="#22d3ee" font-size="6">C₁</text>
+    <text x="0" y="35" fill="#8b949e" font-size="7">Step 5:</text>
+    <rect x="50" y="22" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="62" y="32" text-anchor="middle" fill="#22d3ee" font-size="6">A₅</text>
+    <rect x="77" y="22" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="89" y="32" text-anchor="middle" fill="#22d3ee" font-size="6">B₅</text>
+    <rect x="104" y="22" width="25" height="14" rx="2" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1"/><text x="116" y="32" text-anchor="middle" fill="#34d399" font-size="6">C₅✓</text>
+    <text x="0" y="55" fill="#8b949e" font-size="7">Step 6:</text>
+    <rect x="50" y="42" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="62" y="52" text-anchor="middle" fill="#22d3ee" font-size="6">A₆</text>
+    <rect x="77" y="42" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="89" y="52" text-anchor="middle" fill="#22d3ee" font-size="6">B₆</text>
+    <rect x="104" y="42" width="25" height="14" rx="2" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1"/><text x="116" y="52" text-anchor="middle" fill="#fbbf24" font-size="6">D₁</text>
+    <text x="140" y="52" fill="#34d399" font-size="7">D立刻插入！</text>
+    <text x="0" y="75" fill="#8b949e" font-size="7">Step 11:</text>
+    <rect x="50" y="62" width="25" height="14" rx="2" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1"/><text x="62" y="72" text-anchor="middle" fill="#fbbf24" font-size="6">E₁</text>
+    <rect x="77" y="62" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="89" y="72" text-anchor="middle" fill="#22d3ee" font-size="6">B₁₁</text>
+    <rect x="104" y="62" width="25" height="14" rx="2" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1"/><text x="116" y="72" text-anchor="middle" fill="#22d3ee" font-size="6">D₆</text>
+    <text x="140" y="72" fill="#34d399" font-size="7">A完成→E立刻插入</text>
+  </g>
+  <!-- Key insight -->
+  <rect x="30" y="160" width="600" height="55" rx="8" fill="rgba(6,78,59,0.15)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="330" y="180" text-anchor="middle" fill="#34d399" font-size="10" font-weight="bold">核心思想：每一步都可以动态替换已完成的请求</text>
+  <text x="330" y="198" text-anchor="middle" fill="#c9d1d9" font-size="9">GPU 槽位始终满载 · 新请求无需等待整批完成 · 吞吐量提升 2-10 倍</text>
+  <!-- Engine list -->
+  <rect x="30" y="225" width="600" height="55" rx="8" fill="rgba(30,41,59,0.3)" stroke="#30363d" stroke-width="1"/>
+  <text x="330" y="245" text-anchor="middle" fill="#f0f6fc" font-size="9" font-weight="bold">现代推理引擎全部内置连续批处理</text>
+  <text x="330" y="265" text-anchor="middle" fill="#8b949e" font-size="8">vLLM (Iteration-level Scheduling) · SGLang · TensorRT-LLM (In-flight Batching) · TGI</text>
+</svg>
+</div>
+
+<div class="box tip"><div class="label">💡 生活类比</div>
+<strong>静态批处理</strong>像餐厅大桌 — 必须等所有人吃完才能上下一轮，吃得快的人干等。<br>
+<strong>连续批处理</strong>像回转寿司 — 吃完一个走一个，空位立刻坐新人，座位永远不空。</div>
+
+<h2>2.5 关键区别：调度粒度</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>调度粒度的区别就像"按天发工资"和"按小时发工资"——静态批处理按天发，不管你今天工作几小时都一样；连续批处理按小时发，干一小时结一小时，效率更高。</div>
+<div class="box warn"><div class="label">⚠️ 常见误区</div>很多人误以为连续批处理的调度开销很高。实际上，现代推理引擎（如vLLM）的调度逻辑非常轻量——只是一次链表操作和状态检查，耗时在微秒级别，远小于GPU计算的毫秒级延迟。</div>
+<div class="box deep"><div class="label">🔬 深入探讨</div>调度粒度的选择本质上是在"调度开销"和"资源利用率"之间做权衡。粒度越细，利用率越高，但调度开销也越大。对于LLM推理，由于每次前向传播的计算量很大（毫秒级），每步调度的开销可以忽略不计，所以极细粒度是合理的。</div>
+
+<table>
+<tr><th>对比</th><th>静态批处理</th><th>连续批处理</th></tr>
+<tr><td>调度粒度</td><td>整个 batch 结束后</td><td>每个 iteration（每生成一个 token）</td></tr>
+<tr><td>GPU 利用率</td><td>随时间递减 (30-60%)</td><td>始终高位 (80-95%)</td></tr>
+<tr><td>吞吐量</td><td>低</td><td>高 2-5x</td></tr>
+<tr><td>排队延迟</td><td>高 (等整批完成)</td><td>低 (每步可插入)</td></tr>
+<tr><td>短请求体验</td><td>差 (被长请求拖累)</td><td>好 (完成后立刻让位)</td></tr>
+<tr><td>公平性</td><td>差</td><td>好</td></tr>
+</table>
+
+<h2>2.6 实现原理</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>调度器的工作原理像机场登机口调度员——每架飞机起飞后（请求完成），立刻检查下一架飞机是否就绪（waiting queue），然后分配登机口（GPU槽位）。</div>
+<div class="box warn"><div class="label">⚠️ 常见误区</div>调度策略的选择对实际性能影响巨大。FCFS（先来先服务）看似公平，但在混合长短请求的场景下效率最低。SJF（短作业优先）能最大化吞吐量，但可能导致长请求永远得不到服务（饥饿问题）。</div>
+<div class="box deep"><div class="label">🔬 深入探讨</div>现代推理引擎的调度器通常采用多级策略：先按优先级分组，再在每组内用SJF调度，同时设置最大等待时间保证公平性。这种设计借鉴了操作系统进程调度的经典思想。</div>
+
+<div class="ascii">连续批处理的调度器 (Scheduler):
+
+每个 iteration:
+  1. 检查 batch 中哪些请求已完成 (生成了 EOS token)
+  2. 从队列中取出新请求，填满空出的槽位
+  3. 把当前 batch 的所有 token 送入 GPU 执行一步
+  4. 返回步骤 1
+
+关键数据结构:
+  running_requests: 正在生成的请求列表 (固定大小)
+  waiting_queue:    等待进入的请求队列 (FIFO 或优先级)
+  
+调度策略:
+  FCFS (先来先服务): 最简单，但可能被长请求占满
+  SJF (短作业优先):  预估输出长度，优先调度短请求
+  Fairness:         保证每个请求的最大等待时间</div>
+
+<h2>2.7 使用场景</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>是否需要连续批处理，就像问"餐厅是否需要翻台管理"——客流量大时必须有，一个人吃饭时无所谓。</div>
+<div class="box warn"><div class="label">⚠️ 常见误区</div>很多人认为本地单用户（如Ollama）不需要连续批处理。这在单请求场景下是对的，但如果你同时运行多个Agent或使用parallel generation，连续批处理仍然有帮助。</div>
+<div class="box deep"><div class="label">🔬 深入探讨</div>连续批处理在不同场景下的收益差异很大：高并发API服务（提升3-10倍）、聊天机器人（提升2-5倍）、批量离线推理（提升2-3倍）。收益与请求的长度方差正相关——方差越大，静态批处理的浪费越严重，连续批处理的收益越明显。</div>
+
+<table>
+<tr><th>场景</th><th>是否需要</th><th>说明</th></tr>
+<tr><td>LLM 推理 API 服务</td><td>✅ 必须</td><td>多用户并发，是标配</td></tr>
+<tr><td>聊天机器人</td><td>✅ 必须</td><td>对话长短不一，短回答不应被长回答阻塞</td></tr>
+<tr><td>代码生成 / Agent</td><td>✅ 必须</td><td>token 数量差异巨大 (10~5000)</td></tr>
+<tr><td>批量离线推理</td><td>✅ 推荐</td><td>10 万条数据做摘要，提升 GPU 利用率</td></tr>
+<tr><td>本地单用户 (Ollama)</td><td>❌ 不需要</td><td>只有一个请求，不存在"批"的概念</td></tr>
+</table>
+
+<h2>2.8 哪些推理引擎支持？</h2>
+<div class="box tip"><div class="label">💡 通俗类比</div>连续批处理已经成为LLM推理引擎的"标配"，就像汽车必须有方向盘一样——没有连续批处理的推理引擎，就像没有方向盘的汽车，根本无法上路。</div>
+<div class="box warn"><div class="label">⚠️ 常见误区</div>虽然所有主流引擎都支持连续批处理，但实现细节差异很大。vLLM的iteration-level scheduling和SGLang的RadixAttention在调度策略上有本质区别，选择时需要根据具体场景评估。</div>
+<div class="box deep"><div class="label">🔬 深入探讨</div>连续批处理的实现已经从"功能"演变为"基础设施"。新一代引擎（如SGLang）甚至将调度逻辑与KV Cache管理、内存分配深度耦合，实现了更高效的端到端优化。</div>
+
+<div class="ascii">现代推理引擎全部内置连续批处理:
+
+  vLLM            ✅ 默认开启，iteration-level scheduling
+  TensorRT-LLM    ✅ 默认开启
+  SGLang          ✅ 默认开启
+  llama.cpp       ✅ 支持 (server 模式)
+  Ollama          ✅ 支持 (多用户模式)
+  
+  → 连续批处理已经是 LLM 推理引擎的基础设施</div>
+
+<h2>2.9 连续批处理的局限</h2>
+<p>连续批处理解决的是<strong>调度问题</strong>（谁进 batch），但不能解决所有问题：</p>
+
+<div class="box warn"><div class="label">⚠️ 连续批处理没解决的问题</div>
+<strong>长 prompt 阻塞：</strong>一个请求的 prefill 阶段（处理长输入）会"霸占"GPU，其他 decode 请求被拖慢。<br>
+→ 这需要 <strong>Chunked Prefill</strong> 来解决（下一讲）。<br><br>
+<strong>KV Cache 内存碎片：</strong>多个请求的 KV Cache 大小不一，频繁分配释放导致内存碎片。<br>
+→ 这需要 <strong>PagedAttention</strong> 来解决（第 08 讲）。</div>
+
+<div class="box tip"><div class="label">🗺️ 学习路径</div>
+连续批处理是推理优化的第一步，几乎所有现代引擎默认开启。建议：① 理解静态批处理的问题 → ② 掌握连续批处理的原理 → ③ 了解调度策略的差异 → ④ 动手配置 vLLM 的连续批处理参数。完成后进入 03-Chunked Prefill 学习长 prompt 处理。
+</div>
+
+<table>
+<tr><th>调度策略</th><th>原理</th><th>吞吐量</th><th>公平性</th><th>适用场景</th></tr>
+<tr><td>FCFS</td><td>先来先服务</td><td>低</td><td>高</td><td>公平性要求高的场景</td></tr>
+<tr><td>SJF</td><td>短作业优先</td><td>最高</td><td>低</td><td>吞吐量优先的离线任务</td></tr>
+<tr><td>FCFS+SJF混合</td><td>优先级+短作业</td><td>高</td><td>中</td><td>大多数在线服务</td></tr>
+<tr><td>最大等待时间</td><td>保证最大延迟</td><td>中</td><td>高</td><td>SLA要求严格的场景</td></tr>
+</table>
+
+<div class="box exercise"><div class="label">🎯 练习</div>
+<ol>
+<li>对比实验：用 vLLM 部署模型，分别设置 max_num_seqs=1（模拟静态批处理）和 max_num_seqs=64，用并发请求测试吞吐量差异。</li>
+<li>调度策略分析：在 vLLM 中配置不同的调度策略，分析短请求和长请求的延迟分布。</li>
+<li>代码阅读：阅读 vLLM 的 scheduler.py 源码，理解 iteration-level scheduling 的实现。</li>
+</ol>
+</div>
+
+<h2>2.10 连续批处理的高级话题：前缀缓存</h2>
+
+<p>前缀缓存（Prefix Caching）是连续批处理的重要扩展。当多个请求共享相同的 system prompt 时，前缀缓存允许第一个请求计算并缓存 system prompt 的 KV Cache，后续请求直接复用，避免重复计算。SGLang 的 RadixAttention 将这个思想推广到了任意前缀——用 Radix Tree 组织所有请求的 KV Cache，自动发现和复用共享前缀。</p>
+
+<h3>前缀缓存的实现原理</h3>
+
+<p>前缀缓存的核心挑战是「如何高效地发现共享前缀」。朴素方法是逐 token 比较，但时间复杂度是 O(n²)。SGLang 的 RadixAttention 使用基数树（Radix Tree）数据结构，将 token 序列作为 key，KV Cache 的物理地址作为 value。当新请求到达时，沿着 Radix Tree 匹配最长公共前缀，只需计算未匹配部分的 KV。这个方法的时间复杂度是 O(n)，且支持前缀的自动淘汰（LRU 策略）。在多轮对话场景中，system prompt 和历史对话通常是共享前缀，前缀缓存可以将 TTFT 降低 50-80%。</p>
+
+<table>
+<tr><th>调度特性</th><th>vLLM</th><th>SGLang</th><th>TensorRT-LLM</th><th>TGI</th></tr>
+<tr><td>连续批处理</td><td>✅ Iteration-level</td><td>✅ Iteration-level</td><td>✅ In-flight</td><td>✅</td></tr>
+<tr><td>前缀缓存</td><td>✅ Automatic</td><td>✅ RadixAttention</td><td>✅ KV Cache Reuse</td><td>❌</td></tr>
+<tr><td>Chunked Prefill</td><td>✅ 可配置</td><td>✅ 可配置</td><td>✅ 默认启用</td><td>✅</td></tr>
+<tr><td>抢占式调度</td><td>✅ Swap/Recompute</td><td>✅ 淘汰策略</td><td>❌</td><td>❌</td></tr>
+<tr><td>调度策略</td><td>FCFS/SJF混合</td><td>FCFS+优先级</td><td>FCFS</td><td>FCFS</td></tr>
+<tr><td>多模态支持</td><td>✅</td><td>✅</td><td>✅</td><td>✅</td></tr>
+</table>
+
+<h3>抢占式调度与内存管理</h3>
+
+<p>当 GPU 显存不足时，推理引擎需要「抢占」某些请求来释放内存。vLLM 支持两种抢占策略：(1) Swap——将被抢占请求的 KV Cache 从 GPU 内存换出到 CPU 内存，等有空间后再换入；(2) Recompute——丢弃被抢占请求的 KV Cache，等有空间后从头重新计算。Swap 的恢复速度快但需要 CPU 内存，Recompute 不需要额外内存但恢复时间长。vLLM 的调度器会根据当前的内存压力和请求的进度自动选择最优策略。</p>
+
+<pre><code># vLLM 的连续批处理调度器核心逻辑 (简化)
+class ContinuousBatchScheduler:
+    def __init__(self, max_num_seqs, gpu_memory):
+        self.max_num_seqs = max_num_seqs
+        self.running = []      # 正在生成的请求
+        self.waiting = []      # 等待进入的请求
+        self.gpu_memory = gpu_memory
+    
+    def schedule_step(self):
+        # 1. 检查已完成的请求，释放槽位
+        completed = [r for r in self.running if r.is_finished()]
+        for r in completed:
+            self.running.remove(r)
+            self.gpu_memory.free(r.kv_cache)
+        
+        # 2. 从等待队列取出新请求
+        while self.waiting and len(self.running) < self.max_num_seqs:
+            new_req = self.waiting.pop(0)
+            if self.gpu_memory.can_allocate(new_req):
+                self.gpu_memory.allocate(new_req)
+                self.running.append(new_req)
+            else:
+                # 内存不足，尝试抢占
+                if self.running:
+                    victim = self.running.pop()  # 最后一个
+                    self.gpu_memory.swap_out(victim)
+                    self.waiting.insert(0, victim)
+                break
+        
+        # 3. 返回当前 batch 的所有请求
+        return self.running</code></pre>
+
+<div class="box tip"><div class="label">💡 实践技巧</div>在高并发场景下，连续批处理的性能高度依赖于 max_num_seqs 参数的设置。太小（如 8）会导致 GPU 利用率不足，太大（如 256）会导致每个请求分到的计算资源不足。经验公式：max_num_seqs ≈ GPU_memory / (model_size_per_request × safety_factor)。对于 A100-80GB 运行 LLaMA-70B-GPTQ-INT4，建议 max_num_seqs=32-64。</div>
+
+<div class="box warn"><div class="label">⚠️ 常见误区</div>连续批处理的一个隐含问题是「尾延迟」——当 batch 中有超长请求时，虽然其他请求不被阻塞，但整体的 GPU 利用率会因为长请求的 KV Cache 占用大量内存而下降。解决方案包括：(1) 设置 max_model_len 限制单个请求的最大长度；(2) 使用 KV Cache 压缩（GQA/MLA）减少每个请求的内存占用；(3) 对超长请求使用 Prefill-Decode 分离。</div>
+
+<div class="box info"><div class="label">🔗 继续学习</div>连续批处理是推理优化的基础设施。继续学习：<a href='03-Chunked-Prefill.html'>03-Chunked Prefill</a> 解决长 prompt 阻塞问题，<a href='04-FlashAttention.html'>04-FlashAttention</a> 加速注意力计算。相关技术：<a href='06-量化技术.html'>量化技术</a> 可以减少模型大小从而支持更大的 batch size。</div>
+
+<h2>2.11 连续批处理与 PagedAttention 的协同优化</h2>
+<p>连续批处理的效率高度依赖于 KV Cache 的管理策略。在 vLLM 的 PagedAttention 实现中，KV Cache 被划分为固定大小的页（Page），每个请求的 KV Cache 由多个不连续的页组成。这种分页管理消除了内存碎片，支持 Copy-on-Write（多个请求共享相同 prompt 前缀的 KV 页），并支持换入换出。vLLM 的基准测试表明，PagedAttention 相比连续内存分配，内存利用率提升了 2-4 倍。</p>
+<h3>调度器性能开销的量化分析</h3>
+<p>连续批处理的调度器在每个 iteration 都执行以下操作：(1) 检查 running 队列中是否有已完成的请求（O(n) 时间）；(2) 从 waiting 队列取出新请求填满空槽位（O(1) 到 O(k) 时间）；(3) 构造当前 batch 的输入张量（O(n) 时间）；(4) 触发 GPU 前向传播。其中前三步是 CPU 操作，第四步是 GPU 操作。实测表明，调度器的 CPU 开销在微秒级别（10-100us），远小于 GPU 计算的毫秒级延迟（5-50ms），因此调度开销可以忽略不计。但在极端高并发场景（>1000 QPS）下，调度器可能成为瓶颈，此时需要使用异步调度或多线程调度来分担 CPU 压力。</p>
+
+
+<h2>2.12 连续批处理在长上下文场景下的挑战</h2>
+<p>当处理长上下文（32K-128K tokens）请求时，连续批处理面临独特的挑战。长上下文请求的 KV Cache 可能占用大量 GPU 内存，导致同一 batch 中能容纳的请求数量大幅减少。例如，一个 128K token 的请求在 LLaMA-70B 上需要约 40GB 的 KV Cache（FP16），加上模型权重，一张 A100-80GB 只能同时处理 1-2 个这样的请求。这种情况下，连续批处理的优势被大幅削弱——batch size 太小，GPU 利用率很低。解决方案包括：(1) 使用 GQA/MLA 减少 KV Cache 大小；(2) 使用 KV Cache 量化（FP8/INT8）进一步压缩；(3) 使用 Context Parallelism 将长序列分散到多卡；(4) 使用 Chunked Prefill 保证 decode 不被阻塞。这些技术的组合使用是当前长上下文推理的最佳实践。</p>
+
+<h2>2.13 连续批处理的性能调优指南</h2><p>连续批处理的性能调优主要涉及三个参数：max_num_seqs（最大并发请求数）、max_model_len（最大序列长度）和 scheduler_delay_factor（调度延迟因子）。max_num_seqs 设置过大可能导致每个请求分到的计算资源不足（TPOT 增加），设置过小会导致 GPU 利用率不足。建议的初始值是 GPU 内存除以单个请求的 KV Cache 大小。max_model_len 限制单个请求的最大长度，防止超长请求占用过多内存。scheduler_delay_factor 控制调度器在等待新请求和立即处理之间的平衡——较大的值会让调度器等待更多请求以组成更大的 batch，提高吞吐量但增加延迟。</p>
+<h3>连续批处理在多模态模型中的应用</h3><p>连续批处理不仅适用于纯文本 LLM，也适用于多模态模型（如 LLaVA、GPT-4V）。但多模态模型的连续批处理面临额外挑战：图像 token 的数量远多于文本 token（一张图片可能对应 576-1024 个 token），导致不同请求的序列长度差异更大。这加剧了 padding 浪费和 GPU 利用率不均的问题。解决方案包括：(1) 使用动态分辨率——根据请求的图像数量动态调整图像分辨率和 token 数量；(2) 使用独立的图像编码器——将图像预处理与文本推理分离，避免图像编码阻塞文本 decode；(3) 使用 Chunked Prefill——将大量图像 token 切块处理，避免阻塞其他请求的 decode。</p>
+<div class="next-prev"><a href="01-总览.html">← 01-总览</a><a href="03-Chunked-Prefill.html">03-Chunked-Prefill →</a></div>
+
+</div>
+<div class="footer"><p>LLM 系统学习 · 02-连续批处理</p><p><a href="../index.html">返回总目录</a></p></div>
+<div class="tip"><strong>相关章节：</strong>
+连续批处理与以下章节密切相关：<a href="01-总览.html">01-总览</a>（推理优化全景，理解连续批处理在整体技术栈中的位置）| <a href="03-Chunked-Prefill.html">03-Chunked-Prefill</a>（解决长 prompt 阻塞问题，是连续批处理的补充）| <a href="04-FlashAttention.html">04-FlashAttention</a>（加速注意力计算，与连续批处理协同提升吞吐量）。建议结合学习。
+</div>
+<div class="tip"><strong>实用技巧：</strong>
+在实际工程中应用连续批处理时，建议先用 vLLM 部署模型并设置 max_num_seqs=1（模拟静态批处理）记录基线吞吐量，然后将 max_num_seqs 调到 32-64 测量连续批处理的吞吐量提升（通常 2-10 倍）。重点关注 GPU 利用率（nvitop 观察）和 P99 延迟的变化，逐步调整调度策略（FCFS/SJF 混合）找到最优配置。
+</div>
+<div class="deep"><strong>深入探讨：</strong>
+<strong>连续批处理的调度架构设计：</strong>连续批处理的核心设计是将「调度」和「计算」解耦——调度器（Scheduler）独立运行在 CPU 上，每生成一个 token 就重新检查 running 队列和 waiting 队列，决定哪些请求进入当前 batch。这种解耦设计使得调度粒度从「整个 batch 结束后」细化到「每个 iteration」，是连续批处理相比静态批处理的根本创新。vLLM 的 iteration-level scheduling 实现中，调度器的 CPU 开销仅 10-100 微秒，远小于 GPU 计算的毫秒级延迟，因此调度开销可以忽略不计。
+</div>
+<pre><code class="language-python"># 背景：LLM 推理的"一问一答"特性 - 性能基准测试
+import torch, time
+def benchmark(model, x, n=100):
+    for _ in range(10): model(x)
+    torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(n): model(x)
+    torch.cuda.synchronize()
+    print(f"Latency: {(time.perf_counter()-t0)/n*1000:.2f}ms")
+</code></pre>
+<div class="exercise">
+<h3>📝 思考与练习</h3>
+<ol>
+<li>请用自己的话解释背景：LLM 推理的"一问一答"特性的核心原理，并举一个实际应用场景。</li>
+<li>背景：LLM 推理的"一问一答"特性在实际工程中可能遇到哪些性能瓶颈？如何诊断和解决？</li>
+<li>对比背景：LLM 推理的"一问一答"特性与替代方案，分析各自的适用场景和权衡。</li>
+</ol>
+</div>
+<div class="tip"><strong>向前串联：</strong>
+背景：LLM 推理的"一问一答"特性的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<pre><code class="language-python"># 背景：LLM 推理的"一问一答"特性 性能基准测试
+import torch
+import time
+
+def benchmark(model, input_data, warmup=10, iters=100):
+    for _ in range(warmup):
+        model(input_data)
+    torch.cuda.synchronize()
+    start = time.perf_counter()
+    for _ in range(iters):
+        model(input_data)
+    torch.cuda.synchronize()
+    elapsed = (time.perf_counter() - start) / iters
+    print(f"Latency: {elapsed*1000:.2f}ms")
+    return elapsed
+</code></pre>
+<div class="deep"><strong>深入探讨：</strong>
+<strong>连续批处理的核心权衡：</strong>连续批处理的核心挑战是在「吞吐量」、「延迟」和「公平性」三者之间寻找最优平衡。增大 max_num_seqs 可以提高吞吐量（更多请求共享 GPU），但会增加每个请求的 TPOT（每个 token 分到的计算资源减少）；SJF 调度策略可以最大化吞吐量，但可能导致长请求永远得不到服务（饥饿问题）。理解这三者的权衡关系，就能推导出为什么大多数生产环境选择 FCFS+SJF 混合策略并设置最大等待时间保障公平性。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+学习连续批处理时，很多人的误区是「只看原理图不动手部署」。建议用 vLLM 部署一个模型，分别设置 max_num_seqs=1 和 max_num_seqs=64，用并发请求（如 100 个长短不一的请求）测试吞吐量差异，亲手观察 GPU 利用率从 30% 提升到 90%+ 的过程，才能真正理解连续批处理的价值。
+</div>
+<div class="warn"><strong>常见误区：</strong>
+不要以为连续批处理可以跳过静态批处理的原理直接学高级调度策略。理解静态批处理的「木桶效应」和「GPU 利用率暴跌」问题是理解连续批处理价值的前提——不知道问题在哪，就不知道解决方案好在哪。
+</div>
+<div class="tip"><strong>相关章节：</strong>
+连续批处理与 Chunked Prefill（解决长 prompt 阻塞问题）、PagedAttention（解决 KV Cache 内存碎片问题）、FlashAttention（加速注意力计算）共同构成 LLM 推理优化的四大基础设施，建议结合学习形成完整的推理优化知识体系。
+</div>
+</body>
+</html>

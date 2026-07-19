@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>04 SGLang 结构化输出 | Structured Output</title>
+<style>:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--heading:#f0f6fc;--blue:#58a6ff;--green:#3fb950;--yellow:#d29922;--red:#f85149;--purple:#a371f7;--cyan:#39d2c0}*{margin:0;padding:0;box-sizing:border-box}body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;line-height:1.8;font-size:16px}.container{max-width:900px;margin:0 auto;padding:2rem 1.5rem}h1{color:var(--blue);font-size:2rem;margin:1rem 0 .5rem}h2{color:var(--heading);font-size:1.5rem;margin:2rem 0 .8rem;padding-left:.8rem;border-left:4px solid var(--blue)}h3{color:var(--cyan);font-size:1.2rem;margin:1.5rem 0 .5rem}p{margin:.6rem 0}a{color:var(--blue);text-decoration:none}code{background:#21262d;color:#79c0ff;padding:.15em .4em;border-radius:4px;font-size:.9em}pre{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;overflow-x:auto;margin:1rem 0;font-size:.9em;line-height:1.6}pre code{background:none;padding:0}table{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.9em}th,td{border:1px solid var(--border);padding:.5rem .8rem;text-align:left}th{background:#161b22;color:var(--blue);font-weight:600}tr:nth-child(even){background:rgba(22,27,34,.5)}.nav{background:var(--card);border-bottom:1px solid var(--border);padding:.6rem 1.5rem;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.nav a{color:var(--blue);font-size:.9rem}.nav span{color:var(--heading);font-weight:600;font-size:.95rem}.footer{text-align:center;margin-top:3rem;padding:1.5rem;border-top:1px solid var(--border);color:#8b949e;font-size:.85rem}.tip,.warn,.exercise,.deep{border-radius:8px;padding:1rem 1.2rem;margin:1rem 0}.tip{background:#0d1d30;border-left:4px solid var(--blue)}.warn{background:#2d1b00;border-left:4px solid var(--yellow)}.exercise{background:#0d2818;border-left:4px solid var(--green)}.deep{background:#1a1024;border-left:4px solid var(--purple)}.ascii{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem;font-family:'Cascadia Code','Fira Code',monospace;font-size:.85em;line-height:1.5;white-space:pre;overflow-x:auto;margin:1rem 0}.badge{display:inline-block;padding:.15rem .6rem;border-radius:12px;font-size:.75rem;font-weight:600;margin-right:.3rem}.badge-yellow{background:#2d1b00;color:var(--yellow)}.badge-cyan{background:#0d2430;color:var(--cyan)}.next-prev{display:flex;justify-content:space-between;margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border)}</style>
+</head>
+<body>
+<div class="nav"><a href="03-Outlines框架详解.html">&larr; 03</a><span>模块 04 · SGLang</span><a href="05-Function-Calling格式.html">05 &rarr;</a></div>
+<div class="container">
+
+<h1>⚡ 04 · SGLang 的结构化输出</h1>
+<p><span class="badge badge-yellow">进阶</span> <span class="badge badge-cyan">性能</span></p>
+
+<!-- ==================== 1. SGLang 约束解码方案 ==================== -->
+<h2>1. SGLang 的约束解码方案</h2>
+<p>SGLang（LMSYS 开发）实现了<strong>独立的约束解码系统</strong>，不依赖 Outlines。核心创新是 Compressed FSM + Jump-forward Decoding。参考：<a href="https://lmsys.org/blog/2024-02-05-compressed-fsm/">LMSYS Blog</a>。</p>
+
+<h3>1.1 SGLang 的定位</h3>
+<p>SGLang 不仅仅是一个约束解码库，它是一个<strong>完整的 LLM 推理引擎</strong>，类似于 vLLM。其特点是将约束解码<strong>深度集成</strong>到推理引擎中，而非像 Outlines 那样作为外部库挂载。这种深度集成带来了性能优势：约束解码可以利用引擎内部的 KV Cache、调度器等基础设施。</p>
+
+<div class="ascii">SGLang 架构全景:
+
+  ┌─────────────────────────────────────────────────────────┐
+  │                    SGLang 推理引擎                       │
+  ├─────────────────────────────────────────────────────────┤
+  │                                                         │
+  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+  │  │  前端 DSL     │  │  RadixAttention│  │  调度器      │  │
+  │  │  (sgl.function)│  │  (KV Cache复用)│  │  (批处理)    │  │
+  │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  │
+  │         │                 │                  │          │
+  │  ┌──────▼─────────────────▼──────────────────▼───────┐  │
+  │  │              推理核心 (CUDA Kernel)                │  │
+  │  └──────┬────────────────────────────────────────────┘  │
+  │         │                                               │
+  │  ┌──────▼──────────────────────────────────────────┐    │
+  │  │           约束解码引擎                           │    │
+  │  │  ┌─────────────┐  ┌──────────┐  ┌───────────┐  │    │
+  │  │  │Compressed   │  │ XGrammar │  │ Regex/EBNF│  │    │
+  │  │  │FSM          │  │ (CFG)    │  │ 支持      │  │    │
+  │  │  └─────────────┘  └──────────┘  └───────────┘  │    │
+  │  └─────────────────────────────────────────────────┘    │
+  │                                                         │
+  └─────────────────────────────────────────────────────────┘
+          ▲                    ▲                   ▲
+          │                    │                   │
+    JSON Schema           EBNF Grammar        自定义正则</div>
+
+<h3>1.2 SGLang vs Outlines：架构差异</h3>
+<p>理解 SGLang 和 Outlines 的架构差异对于选择方案至关重要：</p>
+<table>
+<tr><th>维度</th><th>Outlines</th><th>SGLang</th></tr>
+<tr><td>定位</td><td>约束解码库 (可插拔)</td><td>推理引擎 + 约束解码 (一体化)</td></tr>
+<tr><td>集成方式</td><td>作为 vLLM 的插件</td><td>原生内置</td></tr>
+<tr><td>FSM 编译</td><td>运行时编译</td><td>预编译 + 缓存</td></tr>
+<tr><td>KV Cache</td><td>不感知</td><td>深度集成 (RadixAttention)</td></tr>
+<tr><td>适用场景</td><td>快速原型、多引擎兼容</td><td>生产环境、高吞吐</td></tr>
+</table>
+
+<!-- ==================== 2. Compressed FSM ==================== -->
+<h2>2. Compressed FSM</h2>
+<h3>2.1 普通 FSM 的问题</h3>
+<div class="ascii">普通 FSM 的冗余:
+
+  生成 {"name": "Alice", "age": 25}
+
+  普通 FSM: 每个字符一个状态
+  s0 --'{'→ s1 --'"'→ s2 --'n'→ s3 --'a'→ s4
+  s4 --'m'→ s5 --'e'→ s6 --'"'→ s7 --':'→ s8
+  s8 --'"'→ s9 --'A'→ s9 --'l'→ s9 --'i'→ s9 ...
+
+  问题: s2→s3→s4→s5→s6 是一条「确定性路径」
+        只有一种合法的 next token ("name")
+        但普通 FSM 还是每步都要查询</div>
+
+<p>普通 FSM 的核心问题是：JSON 格式中大量的字符是<strong>结构性字符</strong>（引号、冒号、花括号、逗号），这些字符在给定上下文中是<strong>唯一确定的</strong>。但普通 FSM 并不利用这一特性，仍然在每个 token 生成后进行状态查询，浪费了大量计算资源。</p>
+
+<h3>2.2 压缩策略</h3>
+<div class="ascii">Compressed FSM: 合并非分支路径
+
+  s0 --'{'→ s1
+  s1 --'"name"':→ s7  (7 个字符合并为 1 条边!)
+  s7 --'"'→ s9
+  s9 --"Alice"→ s10  (5 个字符合并!)
+  s10 --'",'→ s12
+  s12 --'"age"':→ s17
+  s17 --25→ s20
+  s20 --'}'→ 终态
+
+  状态数: 10 (vs 普通 FSM 的 ~25)
+  查询次数: 大幅减少
+
+  压缩原理:
+  ┌────────────────────────────────────────────────────┐
+  │ 普通FSM路径:  s --"→ s --n→ s --a→ s --m→ s --e→ s│
+  │ 压缩后路径:   s --"name"→ s                        │
+  │                                                    │
+  │ 条件: 这段路径上每个节点都只有1个出边               │
+  │       即「确定性路径」→ 可以安全合并                │
+  └────────────────────────────────────────────────────┘</div>
+
+<h3>2.3 压缩算法</h3>
+<pre><code># Compressed FSM 构建算法
+def compress_fsm(fsm):
+    """合并非分支的连续路径"""
+    compressed = {}
+
+    for state in fsm.states:
+        # 检查是否为「确定性路径」
+        # 即只有一个合法的 next transition
+        if len(state.transitions) == 1:
+            char, next_state = list(state.transitions.items())[0]
+            # 沿着确定性路径一直走
+            path = [char]
+            current = next_state
+            while len(current.transitions) == 1:
+                char, current = list(current.transitions.items())[0]
+                path.append(char)
+            # 合并为一条边
+            compressed[state] = {''.join(path): current}
+        else:
+            # 分支点，保持不变
+            compressed[state] = state.transitions
+
+    return compressed</code></pre>
+
+<h3>2.4 压缩率分析</h3>
+<p>Compressed FSM 的压缩率取决于 JSON 结构的"确定性比例"。对于典型的 API 响应 JSON：</p>
+<table>
+<tr><th>JSON 类型</th><th>原始状态数</th><th>压缩后状态数</th><th>压缩率</th><th>加速比</th></tr>
+<tr><td>简单对象 (2-3字段)</td><td>~25</td><td>~8</td><td>68%</td><td>3x</td></tr>
+<tr><td>数组 [obj, obj, ...]</td><td>~60</td><td>~15</td><td>75%</td><td>4x</td></tr>
+<tr><td>深层嵌套 (4层)</td><td>~200</td><td>~80</td><td>60%</td><td>2.5x</td></tr>
+<tr><td>纯值对象 {"a":1,"b":2}</td><td>~30</td><td>~6</td><td>80%</td><td>5x</td></tr>
+</table>
+
+<div class="tip"><strong>通俗类比：</strong>SGLang 的 Compressed FSM 就像"高速公路 ETC 车道"——普通车道（逐字符检查）每辆车都要停下来验证身份，ETC 车道（Compressed FSM）提前缓存了车辆信息，通过时只需扫一下瞬间放行。JSON 中的结构性字符（引号、冒号、花括号）就像"已知车牌"，可以直接跳过验证；只有"值"部分（如用户名、年龄）才是真正需要模型决策的。</div>
+
+<!-- ==================== 3. Jump-forward Decoding ==================== -->
+<h2>3. Jump-forward Decoding</h2>
+<p>Compressed FSM 的最大优势：对于<strong>确定性路径</strong>，直接<strong>跳过解码</strong>，用 prefill 填充。</p>
+
+<h3>3.1 工作原理</h3>
+<div class="ascii">Jump-forward Decoding 详细流程:
+
+  输入: JSON Schema + 用户 prompt
+  当前状态: s0 (开始)
+
+  Step 1: 正常解码 (分支点)
+    LLM forward → 输出 '{' (分支点，必须解码)
+    FSM: s0 → s1
+
+  Step 2: Jump-forward (确定性路径)
+    FSM 分析: s1 → '"name":' → s7 是确定性路径
+    直接 prefill '"name":' (不经过 LLM decode!)
+    FSM: s1 → s7
+    节省: 7 次 LLM forward
+
+  Step 3: 正常解码 (分支点)
+    LLM forward → 输出 'Alice' (值部分，必须解码)
+    FSM: s9 → s10
+
+  Step 4: Jump-forward (确定性路径)
+    FSM: s10 → '",' → '"age":' 是确定性路径
+    直接 prefill '","age":'
+    FSM: s10 → s17
+    节省: 6 次 LLM forward
+
+  Step 5: 正常解码 (分支点)
+    LLM forward → 输出 '25' (值部分，必须解码)
+    FSM: s18 → s20
+
+  Step 6: Jump-forward (确定性路径)
+    FSM: s20 → '}' 是确定性路径
+    直接 prefill '}'
+    FSM: s20 → 终态
+
+  总结: 只需 3 次 LLM forward (vs 普通 ~20 次)
+  加速: ~6.7x</div>
+
+<h3>3.2 为什么 Jump-forward 不影响生成质量？</h3>
+<p>一个关键问题是：跳过 LLM decode 直接 prefill 确定性 token，会不会影响后续生成的质量？答案是<strong>不会</strong>，原因如下：</p>
+<p>1) 确定性 token 的值在给定 Schema 下是<strong>唯一合法的</strong>，模型不可能生成其他值。因此直接填充等价于模型"必然"会生成的 token。</p>
+<p>2) Prefill 操作会正确更新 KV Cache，后续的 LLM forward 可以看到完整的上下文。</p>
+<p>3) 确定性 token 不携带语义信息（它们只是 JSON 结构），跳过解码不会丢失任何语义。</p>
+
+<h3>3.3 Re-tokenization 机制</h3>
+<pre><code># 问题: Jump-forward 生成的文本需要重新 tokenize
+# 但 tokenizer 可能产生不同的分割
+
+text = ',"name":'
+# 可能的 tokenization:
+tokenization_1: [',"', 'name', '":']  # 3 tokens
+tokenization_2: [',', '"name', '":']  # 3 tokens (不同!)
+tokenization_3: [',"name":']          # 1 token (合并!)
+
+# SGLang 的解决方案:
+# 1. 预计算所有可能的 tokenization
+# 2. 选择与 FSM 状态兼容的分割
+# 3. 如果不兼容，回退到普通解码
+
+# 关键 insight: 确定性路径上的文本长度通常较短(5-20字符)
+# re-tokenization 的开销远小于跳过的 LLM forward 开销
+# 实测: 额外开销约 4%, 但节省了 60-80% 的 forward 次数</code></pre>
+
+<h3>3.4 Jump-forward 的适用条件</h3>
+<div class="ascii">Jump-forward 可用性判断:
+
+  当前FSM状态 s:
+    │
+    ├── 出边数 = 1 (确定性路径) → 可以 Jump-forward
+    │    │
+    │    └── 合并后的文本长度 > 1 token?
+    │         ├── 是 → Jump-forward + Prefill
+    │         └── 否 → 正常解码 (不值得优化)
+    │
+    ├── 出边数 > 1 (分支点) → 必须解码
+    │    │
+    │    └── 典型场景:
+    │         ├── JSON 值位置 (string/number/boolean/null)
+    │         ├── 数组元素分隔 (逗号或右方括号)
+    │         └── 对象结束 (逗号或右花括号)
+    │
+    └── 出边数 = 0 (终态) → 生成完成
+
+  统计: 典型JSON中 ~60-80% 的token是确定性的
+        → Jump-forward 可以跳过这些token的解码</div>
+
+<!-- ==================== 4. 性能对比 ==================== -->
+<h2>4. 性能对比</h2>
+<h3>4.1 基准测试结果</h3>
+<table>
+<tr><th>方案</th><th>延迟</th><th>吞吐</th><th>JSON 场景</th><th>内存开销</th></tr>
+<tr><td>无约束</td><td>基准</td><td>基准</td><td>输出可能无效</td><td>无</td></tr>
+<tr><td>Outlines + vLLM</td><td>+15%</td><td>1x</td><td>100% 有效</td><td>低</td></tr>
+<tr><td>SGLang Compressed FSM</td><td>+5%</td><td>2.5x</td><td>100% 有效</td><td>低</td></tr>
+<tr><td>SGLang + XGrammar</td><td>+2%</td><td>~10x</td><td>100% 有效</td><td>极低</td></tr>
+</table>
+
+<h3>4.2 不同 JSON Schema 复杂度下的性能</h3>
+<table>
+<tr><th>Schema 复杂度</th><th>描述</th><th>Compressed FSM 加速</th><th>XGrammar 加速</th></tr>
+<tr><td>简单</td><td>{"name":"str","age":"int"}</td><td>5x</td><td>12x</td></tr>
+<tr><td>中等</td><td>3层嵌套, 10个字段</td><td>3x</td><td>8x</td></tr>
+<tr><td>复杂</td><td>6层嵌套, 数组+对象混合</td><td>2x</td><td>5x</td></tr>
+<tr><td>极端</td><td>10层嵌套, 递归类型</td><td>1.3x</td><td>3x</td></tr>
+</table>
+
+<div class="ascii">性能 vs Schema 复杂度趋势:
+
+  加速比
+    ↑
+  12x│  ★ XGrammar (简单)
+    │
+  10x│
+    │
+   8x│       ★ XGrammar (中等)
+   5x│  ● Compressed(FSM)   ★ XGrammar (复杂)
+   3x│       ● Compressed(FSM)   ★ XGrammar (极端)
+   2x│              ● Compressed(FSM)
+   1x│─────────────────────────────────────→
+    │  简单    中等    复杂    极端    Schema复杂度
+
+  结论: 复杂度越高，加速效果越弱
+        XGrammar 始终优于 Compressed FSM</div>
+
+<!-- ==================== 5. XGrammar 集成 ==================== -->
+<h2>5. XGrammar 集成 (SGLang v0.4+)</h2>
+<p>XGrammar 是 CMU 开发的高效 CFG 约束解码库，SGLang 从 v0.4 开始将其作为默认的 grammar 后端。XGrammar 的核心创新是 <strong>Context-Independent Grammar Splitting</strong>——将 CFG 分解为与上下文无关的部分和与上下文相关的部分，前者可以预计算并缓存。</p>
+
+<pre><code># 启动 SGLang 服务时指定 XGrammar 后端
+python -m sglang.launch_server \
+    --model meta-llama/Llama-3-8B-Instruct \
+    --grammar-backend xgrammar
+
+# 在 SGLang 程序中使用 JSON schema
+import sglang as sgl
+
+@sgl.function
+def extract_person(s, text):
+    s += sgl.system("Extract person info as JSON.")
+    s += sgl.user(text)
+    s += sgl.assistant(
+        sgl.gen("result", json_schema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"}
+            }
+        })
+    )
+
+# 运行
+state = extract_person.run(text="John is 25 years old")
+print(state["result"])  # {"name": "John", "age": 25}</code></pre>
+
+<h3>5.1 XGrammar 的技术原理</h3>
+<div class="ascii">XGrammar 的 Context-Independent Grammar Splitting:
+
+  传统 CFG 约束解码:
+    每次生成 token 时都要遍历整个 CFG → O(|G|) 每步
+
+  XGrammar 优化:
+    将 CFG 分解为:
+    ┌─────────────────────────────────────────────────┐
+    │  Context-Independent 部分 (预计算)               │
+    │  → 与当前生成位置无关的规则                      │
+    │  → 编译时一次性计算，运行时直接查表              │
+    │  → 覆盖 ~80% 的规则                             │
+    ├─────────────────────────────────────────────────┤
+    │  Context-Dependent 部分 (运行时计算)             │
+    │  → 需要知道当前上下文才能确定的规则              │
+    │  → 如: 数组元素类型取决于数组定义                │
+    │  → 只需处理 ~20% 的规则                         │
+    └─────────────────────────────────────────────────┘
+
+  结果: 每步约束计算从 O(|G|) 降到 O(1)
+        → 解码速度提升 10-80x</div>
+
+<h3>5.2 XGrammar vs Compressed FSM</h3>
+<table>
+<tr><th>维度</th><th>Compressed FSM</th><th>XGrammar</th></tr>
+<tr><td>支持的文法</td><td>正则 + JSON Schema</td><td>完整 CFG (EBNF)</td></tr>
+<tr><td>优化策略</td><td>合并确定性路径</td><td>上下文无关分解 + 预计算</td></tr>
+<tr><td>编译开销</td><td>中等</td><td>低 (大部分预计算)</td></tr>
+<tr><td>运行时开销</td><td>低</td><td>极低</td></tr>
+<tr><td>内存占用</td><td>中等</td><td>低 (预计算表紧凑)</td></tr>
+<tr><td>复杂文法支持</td><td>有限 (深层嵌套性能下降)</td><td>优秀 (CFG 天然支持)</td></tr>
+</table>
+
+<div class="warn"><strong>常见误区：</strong>1) 以为 SGLang 只做推理——它同时是推理引擎和约束解码库，可以替代 vLLM+Outlines 的组合；2) 忽略 Compressed FSM 的适用场景——对简单 JSON 加速明显，对深层嵌套效果有限，此时 XGrammar 更优；3) 混淆 SGLang 和 Outlines 的定位——Outlines 是通用约束解码库（引擎无关），SGLang 是推理引擎内置约束解码（SGLang 专属）；4) 以为 XGrammar 完全替代了 Compressed FSM——两者是互补关系，SGLang 会根据 Schema 类型自动选择最优策略。</div>
+
+<!-- ==================== 6. SGLang vs Outlines 深度对比 ==================== -->
+<h2>6. SGLang vs Outlines 深度对比</h2>
+<table>
+<tr><th>维度</th><th>Outlines</th><th>SGLang</th></tr>
+<tr><td>FSM 类型</td><td>标准 FSM</td><td>Compressed FSM + XGrammar</td></tr>
+<tr><td>解码策略</td><td>逐 token 解码</td><td>Jump-forward + 解码</td></tr>
+<tr><td>CFG 支持</td><td>有限</td><td>XGrammar (完整 CFG)</td></tr>
+<tr><td>KV Cache 复用</td><td>不支持</td><td>RadixAttention 集成</td></tr>
+<tr><td>引擎无关</td><td>✅ (vLLM, HF, ...)</td><td>❌ (SGLang 专属)</td></tr>
+<tr><td>生产性能</td><td>中等</td><td>快 2-10x</td></tr>
+<tr><td>易用性</td><td>⭐⭐⭐⭐⭐</td><td>⭐⭐⭐</td></tr>
+<tr><td>社区生态</td><td>成熟</td><td>快速成长</td></tr>
+<tr><td>文档质量</td><td>优秀</td><td>中等</td></tr>
+</table>
+
+<h3>6.1 如何选择？</h3>
+<div class="ascii">选型决策流程:
+
+  你的场景是?
+    │
+    ├── 快速原型/实验
+    │    └── → Outlines (Python原生, 易上手)
+    │
+    ├── 生产环境 + 已有 vLLM
+    │    └── → vLLM + Outlines (成熟稳定)
+    │
+    ├── 生产环境 + 新部署
+    │    │
+    │    ├── 吞吐要求高?
+    │    │    └── → SGLang + XGrammar (最快)
+    │    │
+    │    └── 吞吐要求一般?
+    │         └── → vLLM + Outlines (更灵活)
+    │
+    ├── 需要复杂 CFG (SQL/代码)?
+    │    └── → SGLang + XGrammar (完整 CFG 支持)
+    │
+    └── 需要多模型统一方案?
+         └── → Outlines (引擎无关)</div>
+
+<!-- ==================== 7. RadixAttention 集成 ==================== -->
+<h2>7. RadixAttention 与 KV Cache 优化</h2>
+<p>SGLang 的另一个核心创新是 RadixAttention——一种基于 Radix Tree 的 KV Cache 管理策略。与 Compressed FSM/Jump-forward 结合后，产生了<strong>双重加速效果</strong>。</p>
+
+<div class="ascii">RadixAttention + Jump-forward 的协同效应:
+
+  请求1: {"name": "Alice", "age": 25}
+  请求2: {"name": "Bob",   "age": 30}
+
+  普通推理:
+    请求1: [prefill] → [decode {"name": "Alice", "age": 25}]
+    请求2: [prefill] → [decode {"name": "Bob",   "age": 30}]
+    → 两次都要完整解码
+
+  SGLang (RadixAttention + Jump-forward):
+    请求1: [prefill] → [decode '{'] → [jump '"name":'] → [decode 'Alice']
+           → [jump '","age":'] → [decode 25] → [jump '}']
+           KV Cache 缓存: [prefill] + 结构部分
+
+    请求2: [prefill] (复用!) → [decode '{'] → [jump '"name":'] → [decode 'Bob']
+           → [jump '","age":'] → [decode 30] → [jump '}']
+           KV Cache 复用: [prefill] + 结构部分的 KV
+
+  效果:
+    - Prefill 部分: RadixAttention 命中缓存 → 0 开销
+    - 结构部分: Jump-forward 直接填充 → 0 解码开销
+    - 只有 "值" 部分需要实际解码
+    - 批量请求场景下吞吐提升 5-10x</div>
+
+<h3>7.1 RadixAttention 的工作原理</h3>
+<p>RadixAttention 将 KV Cache 组织成一棵 Radix Tree（基数树），其中每个节点代表一段 token 序列的 KV 向量。当新请求到达时，引擎会在 Radix Tree 中查找最长的前缀匹配，复用已有的 KV Cache。对于结构化输出场景，不同请求的 JSON 结构部分（键名、括号等）通常是相同的，因此 KV Cache 命中率很高。</p>
+
+<div class="tip"><strong>关键洞察：</strong>SGLang 的优势不仅在于 Compressed FSM 本身，更在于它与 RadixAttention 的集成——jump-forward 生成的确定性 token 的 KV Cache 可以被缓存和复用，进一步提升了多请求场景的性能。这种"约束解码 + 缓存优化"的组合是 SGLang 独有的优势，Outlines 作为外部库无法获得这种深度集成。</div>
+
+<!-- ==================== 8. 实战指南 ==================== -->
+<h2>8. 实战部署指南</h2>
+<h3>8.1 SGLang 服务部署</h3>
+<pre><code># 1. 安装 SGLang
+pip install sglang[all]
+
+# 2. 启动服务 (带 XGrammar 后端)
+python -m sglang.launch_server \
+    --model-path meta-llama/Llama-3-8B-Instruct \
+    --grammar-backend xgrammar \
+    --port 30000 \
+    --tp 1  # tensor parallel size
+
+# 3. 通过 OpenAI 兼容 API 使用
+curl http://localhost:30000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "meta-llama/Llama-3-8B-Instruct",
+    "messages": [{"role": "user", "content": "Extract info from: John is 25"}],
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "person",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"}
+          },
+          "required": ["name", "age"]
+        }
+      }
+    }
+  }'</code></pre>
+
+<h3>8.2 SGLang 约束解码性能调优</h3>
+<table>
+<tr><th>调优项</th><th>参数</th><th>建议值</th><th>影响</th></tr>
+<tr><td>Grammar 后端</td><td><code>--grammar-backend</code></td><td><code>xgrammar</code></td><td>吞吐提升 3-10x</td></tr>
+<tr><td>KV Cache 大小</td><td><code>--mem-fraction-static</code></td><td>0.85-0.90</td><td>更大缓存 = 更高命中率</td></tr>
+<tr><td>批处理大小</td><td><code>--max-running-requests</code></td><td>根据 GPU 内存</td><td>更大批次 = 更高吞吐</td></tr>
+<tr><td>Prefill 批大小</td><td><code>--chunked-prefill-size</code></td><td>4096-8192</td><td>平衡延迟和吞吐</td></tr>
+</table>
+
+<div class="deep"><strong>深入探讨：</strong>SGLang 的 Compressed FSM 核心思想可以推广到更一般的场景：任何"结构化文本生成"都可以利用确定性路径优化。JSON 只是一个特例——SQL 语句的 <code>SELECT ... FROM ... WHERE</code> 结构、HTML 的标签结构、Markdown 的格式标记，都包含大量确定性部分。理论上，Compressed FSM 可以将这些场景的解码速度提升 2-5 倍。XGrammar 进一步将这一思想扩展到完整的 CFG，支持任意上下文无关文法的约束解码。在 SGLang v0.4+ 中，XGrammar 已成为默认的 grammar 后端，Compressed FSM 作为 JSON Schema 的特化优化继续保留。两者协同工作：XGrammar 处理通用 CFG，Compressed FSM 处理 JSON Schema 的快速路径。这种分层优化策略使得 SGLang 在各种约束解码场景下都能获得最优性能。根据 LMSYS 的官方基准测试，SGLang + XGrammar 的组合在 Llama-3-8B 上可以实现每秒 10000+ token 的结构化输出吞吐量，比无约束解码仅慢 2%。</div>
+
+<!-- ==================== 9. 练习 ==================== -->
+<h2>9. 练习与思考</h2>
+
+<div class="tip"><strong>向前串联：</strong>
+SGLang 的约束解码方案的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
+建议结合实际框架动手验证本章所学内容。
+</div>
+<div class="exercise">
+<p><strong>🧪 练习 1</strong>：对比 SGLang 和 Outlines 在同一个 JSON Schema 下的解码速度（需要 GPU 环境）。设计一个包含简单、中等、复杂三种 Schema 的测试集，记录两者的延迟和吞吐量。</p>
+</div>
+
+<div class="exercise">
+<p><strong>🧪 练习 2</strong>：分析 Compressed FSM 在什么情况下加速效果最好（简单 JSON vs 复杂嵌套 JSON）。用纸笔画出一个深层嵌套 JSON 的 FSM，手动标注哪些路径可以压缩，计算压缩率。</p>
+</div>
+
+<div class="exercise">
+<p><strong>🧪 练习 3</strong>：阅读 XGrammar 论文（<a href="https://arxiv.org/abs/2411.15100">arXiv:2411.15100</a>），画出 Context-Independent Grammar Splitting 的流程图，解释为什么预计算可以覆盖 ~80% 的规则。</p>
+</div>
+
+<!-- ==================== 交叉引用 ==================== -->
+<h2>10. 相关模块链接</h2>
+<table>
+<tr><th>模块</th><th>关联内容</th><th>说明</th></tr>
+<tr><td><a href="01-结构化输出总览.html">01 基础概念</a></td><td>JSON Schema 基础</td><td>理解约束来源</td></tr>
+<tr><td><a href="02-约束解码原理.html">02 约束解码原理</a></td><td>FSM/CFG 理论基础</td><td>前置必读</td></tr>
+<tr><td><a href="03-Outlines框架详解.html">03 Outlines</a></td><td>标准 FSM 实现</td><td>对比基准</td></tr>
+<tr><td><a href="05-Function-Calling格式.html">05 Function Calling</a></td><td>工具调用场景</td><td>SGLang 可加速 FC</td></tr>
+<tr><td><a href="06-结构化输出挑战与前沿.html">06 挑战与前沿</a></td><td>技术选型决策</td><td>选型参考</td></tr>
+</table>
+
+<!-- ==================== 学习路径 ==================== -->
+<h2>11. 学习路径建议</h2>
+<div class="ascii">SGLang 结构化输出学习路径:
+
+  前置知识 (1-2天)
+    ├── 01 基础概念: 理解 JSON Schema
+    ├── 02 约束解码原理: 理解 FSM/CFG
+    └── 03 Outlines: 理解标准 FSM 实现
+
+  本模块学习 (2-3天)
+    ├── 理解 Compressed FSM 的压缩策略
+    ├── 理解 Jump-forward Decoding 的工作原理
+    ├── 动手部署 SGLang 服务
+    └── 对比 SGLang vs Outlines 性能
+
+  进阶实践 (1周)
+    ├── 阅读 SGLang 源码中的约束解码实现
+    ├── 阅读 XGrammar 论文
+    ├── 用 SGLang 构建生产级结构化输出服务
+    └── 性能调优: KV Cache、批处理、Grammar 后端
+
+  持续跟踪
+    ├── SGLang GitHub: github.com/sgl-project/sglang
+    ├── XGrammar GitHub: github.com/mlc-ai/xgrammar
+    └── LMSYS Blog: lmsys.org/blog</div>
+
+<div class="next-prev"><a href="03-Outlines框架详解.html">&larr; 上一模块</a><a href="05-Function-Calling格式.html">下一模块：Function Calling &rarr;</a></div>
+
+<div class="tip"><strong>通俗类比：</strong>SGLang的RadixAttention就像图书馆的索引卡片系统——已经查过的书（KV Cache）不需要重新翻阅，直接通过索引（Radix Tree）定位即可，大幅减少了重复工作。</div>
+
+<div class="warn"><strong>常见误区：</strong>不要以为启用了结构化输出就一定能获得高质量结果。约束解码只保证格式正确，不保证内容质量。如果Prompt设计不当，模型可能生成格式完美但内容空洞的JSON。</div>
+
+<div class="deep"><strong>深入探讨：</strong>SGLang的Jump-forward解码在正则表达式确定性路径上可以一次生成多个token，理论加速比取决于正则的确定性比例。对于JSON Schema中的固定字段名（如"type"、"name"），加速比可达5-10x，而变量字段部分则退化为逐token生成。</div>
+</div>
+<div class="footer"><p><a href="index.html">返回总览</a></p></div>
+</body>
+</html>

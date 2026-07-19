@@ -1,0 +1,363 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>树状验证</title><style>
+  :root { --bg: #0d1117; --surface: #161b22; --border: #30363d; --text: #e6edf3; --text-dim: #8b949e; --accent: #58a6ff; --green: #3fb950; --orange: #d29922; --red: #f85149; --purple: #bc8cff; --pink: #f778ba; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+  .container { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem; }
+  .nav { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0.8rem 1.5rem; position: sticky; top: 0; z-index: 100; display: flex; justify-content: space-between; align-items: center; font-size: 0.9rem; }
+  .nav a { color: var(--accent); text-decoration: none; } .nav a:hover { text-decoration: underline; } .nav .title { color: var(--text-dim); }
+  h1 { font-size: 1.8rem; color: var(--accent); margin: 1.5rem 0 1rem; }
+  h2 { font-size: 1.3rem; color: var(--text); margin: 2rem 0 0.8rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.1rem; color: var(--green); margin: 1.2rem 0 0.5rem; }
+  p { margin: 0.5rem 0; font-size: 0.95rem; }
+  ul, ol { padding-left: 1.5rem; margin: 0.5rem 0; font-size: 0.95rem; } li { margin-bottom: 0.3rem; }
+  code { background: var(--surface); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; color: var(--green); }
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; overflow-x: auto; margin: 1rem 0; font-size: 0.85rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; color: var(--text); }
+  table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); } th { color: var(--accent); font-weight: 600; background: var(--surface); } tr:hover { background: rgba(88, 166, 255, 0.05); }
+  .diagram { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+  .callout { background: var(--surface); border-left: 3px solid var(--accent); padding: 1rem 1.2rem; border-radius: 0 8px 8px 0; margin: 1rem 0; font-size: 0.9rem; }
+  .callout.warn { border-left-color: var(--orange); } .callout.tip { border-left-color: var(--green); }
+  .next-prev { display: flex; justify-content: space-between; margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+  .next-prev a { color: var(--accent); text-decoration: none; font-size: 0.9rem; }
+  footer { text-align: center; margin-top: 3rem; padding: 1.5rem 0; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 0.8rem; }
+  .tip { background: var(--surface); border-left: 3px solid var(--green); padding: 0.8rem 1.2rem; border-radius: 0 8px 8px 0; margin: 0.8rem 0; font-size: 0.9rem; }
+  .warn { background: var(--surface); border-left: 3px solid var(--orange); padding: 0.8rem 1.2rem; border-radius: 0 8px 8px 0; margin: 0.8rem 0; font-size: 0.9rem; }
+  .deep { background: var(--surface); border-left: 3px solid var(--purple); padding: 0.8rem 1.2rem; border-radius: 0 8px 8px 0; margin: 0.8rem 0; font-size: 0.9rem; }
+  .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin: 0.8rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+</style></head><body>
+<div class="nav"><a href="04-自投机解码.html">← 上一节</a><span class="title">模块 07 · 树状验证</span><span></span></div>
+<div class="container"><h1>🌳 树状验证 (Tree Verification)</h1>
+<div class="callout"><strong>本节目标：</strong>理解如何通过树状结构同时验证多条候选路径，提高投机解码效率。</div>
+
+<h2>1. 核心思想</h2>
+
+<h3>1.1 树的构建策略</h3>
+<p>候选树的构建需要平衡宽度（每层分支数）和深度（层数）。常用策略：(1) <strong>固定宽度</strong>——每个节点取 Top-K 候选，树宽为 K；(2) <strong>置信度剪枝</strong>——只保留概率高于阈值的分支，低置信度位置不分叉；(3) <strong>混合策略</strong>——早期层（预测较准）用更多分支，后期层（预测不准）减少分支。典型配置：宽度 5-10，深度 3-5，总节点数 50-200。</p>
+
+<h3>1.2 验证的并行化原理</h3>
+<p>树状验证的关键优势是所有候选 token 可以在<strong>同一个 batch</strong>中并行验证。通过构造特殊的 attention mask，确保每个 token 只能看到自己的祖先节点。这样，一次前向传播就能验证整棵树的所有路径，而非逐条验证。验证的计算开销与树的节点数成正比，但 GPU 的并行能力使得这个开销远小于串行验证。</p>
+
+<h3>1.3 回溯与路径选择</h3>
+<p>验证完成后，需要从所有路径中选择<strong>最长的匹配前缀</strong>。具体做法：从根节点开始，沿每条路径检查每个 token 是否被主模型接受（即主模型在该位置预测的 token 与候选一致）。选择接受长度最长的路径，如果有多个相同长度的路径，选择概率最高的。被拒绝位置之后的 token 全部丢弃，从拒绝位置重新生成。</p>
+
+<div class="deep">
+<strong>🔬 深入：树状验证的最优性证明</strong><br>
+在给定验证预算 B（总候选 token 数）下，树结构最大化"接受长度 ≥ L"的概率。设单 token 接受率为 p，线性验证接受长度 ≥ L 的概率为 p^L。树状验证（每个节点 b 个分支，深度 d）的概率为 1 - (1-p^d)^b。当 b = B/d 时，优化 d 使概率最大。对 p=0.7, B=20 的情况，最优配置约为 b=5, d=4，此时接受长度 ≥ 4 的概率为 76%，而线性验证仅为 24%。这就是为什么树状验证能获得 2-3x 的额外加速。
+</div>
+
+<p>不只验证一条线性候选，而是验证<strong>一棵树</strong>的多条路径：</p>
+
+<div class="tip"><strong>通俗类比：</strong>线性验证就像走迷宫时只带一条路线——走不通就回头重来。树状验证则像同时派出多个探险队走不同路线——一次就能找到最远的可行路线。虽然派探险队有成本（验证更多 token），但"多条路总有一条能走通"的概率远高于"一条路走通"。</div>
+<div class="warn"><strong>常见误区：</strong>很多人以为树状验证是把所有候选 token 随机组合成树。实际上，树的构建需要遵循两个约束：(1) 每个分支点的候选 token 来自同一个预测位置的不同 top-k 候选；(2) 树的宽度和深度需要根据 GPU 内存和计算能力平衡——太宽会导致验证开销过大，太深会降低命中率。典型的配置是宽度 5、深度 3-5。</div>
+<div class="deep"><strong>深入探讨：</strong>树状验证的数学最优性来自于：在给定验证预算（一次前向传播能验证的 token 数量）下，树结构能最大化"至少找到一条长路径"的概率。假设每个 token 的接受率为 p，线性验证接受长度 L 的概率是 p^L，而树状验证（每个节点 b 个分支）接受长度 L 的概率是 1-(1-p^L)^b，当 b>1 时显著更高。此外，树状验证可以利用 attention mask 实现高效的并行验证——所有候选 token 在同一个 batch 中计算，共享 KV Cache 前缀。</div>
+<div class="ascii">线性验证:                    树状验证:
+t1 → t2 → t3 → t4          t1 ─┬→ t2a → t3a
+                               ├→ t2b → t3b
+                               └→ t2c ─┬→ t3c
+                                       └→ t3d
+
+一次验证: 4 个 token         一次验证: 7 个 token
+找到: 最长匹配路径            找到: 最长匹配路径 (可能更长)</div>
+
+<h2>2. 优势</h2>
+
+<h3>2.1 接受率的数学分析</h3>
+<p>树状验证的接受率优势来自"路径多样性"。假设每条路径的接受概率独立（实际不完全独立，但近似成立），b 条路径中至少一条接受长度 ≥ L 的概率为 1-(1-p^L)^b。当 b=5, p=0.7, L=3 时，概率为 97%，而线性验证只有 34%。这种指数级的概率提升是树状验证的核心价值。</p>
+
+<h3>2.2 计算开销的权衡</h3>
+<p>树状验证的计算开销约为线性验证的 b 倍（b 为分支数），但接受长度的提升通常超过 b 倍。最优的分支数取决于接受率 p：p 越高，最优分支数越少（因为线性验证已经够好）；p 越低，最优分支数越多（需要更多分支来补偿低接受率）。实际部署中，通常通过离线搜索找到最佳配置。</p>
+
+<h3>2.3 与 KV Cache 的交互</h3>
+<p>树状验证对 KV Cache 的管理提出了特殊挑战。验证时，所有候选 token 的 KV 需要存储；验证完成后，被拒绝路径的 KV 需要回收。vLLM 的 PagedAttention 天然支持这种"分配-回收"模式——每个 token 的 KV 存储在独立的 page 中，可以按需分配和释放。</p>
+
+<ul>
+<li>一次前向传播验证更多候选</li>
+<li>当某条路径被拒绝时，可以回溯到分支点选择其他路径</li>
+<li>接受率更高（多条路径总有一条能命中）</li>
+</ul>
+
+<div class="tip"><strong>通俗类比：</strong>树状验证的优势就像"保险策略"——你买了一份保险（多条候选路径），虽然每条路径都有失败的可能，但整体"理赔"（找到长匹配）的概率大大提高了。这就是概率论中的"并联系统可靠性"原理。</div>
+<div class="warn"><strong>常见误区：</strong>树状验证不是万能的。当候选 token 的质量很差时（比如 Medusa Head 的预测准确率很低），增加树的宽度只会增加验证开销而不会提高收益。此外，树状验证的实现复杂度远高于线性验证——需要处理复杂的 attention mask、token 映射和回溯逻辑。在 vLLM 等框架中，这些都已经封装好了，但自定义实现时需要特别注意。</div>
+<div class="deep"><strong>深入探讨：</strong>树状验证的实现关键在于 attention mask 的设计。对于一棵有 N 个节点的树，需要构造一个 N×N 的因果注意力掩码，使得每个节点只能看到自己的祖先节点（而不是其他分支的节点）。这可以通过树的拓扑排序来实现：对树做 BFS 或 DFS 排序，然后根据父子关系构造掩码。在 GPU 上，这个掩码需要预先计算并缓存，以避免每步重新构造的开销。vLLM 的实现中使用了位置映射（Position Mapping）来处理树状结构的 KV Cache 索引。</div>
+
+<div class="ascii">树状验证的 Attention Mask 构造:
+
+树结构:
+         t1 (root)
+        / | \
+      t2a t2b t2c
+      /   |    |
+    t3a  t3b  t3c t3d
+
+位置映射 (DFS 顺序):
+  t1→0, t2a→1, t3a→2, t2b→3, t3b→4, t2c→5, t3c→6, t3d→7
+
+Attention Mask (1=可见, 0=屏蔽):
+       t1 t2a t3a t2b t3b t2c t3c t3d
+  t1  [ 1  0   0   0   0   0   0   0  ]
+  t2a [ 1  1   0   0   0   0   0   0  ]
+  t3a [ 1  1   1   0   0   0   0   0  ]
+  t2b [ 1  0   0   1   0   0   0   0  ]
+  t3b [ 1  0   0   1   1   0   0   0  ]
+  t2c [ 1  0   0   0   0   1   0   0  ]
+  t3c [ 1  0   0   0   0   1   1   0  ]
+  t3d [ 1  0   0   0   0   1   0   1  ]
+
+注意: t3a 和 t3b 互不可见 (不同分支)</div>
+
+<h2>3. 实际应用</h2>
+
+<h3>3.1 EAGLE-2 的自适应树结构</h3>
+<p>EAGLE-2 是目前最先进的树状投机解码方案。它的核心创新是<strong>自适应树构建</strong>：使用一个轻量级的特征预测模型（而非简单的 Top-K）来生成候选，并根据预测置信度动态调整树的宽度。高置信度位置用更多分支，低置信度位置只保留 Top-1。这种自适应策略在多个基准上达到了 4x+ 的加速。</p>
+
+<h3>3.2 vLLM 中的树状验证实现</h3>
+<p>vLLM 通过 <code>speculative_config</code> 参数支持树状投机解码。配置项包括：<code>num_speculative_tokens</code>（树的深度）、<code>draft_model</code>（草稿模型路径）。vLLM 内部使用 <code> EagleWorker</code> 或 <code>MedusaWorker</code> 来管理树的构建、验证和 KV Cache 回收。</p>
+
+
+<h3>3.4 与 KV Cache 压缩的协同</h3>
+<p>树状验证产生的 KV Cache 可以通过 token 剪枝来压缩。被拒绝路径的 KV Cache 直接释放；被接受路径的 KV Cache 保留用于后续生成。这种"按需分配-即时回收"的模式与 PagedAttention 天然契合，使得树状验证对显存的额外开销可控。在 vLLM 中，每个树节点的 KV 存储在独立的 page 中，验证完成后未使用的 page 立即归还到空闲池。</p>
+
+<h3>3.3 树结构的离线搜索</h3>
+<p>树的最优结构（宽度、深度、分支策略）取决于任务特性和硬件条件。常用方法是离线搜索：在一组代表性 prompt 上遍历不同的树配置，选择平均加速比最高的配置。vLLM 和 EAGLE-2 都支持离线搜索功能，可以自动找到给定模型和硬件的最佳配置。</p>
+
+<div class="warn">
+<strong>⚠ 树状验证的工程陷阱：</strong>树状验证的 attention mask 构造是实现中最容易出错的部分。如果 mask 不正确（如某个节点意外地看到了其他分支的 token），会导致验证结果不准确，接受率异常高但生成质量下降。建议在实现时先用小规模的树（宽度 2、深度 2）手动验证 mask 的正确性，再扩展到大规模配置。
+</div>
+
+<ul>
+<li>EAGLE-2 使用树状验证</li>
+<li>vLLM 支持树状投机解码</li>
+<li>通常 5-10 个分支，深度 3-5 层</li>
+</ul>
+
+<div class="tip"><strong>通俗类比：</strong>在实际应用中，树状验证就像"多手准备"的策略——面试前准备 3 套方案，约会前准备 3 个餐厅选项。虽然最终只用一个，但有备无患。在 LLM 推理中，这种"有备无患"的策略能把延迟降低 2-4 倍。</div>
+<div class="warn"><strong>常见误区：</strong>树状验证的分支数和深度不是越大越好。过多的分支会增加验证的计算量（虽然是一次前向传播，但 batch size 增大了），可能导致验证时间超过收益。经验法则是：总候选 token 数不超过原始模型 batch size 的 4-8 倍。此外，不同任务的最佳树结构可能不同——代码生成任务（确定性高）可以用更深的树，而创意写作任务（随机性高）应该用更宽但更浅的树。</div>
+<div class="deep"><strong>深入探讨：</strong>树状验证的前沿研究包括：(1) 自适应树结构——根据当前 token 的置信度动态调整分支数和深度；(2) 层次化验证——先用廉价的方法（如 n-gram 匹配）过滤明显错误的路径，再用模型验证剩余路径；(3) 与 KV Cache 压缩结合——树状验证产生的 KV Cache 可以通过 token 剪枝来压缩。EAGLE-2 是目前最先进的树状投机解码方案，它使用一个轻量级的特征预测模型来构建更准确的候选树，在多个基准上达到了 4x+ 的加速。</div>
+
+<table>
+<tr><th>验证方式</th><th>候选数量</th><th>验证开销</th><th>接受率</th><th>实现复杂度</th><th>代表方案</th></tr>
+<tr><td>线性验证</td><td>K</td><td>低</td><td>中</td><td>低</td><td>标准投机解码</td></tr>
+<tr><td>树状验证</td><td>K×B^D</td><td>中</td><td>高</td><td>高</td><td>EAGLE-2, Medusa</td></tr>
+<tr><td>自适应树</td><td>动态</td><td>中</td><td>最高</td><td>很高</td><td>SpecInfer</td></tr>
+</table>
+<p><em>K=每层候选数, B=分支因子, D=深度</em></p>
+
+<table>
+<tr><th>树配置 (宽度×深度)</th><th>总节点数</th><th>验证开销</th><th>平均接受长度</th><th>加速比</th></tr>
+<tr><td>3×2 (简单)</td><td>7</td><td>低</td><td>3.2</td><td>2.1x</td></tr>
+<tr><td>5×3 (标准)</td><td>15</td><td>中</td><td>4.5</td><td>2.8x</td></tr>
+<tr><td>5×4 (深度)</td><td>31</td><td>中高</td><td>5.8</td><td>3.2x</td></tr>
+<tr><td>10×3 (宽)</td><td>31</td><td>中高</td><td>5.1</td><td>3.0x</td></tr>
+<tr><td>10×5 (最优)</td><td>~200</td><td>高</td><td>7.2</td><td>3.8x</td></tr>
+<tr><td>自适应 (EAGLE-2)</td><td>50-100</td><td>中</td><td>6.5</td><td>4.2x</td></tr>
+</table>
+<p><em>基于 LLaMA-3-8B, 单 token 接受率 p=0.7, Top-5 候选</em></p>
+
+<table>
+<tr><th>任务类型</th><th>单 token 接受率</th><th>最优树宽度</th><th>最优树深度</th><th>树状加速比</th></tr>
+<tr><td>代码生成</td><td>~0.85</td><td>3</td><td>5</td><td>4.5x</td></tr>
+<tr><td>文本翻译</td><td>~0.75</td><td>5</td><td>4</td><td>3.2x</td></tr>
+<tr><td>摘要生成</td><td>~0.70</td><td>5</td><td>3</td><td>2.8x</td></tr>
+<tr><td>创意写作</td><td>~0.50</td><td>8</td><td>3</td><td>1.8x</td></tr>
+<tr><td>数学推理</td><td>~0.60</td><td>5</td><td>4</td><td>2.2x</td></tr>
+</table>
+<p><em>不同任务的最佳树结构差异显著——确定性高的任务适合更深的树，随机性高的任务需要更宽但更浅的树</em></p>
+
+
+
+<div class="ascii">树状验证 vs 线性验证 加速比对比 (理论):
+
+假设每个 token 接受率 p=0.7:
+
+线性验证 (4 token):
+  接受全部: 0.7^4 = 24%
+  平均接受: ~2.8 token
+  加速比: ~1.8x
+
+树状验证 (宽度3, 深度3, 共13 token):
+  接受长度≥1: 1-(1-0.7)^3 = 97%
+  接受长度≥2: 1-(1-0.7^2)^3 = 78%
+  接受长度≥3: 1-(1-0.7^3)^3 = 52%
+  平均接受: ~4.5 token
+  加速比: ~2.8x
+
+结论: 树状验证在相同验证预算下获得更高接受率</div>
+
+
+<pre><code># 树状验证的 Attention Mask 构造实现
+import torch
+
+def build_tree_attention_mask(tree_structure):
+    """构造树状验证的因果注意力掩码
+    tree_structure: 嵌套列表表示树结构
+        例如: ["t1", ["t2a", ["t3a"]], ["t2b", ["t3b"]], ["t2c", ["t3c", "t3d"]]]
+    返回: [N, N] 的 attention mask (1=可见, 0=屏蔽)
+    """
+    # 1. DFS 遍历树，分配位置索引
+    nodes = []
+    parent_map = {}
+
+    def dfs(node, parent_idx=None):
+        idx = len(nodes)
+        nodes.append(node if isinstance(node, str) else node[0])
+        if parent_idx is not None:
+            parent_map[idx] = parent_idx
+        if isinstance(node, list):
+            for child in node[1:]:
+                dfs(child, idx)
+
+    for root in tree_structure:
+        dfs(root)
+
+    n = len(nodes)
+    mask = torch.zeros(n, n, dtype=torch.float32)
+
+    # 2. 构造掩码：每个节点可见自己和所有祖先
+    for i in range(n):
+        j = i
+        while j is not None:
+            mask[i, j] = 1.0  # 可见
+            j = parent_map.get(j, None)
+
+    return mask, nodes
+
+# 示例
+tree = ["t1", ["t2a", ["t3a"]], ["t2b", ["t3b"]], ["t2c", ["t3c", "t3d"]]]
+mask, nodes = build_tree_attention_mask([tree])
+print(f"节点: {nodes}")
+print(f"掩码:\n{mask.int()}")
+</code></pre>
+
+<pre><code># 树状验证的完整推理流程
+import torch
+
+def tree_verify(model, draft_tree, input_ids):
+    """树状验证推理
+    model: 主模型
+    draft_tree: 草稿模型生成的候选树 [(token_id, children), ...]
+    input_ids: 当前已生成的 token 序列
+    """
+    # 1. 构建候选树的 attention mask
+    mask, tokens = build_tree_attention_mask([draft_tree])
+
+    # 2. 构造输入：将所有候选 token 拼接为一个 batch
+    # 每个候选 token 的输入 = input_ids + 从根到该节点的路径
+    all_paths = get_all_paths(draft_tree)
+
+    # 3. 一次前向传播验证所有路径
+    # 使用特殊的 attention mask 确保每个 token 只看到祖先
+    with torch.no_grad():
+        # 构造 batch 输入
+        batch_input = construct_batch(input_ids, all_paths)
+        # 使用自定义 attention mask
+        outputs = model(
+            batch_input,
+            attention_mask=expand_mask(mask, batch_input),
+        )
+
+    # 4. 检查哪些路径被接受
+    accepted_path = []
+    for path in all_paths:
+        path_accepted = True
+        for i, token in enumerate(path):
+            # 检查主模型在该位置的预测是否匹配
+            logits = outputs.logits[path_positions[i]]
+            predicted = torch.argmax(logits, dim=-1)
+            if predicted != token:
+                path_accepted = False
+                break
+        if path_accepted and len(path) > len(accepted_path):
+            accepted_path = path
+
+    # 5. 返回接受的 token 序列
+    return accepted_path
+</code></pre>
+
+<pre><code># vLLM 树状投机解码配置示例
+from vllm import LLM, SamplingParams
+
+# 使用 Medusa 进行树状投机解码
+llm = LLM(
+    model="meta-llama/Llama-3-8B-Instruct",
+    speculative_config={
+        "model": "abhigoyal/llama-3-8b-instruct-medusa-4-heads",
+        "num_speculative_tokens": 4,   # 树的深度
+        # 树的结构由 Medusa Head 自动生成
+    },
+    max_model_len=4096,
+)
+
+# 使用 EAGLE 进行树状投机解码（更快）
+llm_eagle = LLM(
+    model="meta-llama/Llama-3-8B-Instruct",
+    speculative_config={
+        "model": "yuhuili/EAGLE-LLaMA3-Instruct-8B",
+        "num_speculative_tokens": 5,
+        # EAGLE 使用自适应树结构
+    },
+)
+
+# 推理对比
+prompt = "Explain the theory of relativity in simple terms."
+params = SamplingParams(temperature=0, max_tokens=200)
+
+import time
+start = time.perf_counter()
+output = llm.generate(prompt, params)
+medusa_time = time.perf_counter() - start
+
+start = time.perf_counter()
+output = llm_eagle.generate(prompt, params)
+eagle_time = time.perf_counter() - start
+
+print(f"Medusa: {medusa_time:.3f}s, EAGLE: {eagle_time:.3f}s")
+</code></pre>
+
+
+<h2>树状验证的数学最优性与推导</h2>
+
+<h3>树结构的最优配置推导</h3>
+<p>树状验证的<strong>数学本质</strong>是一个组合优化问题。给定验证预算B（一次前向传播能验证的总token数），需要选择树的宽度b和深度d，使得期望接受长度最大化。从<strong>推导</strong>角度<strong>证明</strong>最优配置的存在性和唯一性。</p>
+<p>设单token接受率为p（假设各位置独立），线性验证接受长度&geq;L的概率<strong>公式</strong>为：P_linear(L) = p^L。树状验证（b个分支，深度d）接受长度&geq;L的概率为：P_tree(L) = 1-(1-p^L)^b。<strong>为什么</strong>树状验证远优于线性验证？从<strong>数学本质</strong>上理解，当b&geq;2时，P_tree(L)总是&geq;P_linear(L)，且差距随L增大而指数级扩大。<strong>推导</strong>最优化：约束条件为总节点数N = (b^d-1)/(b-1) &leq; B，目标是最大化期望接受长度E[L] = Σ_{l=1}^d P_tree(l)。对p=0.7、B=20的典型情况，最优配置约为b=5、d=4，此时E[L]=4.5，而线性验证E[L]=2.8。这就是树状验证<strong>为什么</strong>能获得2-3x额外加速的<strong>底层原理</strong>。</p>
+
+<h3>注意力掩码的构造原理</h3>
+<p>树状验证的<strong>工作机制</strong>核心是构造特殊的因果注意力掩码，使得每个候选token只能看到自己的祖先路径。从<strong>底层</strong>实现看，这需要将树结构线性化为一个序列，然后构造对应的N×N掩码矩阵。</p>
+<p>设树有N个节点，使用DFS序编号，节点i的祖先集合为A(i)。注意力掩码<strong>公式</strong>为：M[i,j] = 1 if j ∈ A(i) ∪ {i}, 0 otherwise。<strong>为什么</strong>DFS序优于BFS序？从<strong>推导</strong>角度<strong>证明</strong>：DFS序下，同一子树的节点在序列中连续排列，这使得attention mask具有更好的"块稀疏"结构，有利于GPU的向量化计算。具体来说，DFS序的掩码中非零元素呈阶梯状分布，而BFS序的掩码更为分散。从<strong>底层</strong>GPU执行的角度，块稀疏结构减少了内存访问的随机性，提高了cache命中率。</p>
+
+<div class="deep"><strong>树状验证的最优性证明：</strong>
+<strong>证明</strong>在给定预算B下，树结构是最大化期望接受长度的最优策略。设我们有B个候选token的预算，采用任意分配策略s（将B个token分配到不同位置）。目标是最大化E[L_s]。<strong>推导</strong>关键引理：对于两个独立的候选序列S_1和S_2，如果它们共享前缀P，则合并后的期望接受长度E[L_{S_1∪S_2}] &geq; max(E[L_{S_1}], E[L_{S_2}])。<strong>为什么</strong>？因为合并意味着"两条路走一条就行"，概率取并集总是不小于单条路径。通过数学归纳可以<strong>证明</strong>：树结构（在分支点分叉，共享前缀）是最大化"路径并集"的最优拓扑。任何非树结构的候选集合（如DAG或独立序列）都可以转化为等价或更优的树结构。这就是<strong>数学本质</strong>上的最优性<strong>证明</strong>——树不是"一种选择"，而是"最优选择"。<strong>底层</strong>原因是树的共享前缀特性完美匹配了"至少有一条路径成功"的概率最大化目标。
+</div>
+
+<h3>树宽度与深度的权衡原理</h3>
+<p>树的宽度b和深度d之间的权衡关系是<strong>为什么</strong>树状验证需要精心调参的<strong>原理</strong>。从<strong>推导</strong>角度，固定总节点数N，增加深度d（相应减少宽度b=N/d）的效果取决于接受率p。当p较高（如0.85）时，深层树更优，因为每层大概率能通过，深度带来更长的接受序列；当p较低（如0.5）时，宽树更优，因为需要更多分支来"赌"至少一条长路径。</p>
+<p>最优深度的<strong>公式</strong>可以近似为：d* ≈ -log(B) / log(1-p)。直觉上，<strong>为什么</strong>这个<strong>公式</strong>成立？当d=d*时，最深层的单条路径接受概率p^d* ≈ 1/B，意味着在B个候选中"恰好"有约1个候选到达最深层。如果d > d*，深层候选过于稀疏，浪费了宽度预算；如果d < d*，深度不够，无法充分利用高质量的浅层预测。这个<strong>数学本质</strong>的平衡点就是d*。不同任务类型（代码vs文本）的p值不同，因此最优配置也不同——这就是<strong>为什么</strong>EAGLE-2的自适应策略如此重要。</p>
+
+<div class="exercise">
+<strong>🎯 练习 1</strong>：实现一个简单的树状验证器——给定一棵候选树（用嵌套列表表示），构造 attention mask，用 PyTorch 的 <code>torch.nn.functional.scaled_dot_product_attention</code> 验证所有路径。比较线性验证和树状验证的接受率。
+</div>
+
+<div class="exercise">
+<strong>🎯 练习 2</strong>：在 vLLM 中分别使用 Medusa 和 EAGLE 的树状投机解码，测量不同 prompt 长度（128/512/2048 token）下的加速比。哪个方案在长 prompt 上表现更好？为什么？
+</div>
+
+<div class="exercise">
+<strong>🎯 练习 3</strong>：实现一个自适应树构建算法——根据每个节点的预测置信度（softmax 概率）动态调整分支数。置信度 > 0.5 时保留 5 个分支，0.2-0.5 时保留 3 个，&lt;0.2 时只保留 1 个。与固定宽度的树对比加速比。
+</div>
+
+<div class="tip">
+<strong>💡 向前串联：</strong>树状验证是投机解码的"效率倍增器"。在本模块中，<a href="02-Medusa.html">Medusa</a> 和 <a href="03-Eagle.html">EAGLE</a> 都依赖树状验证来实现高效的多候选验证。理解树状验证后，建议学习<a href="../05-注意力优化/01-FlashAttention.html">FlashAttention</a>——树状验证的 attention mask 计算正是 FlashAttention 的典型应用场景。
+</div>
+
+<p><strong>📚 交叉引用：</strong>
+• <a href="02-Medusa.html">Medusa</a>——使用预测头生成候选树
+• <a href="03-Eagle.html">EAGLE</a>——使用特征头生成更准确的候选树
+• <a href="01-草稿模型法.html">草稿模型法</a>——投机解码的基础（线性验证）
+• <a href="../05-注意力优化/01-FlashAttention.html">FlashAttention</a>——树状验证中的注意力计算优化
+• <a href="../09-部署实战/03-vLLM部署.html">vLLM 部署</a>——树状投机解码的生产配置
+</p>
+
+<div class="next-prev"><a href="00-总览.html">← 返回模块总览</a><a href="../index.html">📚 返回总目录</a></div>
+<footer>LLM 推理框架系统学习指南 · 模块 07 · 2026</footer></div><p><strong>学习路径：</strong>学习核心思想需要前置知识：Transformer注意力机制、GPU内存管理基础。掌握后可继续深入推理框架实战和性能调优。</p>
+</body></html>
