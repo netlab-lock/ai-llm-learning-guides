@@ -346,13 +346,24 @@ def benchmark(model, input_data, warmup=10, iters=100):
   H100: 989T/3.35T = 295 FLOPs/Byte
 </div>
 <div class="exercise">
-<h3>📝 思考与练习</h3>
+<h3>📝 思考与练��</h3>
 <ol>
   <li>请用自己的话解释<strong>一、为什么需要并行？</strong>的核心原理，并举一个实际应用场景。</li>
   <li>请用自己的话解释<strong>二、七大并行方式速查表</strong>的核心原理，并举一个实际应用场景。</li>
   <li>请用自己的话解释<strong>三、它们之间的关系</strong>的核心原理，并举一个实际应用场景。</li>
   <li>请用自己的话解释<strong>四、选择决策流程</strong>的核心原理，并举一个实际应用场景。</li>
   <li>请用自己的话解释<strong>五、各框架并行支持一览</strong>的核心原理，并举一个实际应用场景。</li>
+</ol>
+</div>
+
+<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
+<ol>
+<li><strong>核心原理</strong>: 大模型推理面临的核心矛盾是单块GPU的显存和算力无法承载日益增长的模型规模。以70B参数模型为例，仅权重就需要约140GB显存（FP16），远超单张A100的80GB容量。并行策略的本质是将模型的计算负载和显存需求分散到多张GPU上，通过"切分"（模型维度）或"复制"（数据维度）的方式突破单卡限制。文件中以"搬石头"类比形象说明：一个人搬不动大石头（单卡放不下模型），需要多人协作（多卡并行），而不同的搬运方式对应不同的并行策略——切分石头对应TP，分段搬运对应PP，每人各搬一块对应DP。<br><strong>关键要点</strong>: ①模型规模超出单卡显存是并行的根本驱动力；②并行分为"切分模型"和"复制模型"两大类；③每种并行策略解决不同的瓶颈问题；④通信开销是并行化的核心代价。<br><strong>实际案例</strong>: 部署LLaMA-70B模型做在线推理服务，单卡A100-80GB无法加载完整模型，此时必须使用TP=2或TP=4将权重切分到2-4张GPU上。<br><strong>关联知识</strong>: 与GPU显存架构（HBM容量）、NVLink带宽、算术强度（FLOPs/Byte）等硬件知识密切相关，理解屋顶模型（Roofline Model）有助于判断何时需要并行以及选择何种并行策略。</li>
+<li><strong>核心原理</strong>: 七大并行方式速查表系统性地梳理了LLM推理中所有主流并行策略的核心特征。每种并行方式从五个维度进行描述：缩写、切分对象、解决问题、通信模式、典型场景。DP切分数据维度，通过多副本提高吞吐量，通信模式为AllReduce；TP切分层内权重矩阵，解决单层过大的问题，每层需要AllReduce；PP切分模型层，解决层数过多的问题，通信为层间P2P传递；SP切分序列token维度，解决长序列计算瓶颈；CP切分上下文维度，解决超长上下文KV Cache问题；EP切分MoE专家网络；ZeRO消除训练时的内存冗余。这张表的工程价值在于为工程师提供"按图索骥"的选择依据。<br><strong>关键要点</strong>: ①DP/TP/PP是最基础的三种并行；②SP/CP针对序列维度优化；③EP专用于MoE架构；④ZeRO主要面向训练场景。<br><strong>实际案例</strong>: 当团队需要部署Mixtral-8x7B模型时，查表可知该模型为MoE架构，应优先考虑EP（专家并行），同时结合TP在同机部署。<br><strong>关联知识</strong>: 与分布式通信原语（AllReduce、AllToAll、P2P）、GPU互联拓扑（NVLink/PCIe/网络）、模型架构特性（Dense vs MoE）紧密关联。</li>
+<li><strong>核心原理</strong>: 七大并行方式之间并非互斥，而是存在正交组合关系。文件用三层架构图清晰展示了这种关系：第一层是"模型太大→切分模型"，包含TP（层内切分）、PP（层间切分）、SP（序列维度）、CP（上下文维度）；第二层是"吞吐不够→多副本"，包含DP（数据并行）和ZeRO（消除冗余）；第三层是"MoE模型→专家分配"，即EP。正交关系意味着多种并行可以同时使用：TP和PP组合是最常见的（TP在同机利用NVLink高带宽做层内切分，PP跨机做层间切分）；TP和SP组合（SP处理TP切分不到的非张量区域如LayerNorm）；CP和TP组合（TP切模型权重，CP切上下文维度）。理解这种正交关系是设计高效并行方案的基础。<br><strong>关键要点</strong>: ①并行策略分为"切分模型"和"复制模型"两大类；②同类内部策略可正交组合；③TP+PP是最经典的跨机组合；④组合越多通信开销越复杂。<br><strong>实际案例</strong>: 在4机32卡（每机8卡）部署LLaMA-70B时，典型配置为TP=8（同机NVLink）+ PP=4（跨机），实现32卡并行。<br><strong>关联知识</strong>: 与3D/4D/5D并行（组合并行的工程实现）、NCCL通信组管理、跨机网络拓扑等知识直接相关。</li>
+<li><strong>核心原理</strong>: 选择决策流程提供了一套从实际约束出发的并行策略选择方法论。决策树从"模型能否放进单卡"开始分支：能则用DP（最简单，零通信开销）；不能则判断"同机多卡能否放下"，能则用TP（利用NVLink高带宽）；不能则用TP+PP组合（同机TP+跨机PP）。之后根据模型特性追加：MoE模型加入EP，超长上下文加入CP，训练场景加入ZeRO。这个流程背后的逻辑是"先解决能不能跑，再优化跑得快"——优先保证模型能加载，再考虑通信效率和吞吐量。文件特别强调了一个常见误区：并行度越高性能越好，实际上当通信开销超过计算收益时，增加并行度反而降低性能。<br><strong>关键要点</strong>: ①先判断模型规模与单卡显存关系；②同机优先TP（NVLink带宽优势）；③跨机用PP（通信量小）；④根据模型架构追加EP/CP。<br><strong>实际案例</strong>: 部署LLaMA-7B到4张A100：模型能放进单卡→选择DP=4，4个独立副本，吞吐直接×4，零通信开销。<br><strong>关联知识</strong>: 与GPU显存预算公式（M_total = M_model + M_kv×B + M_overhead）、算术强度分析、带宽瓶颈判断等知识结合使用。</li>
+<li><strong>核心原理</strong>: 各框架并行支持一览表对比了主流LLM推理/训练框架对五种并行策略的支持程度。vLLM支持DP/TP/PP/EP，SP/CP部分支持；TensorRT-LLM支持最全面（全部✅）；SGLang与vLLM类似；DeepSpeed支持全部（包括Ulysses CP）；Megatron-LM支持全部（包括SP-1）；llama.cpp作为纯CPU推理框架不支持GPU并行。这张表的实用价值在于：当团队选定并行策略后，可以快速筛选出支持该策略的框架。例如需要CP（上下文并行）时，TensorRT-LLM和DeepSpeed是最佳选择；需要完整SP支持时，Megatron-LM更合适。同时也能看出行业趋势——DP/TP/PP已成为所有GPU推理框架的标配，SP/CP支持正在快速完善。<br><strong>关键要点</strong>: ①DP/TP/PP是所有GPU框架的标配；②TensorRT-LLM支持最全面；③SP/CP是新兴能力，各框架支持不一；④llama.cpp专注CPU推理不涉及GPU并行。<br><strong>实际案例</strong>: 团队需要部署支持128K上下文的LLaMA-70B服务，查表发现需要TP+PP+CP组合，只有TensorRT-LLM和DeepSpeed完全满足，最终选择TensorRT-LLM（推理优化更好）。<br><strong>关联知识</strong>: 与框架架构设计（vLLM的PagedAttention、TRT-LLM的Inflight Batching、SGLang的RadixAttention）结合，理解不同框架为何对某些并行策略支持有限。</li>
 </ol>
 </div>
 

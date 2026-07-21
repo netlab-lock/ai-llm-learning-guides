@@ -320,6 +320,15 @@ print('验证通过!')
 <li>设计一个使用 Double Buffering 的 GEMM kernel 的 Shared Memory 布局。</li>
 </ol></div>
 
+<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
+<ol>
+<li><strong>核心原理</strong>: H100的Decode推理是内存瓶颈，因为Decode阶段每个token需要读取全部模型参数(70B×2bytes=140GB)但计算量极小(一次矩阵向量乘)。算术强度=计算量/数据量≈2 FLOPS/byte(每个参数一次乘加)，远低于H100的算力/带宽比(989TFLOPS/3.35TB/s≈295)。最大decode速度=带宽/参数量×每参数字节数=3350GB/s÷140GB≈24tokens/s(单卡)。Prefill阶段处理整个输入序列，batch×seq_len×hidden的三维矩阵乘具有很高的算术强度(>295)，属于计算瓶颈。这就是为什么推理优化重点在decode阶段减少数据搬运(量化KV Cache、FP8推理)<br><strong>关键要点</strong>: ①Decode算术强度≈2 FLOPS/byte ②远低于H100拐点295 ③理论最大24 tokens/s ④Prefill是计算瓶颈<br><strong>实际案例</strong>: vLLM中70B模型decode实测约20tokens/s，接近理论上限<br><strong>关联知识</strong>: 与Roofline模型、KV Cache优化和量化推理相关</li>
+<li><strong>核心原理</strong>: Shared Memory分为32个bank(每个4字节宽)，地址按mod 32映射到bank。当同一Warp中多个线程访问同一bank的不同地址时发生bank conflict：2-way conflict需2周期，32-way需32周期。Padding通过在数组每行末尾添加元素(如float[32][32]→float[32][33])改变列到bank的映射，使原来冲突的线程访问不同bank。例如行优先存储的32×32矩阵，第0行第0列和第1行第0列都映射到bank 0(地址0和32，32 mod 32=0)。加1列padding后，第1行第0列地址变为33，映射到bank 1，消除冲突<br><strong>关键要点</strong>: ①32个bank按地址mod 32映射 ②同bank多线程访问串行化 ③Padding改变地址对齐 ④Swizzle更高级的重排<br><strong>实际案例</strong>: FlashAttention的Q/K tile使用padding消除32-way bank conflict<br><strong>关联知识</strong>: 与Shared Memory架构、FlashAttention实现和CUTLASS的swizzle相关</li>
+<li><strong>核心原理</strong>: Double Buffering的GEMM Shared Memory布局设计：将SMem分为两个buffer(A和B)，每个buffer存放一个tile的A矩阵和B矩阵数据。假设tile size为BLOCK_M×BLOCK_K和BLOCK_K×BLOCK_N，则每个buffer需要(BLOCK_M×BLOCK_K + BLOCK_K×BLOCK_N)×sizeof(float16)字节。以BLOCK_M=128, BLOCK_N=128, BLOCK_K=32为例：buffer大小=(128×32+128×32)×2B=16KB，两个buffer共32KB(在228KB SMem限制内)。执行流程：①TMA加载tile[i+1]到buffer B ②计算tile[i]使用buffer A ③交换buffer角色 ④循环。关键：加载和计算完全重叠，隐藏HBM→SMem延迟<br><strong>关键要点</strong>: ①双buffer交替使用 ②每buffer=(MK+KN)×2B ③加载/计算重叠 ④TMA硬件管理搬运<br><strong>实际案例</strong>: CUTLASS 3.x的mainloop使用double buffering，num_stages=2-4<br><strong>关联知识</strong>: 与TMA异步搬运、CUTLASS pipeline和GEMM优化相关</li>
+</ol>
+</div>
+
 <div class="warn"><strong>⚠️ 常见误区：Shared Memory越大越好：</strong>Shared Memory和L1 Cache共享物理SRAM(每SM共228KB)。如果把全部228KB分配给Shared Memory，L1 Cache就没了。某些访问模式下，让L1 Cache自动缓存可能比手动管理Shared Memory更高效。关键是根据具体workload做trade-off。</div>
 
 <div class="warn"><strong>⚠️ 常见误区：合并访问只对全局内存重要：</strong>合并访问(Coalesced Access)确实主要针对全局内存(HBM)，但Shared Memory的Bank Conflict也是类似问题——都是多个线程同时访问同一物理资源导致的串行化。两者都需要关注。</div>

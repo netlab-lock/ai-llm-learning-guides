@@ -223,6 +223,14 @@ vLLM 多GPU与以下内容密切相关：<a href="00-总览.html">00-总览</a> 
 </ol>
 </div>
 
+<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
+<ol>
+<li><strong>核心原理</strong>: vLLM多GPU的核心原理是通过张量并行（Tensor Parallelism, TP）将大矩阵运算分解到多个GPU上并行执行。以FFN层Y=GeLU(XW_1)W_2为例，将W_1按列分割为[W_1^0, W_1^1]分配到GPU0和GPU1，W_2按行分割为[W_2^0; W_2^1]，每个GPU计算部分结果Y_i=GeLU(XW_1^i)W_2^i，最终通过AllReduce求和得到Y=Y_0+Y_1。正确性证明：Y=GeLU(X[W_1^0,W_1^1])[W_2^0;W_2^1]=Y_0+Y_1。每个GPU只需存储1/N参数，计算量减少为1/N，额外开销仅为AllReduce通信T_comm=2×(N-1)/N×M/B_w。效率公式η=1/(1+N×T_comm/T_comp)，NVLink场景下通信占比<5%效率>95%。<br><strong>关键要点</strong>: (1) 通过--tensor-parallel-size指定GPU数，必须为2/4/8；(2) TP引入AllReduce通信，单卡能放下的模型用TP=2反而慢10-15%；(3) TP只在模型单卡放不下时有意义（如70B FP16需140GB）；(4) 结合--quantization awq可进一步减少单卡显存需求。<br><strong>实际案例</strong>: 部署Llama-3.1-70B时，FP16约需140GB显存，通过vllm serve ... --tensor-parallel-size 4将模型分布到4张A100（40GB×4=160GB），每张卡存储1/4参数约35GB，加上KV Cache完全可行，AllReduce通过NVLink 600GB/s高速完成。<br><strong>关联知识</strong>: 与vLLM单GPU部署中的显存公式M_total=M_model+M_kv_cache+M_overhead对应——多GPU使M_model减小到1/N，与NCCL Ring AllReduce通信原理直接相关。</li>
+<li><strong>核心原理</strong>: 环境变量的核心原理是通过操作系统级别的配置控制GPU设备可见性和跨机通信参数。CUDA_VISIBLE_DEVICES控制进程可见哪些GPU（如export CUDA_VISIBLE_DEVICES=0,1,2,3只暴露前4卡），实现多任务GPU隔离和资源分配——对操作系统和CUDA Runtime隐藏其他GPU。NCCL_SOCKET_IFNAME指定NCCL通信使用的网络接口名（如eth0/ib0），NCCL_IB_DISABLE控制是否启用InfiniBand高速互联（设为0启用IB，设为1禁用IB回退到TCP）。在异构网络环境中正确配置这些变量对多GPU通信性能至关重要。<br><strong>关键要点</strong>: (1) CUDA_VISIBLE_DEVICES用于GPU独占/共享隔离，多个vLLM实例可用不同GPU子集并行；(2) NCCL_SOCKET_IFNAME在多机场景必须指向正确的网卡（特别是IB网卡名如ib0）；(3) NCCL_IB_DISABLE=0启用InfiniBand获取400Gb/s高带宽；(4) 错误的NCCL配置会导致AllReduce超时或带宽骤降50%以上。<br><strong>实际案例</strong>: 在一台8卡A100服务器上同时运行两个Llama-3.1-70B实例，分别设置CUDA_VISIBLE_DEVICES=0,1,2,3和CUDA_VISIBLE_DEVICES=4,5,6,7，实现GPU资源隔离和并行服务，两张卡组的推理请求互不干扰。<br><strong>关联知识</strong>: 与张量并行中的Ring AllReduce直接相关——NCCL配置质量决定AllReduce通信效率，进而影响多GPU并行效率η。</li>
+<li><strong>核心原理</strong>: 多机部署的核心原理是通过Ray集群编排跨GPU节点的推理任务，并采用分层并行策略匹配不同层级的通信带宽。vLLM底层使用Ray作为分布式计算框架：主节点ray start --head启动Ray head节点，工作节点ray start --address加入集群。并行策略采用三维分层：机内张量并行（TP=8利用NVLink 600GB/s带宽，通信量最大但限制在机内），机间流水线并行（PP=2，通信量中等，只传激活值，跨机频率低）或数据并行（DP=2，通信量最小）。总GPU数=TP×PP×DP。效率分析证明：TP在NVLink下效率95%跨机降至68%，分层策略综合效率可达85%以上。<br><strong>关键要点</strong>: (1) TP限制在单机8卡内以利用NVLink高带宽（600GB/s vs IB的50GB/s差12倍）；(2) PP/DP用于机间扩展避免频繁AllReduce跨机；(3) NVLink带宽是InfiniBand的12倍，跨机AllReduce会让推理延迟增加30-50%；(4) 最优部署策略是TP-PP-DP三维并行，匹配计算需求到不同层级通信能力。<br><strong>实际案例</strong>: 部署Llama-3-405B模型需超16张A100，采用TP=8（单机NVLink）+PP=2（跨机流水线）的分层策略，在2台DGX A100上实现高效推理，机内效率95%、机间效率85%，相比纯TP=16跨机方案性能提升约25%。<br><strong>关联知识</strong>: 与NCCL Ring AllReduce和NVLink/IB带宽差异原理直接相关——理解12倍带宽差是选择分层并行策略的数学基础。</li>
+</ol>
+</div>
 
 <div class="tip"><strong>向前串联：</strong>
 vLLM 多GPU的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。

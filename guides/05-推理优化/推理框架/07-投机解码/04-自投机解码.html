@@ -258,6 +258,15 @@ def benchmark(model, input_data, warmup=10, iters=100):
 </ol>
 </div>
 
+<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
+<ol>
+<li><strong>核心原理</strong>: 自投机解码（Self-Speculative Decoding）的核心是利用同一个Transformer模型的不同计算深度来生成草稿。将L层模型中跳过部分中间层（如从32层跳至16层），使草稿模型计算量减半。数学上，第l层输出h^l是对输入的"部分理解"——浅层主要学习语法和局部模式，深层学习语义和推理。对于确定性高的token（如常见搭配），浅层输出已经足够准确。当token的条件熵H(x_{t+1}|x_{≤t})较低时，D_KL(p||q)较小，跳层草稿的接受率较高。加速比公式为 S = α_len / (α_len×t_draft/t_target + 1)，其中t_draft/t_target ≈ l/L ≈ 0.5。<br><strong>关键要点</strong>: ①跳层模型仍需加载全部模型参数（权重共享），计算量与层数成正比减少 ②接受-拒绝采样保证输出分布与目标模型完全一致 ③跳层数过多会导致KL散度增大、接受率急剧下降，通常跳过1/3到1/2层是平衡点<br><strong>实际案例</strong>: 在32层LLaMA模型上使用16层跳层生成草稿，虽然加速比(约1.5-2x)低于独立草稿模型(2-3x)，但零额外显存占用使其适合资源受限的边缘设备部署<br><strong>关联知识</strong>: 与投机解码（Speculative Decoding）的通用框架一脉相承，但草稿生成方式不同——自投机解码通过跳层而非独立小模型生成草稿，与LayerSkip等技术结合可进一步提升接受率</li>
+<li><strong>核心原理</strong>: 自投机解码的三大核心优势构成了其在特定场景下的独特价值。第一，不需要额外模型或训练意味着部署成本为零——传统Draft Model方案需要在GPU上同时加载Target Model和Draft Model两份权重，而自投机解码复用同一份权重。第二，自适应特性允许根据任务难度动态调整跳层数——对于简单任务（如常见短语补全）可以跳更多层，对于复杂任务（如数学推理）则减少跳层以保证接受率。第三，实现简单——不需要维护额外的模型文件、不需要修改推理服务架构、不需要额外的显存管理逻辑。<br><strong>关键要点</strong>: ①零额外显存占用：不需要在显存中容纳第二个模型 ②零训练成本：跳过不需要额外训练即可直接应用（虽然LayerSkip训练可进一步提升性能） ③自适应跳层：根据任务难度动态调整 ④实现简单：复用现有推理代码<br><strong>实际案例</strong>: 在单张T4 GPU(16GB)上部署LLaMA-2-7B时，若使用独立草稿模型(如TinyLlama-1.1B)会占用额外2GB显存并降低batch size；而自投机解码通过跳层方式，在不增加显存占用的情况下仍可获得1.3-1.5x加速<br><strong>关联知识</strong>: 与模型量化(Quantization)互补——量化减少单token计算时间，自投机解码减少总token计算量；与投机解码前缀优化(如n-gram匹配)结合可进一步提升草稿生成速度</li>
+<li><strong>核心原理</strong>: 自投机解码的两类代表性工作体现了两种不同的技术路线。LayerSkip(Meta)采用训练时层丢弃(Layer Dropout)策略：训练时以概率p_l随机跳过第l层，损失函数为L_total = Σ_l p_l · CE(f_l(x), y)，通过联合训练使模型在任何深度截断时都能产生合理输出。这在32层模型上实现了1.5-2x加速，且接受率从40%(未训练)提升至70%以上。Speculative Sampling则跳过FFN层（Feed-Forward Network），因为FFN在推理中占据大量时间但贡献更多是"知识存储"而非"上下文理解"。<br><strong>关键要点</strong>: ①LayerSkip通过渐进式训练解决跳层后分布偏移问题 ②训练使残差流在每一层都积累足够的预测信息 ③Speculative Sampling跳过FFN层（计算密集但预测信息增量少的组件） ④两种方法都证明了"部分层即可预测"的假设 ⑤LayerSkip的训练使每层输出都在最小化与目标分布的KL散度<br><strong>实际案例</strong>: LayerSkip在Meta的大规模实验中证明，经过渐进式层丢弃训练的模型，可以在推理时灵活选择使用25%-100%的层数，在保持输出质量的同时显著降低推理延迟，特别适合需要动态调整计算预算的云服务场景<br><strong>关联知识</strong>: 与残差网络的训练动力学相关——未经训练时预测信息集中在深层，渐进训练后每层都包含更丰富的预测信号；与Early Exit(提前退出)技术类似但粒度在层级别而非样本级别</li>
+</ol>
+</div>
+
 
 <div class="tip"><strong>向前串联：</strong>
 核心思想的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
