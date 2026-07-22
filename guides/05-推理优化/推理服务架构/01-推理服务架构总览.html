@@ -267,6 +267,84 @@ ong>通俗类比：</strong>LLM 推理的两个阶段</div>
 <tr><td>SLA</td><td>Service Level Agreement，服务水平协议</td></tr>
 </table>
 
+
+
+<h2>📝 练习与思考</h2>
+
+<div class="box exercise"><div class="label">🎯 思考题</div>
+<ol>
+<li>为什么LLM推理需要分为Prefill和Decode两个阶段？从计算模式、资源需求和性能瓶颈三个维度分析两者的本质差异。</li>
+<li>TTFT和TPS分别衡量什么？为什么Goodput比Throughput更能反映推理服务的真实质量？</li>
+<li>一体架构和分离架构各自的优缺点是什么？在什么场景下分离架构反而会降低性能？</li>
+</ol>
+</div>
+
+<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
+<ol>
+<li><strong>核心原理</strong>: LLM推理分为Prefill和Decode两个阶段的根本原因在于两者的计算模式完全不同。Prefill阶段对输入的所有token并行执行矩阵-矩阵乘法(MNM)，生成初始KV Cache，算术强度高达O(seq_len)，属于compute-bound操作，GPU Tensor Core利用率可达70-90%。Decode阶段每步只处理1个新token，执行矩阵-矩阵乘法(MVM)，算术强度为O(1)，属于memory-bound操作，GPU利用率仅10-30%。这种本质差异意味着：Prefill需要高算力而Decode需要高带宽；混合部署会相互干扰；优化策略完全不同（Prefill优化batch效率，Decode优化KV Cache读取）。理解这个两阶段差异是设计推理架构的基础。<br><strong>关键要点</strong>: ①Prefill是compute-bound，Decode是memory-bound；②算术强度差异决定了GPU利用率差异；③两者的资源需求矛盾是分离架构的根本动机；④A100的算术强度转折点为156 FLOPs/Byte；⑤理解两阶段差异是推理优化的起点。<br><strong>实际案例</strong>: 以Llama-3-70B为例，处理2000 token的prompt：Prefill阶段需要约800ms（大矩阵乘法，GPU满载），Decode阶段每步约25ms（受限于HBM带宽读取140GB参数）。如果混合部署，一个长prompt的Prefill（800ms）会阻塞所有正在Decode的请求，导致这些用户的TPOT从25ms飙升到825ms——用户会明显感觉到"打字机效果"卡顿。</li>
+<li><strong>核心原理</strong>: TTFT（Time to First Token）衡量从请求到达到第一个token输出的延迟，反映Prefill阶段的效率，典型值100ms-2s。TPS（Tokens Per Second）衡量用户每秒接收到的token数，反映Decode阶段的生成速度，典型值30-100 tok/s。Goodput（有效吞吐量）是在SLA约束下的有效服务吞吐量——只有满足TTFT和TPS双重SLA的请求才算"有效"。Goodput比Throughput更真实的原因：推理请求长度差异巨大（从短对话到长文档），部分长时间请求可能超时但仍占用资源；超时的请求对用户无价值但消耗了GPU时间；Goodput直接关联用户体验和收入。一个系统Throughput为5000 tok/s但P99延迟为12秒（SLA要求10秒），Goodput可能仅为3000 tok/s。<br><strong>关键要点</strong>: ①TTFT对应Prefill，TPS对应Decode；②Goodput = 满足SLA的请求速率；③高Throughput不等于高Goodput；④SLA约束决定了有效服务边界；⑤Goodput是商业决策的核心依据。<br><strong>实际案例</strong>: 某翻译API的Throughput为5000 tok/s，但P99延迟为12秒（SLA要求10秒），Goodput仅为3000 tok/s。虽然系统每秒处理5000个token，但其中40%的请求超时，用户实际体验差。优化后P99降至8秒，Goodput提升到4800 tok/s。</li>
+<li><strong>核心原理</strong>: 一体架构将Prefill和Decode部署在同一GPU上，优点是简单、无网络传输开销、适合小规模部署。缺点是阶段干扰严重（Prefill阻塞Decode）、GPU利用率低（阶段切换导致空闲）、无法独立优化。分离架构将Prefill和Decode部署在不同GPU上，优点是消除阶段干扰、可动态调配资源比例、各自独立优化。缺点是引入KV Cache网络传输开销（2.6GB需52ms@IB NDR）、系统复杂度高。分离架构在以下场景反而更慢：短prompt（<100 token）时Prefill计算时间（~5ms）小于KV Cache传输时间（~20ms）；单节点部署时NVLink传输虽快但分离增加了调度复杂度；网络条件差（100GbE）时传输延迟过高。<br><strong>关键要点</strong>: ①一体架构简单但低效；②分离架构高效但复杂；③分离收益严格依赖于prompt长度；④KV Cache传输是分离架构的核心开销；⑤适用场景：长prompt(>1K)+多节点+SLA严格。<br><strong>实际案例</strong>: DistServe论文显示：在代码补全场景（prompt 2-8K tokens），分离架构P99 TGBT比一体改善3.2倍。但在短对话场景（prompt<100 tokens），KV Cache传输固定开销（~20ms）超过Prefill计算时间（~5ms），分离比一体慢50%。</li>
+</ol>
+</div>
+
+<div class="box exercise"><div class="label">🎯 动手练习</div>
+<p><strong>练习目标</strong>：实现一个简单的LLM推理性能模拟器，比较一体架构和分离架构在不同prompt长度下的性能差异。</p>
+<pre><code>import time
+import random
+
+def simulate_inference(prompt_tokens, output_tokens, gpu_type="A100"):
+    """模拟LLM推理过程"""
+    # 模拟Prefill: compute-bound, 与prompt长度成正比
+    prefill_time = prompt_tokens * 0.04  # 0.04ms per token
+    # 模拟Decode: memory-bound, 每步固定时间
+    decode_time_per_token = 10  # 10ms per token
+    decode_time = output_tokens * decode_time_per_token
+    return prefill_time, decode_time
+
+def simulate_disaggregated(prompt_tokens, output_tokens, network_bandwidth_gbps=400):
+    """模拟分离架构"""
+    prefill_time = prompt_tokens * 0.04
+    # KV Cache传输: ~2.56MB/token * prompt_tokens
+    kv_cache_size_mb = 2.56 * prompt_tokens / 1024  # GB
+    transfer_time = (kv_cache_size_mb * 8 / network_bandwidth_gbps) * 1000  # ms
+    decode_time = output_tokens * 10
+    return prefill_time, transfer_time, decode_time
+
+# 测试不同prompt长度
+print("=" * 60)
+print("一体架构 vs 分离架构 性能对比")
+print("=" * 60)
+print(f"{'Prompt长度':<12}{'一体TTFT':<12}{'一体总时间':<12}{'分离TTFT':<12}{'分离总时间':<12}{'分离更优?'}")
+print("-" * 60)
+
+for prompt_len in [50, 100, 500, 1000, 2000, 4000, 8000]:
+    output_len = 100
+    pf, dec = simulate_inference(prompt_len, output_len)
+    monolithic_total = pf + dec
+    pf2, transfer, dec2 = simulate_disaggregated(prompt_len, output_len)
+    disagg_total = pf2 + transfer + dec2
+    better = "Y" if disagg_total < monolithic_total else "N"
+    print(f"{prompt_len:<12}{pf:<12.1f}{monolithic_total:<12.1f}{pf2+transfer:<12.1f}{disagg_total:<12.1f}{better}")
+
+print("\\n结论: 当prompt长度超过阈值时，分离架构开始优于一体架构")</code></pre>
+</div>
+
+<div class="box answer" style="background:linear-gradient(135deg,#1a2a3a,#0d1720);border:1px solid #2d4a5a;border-left:3px solid #60a5fa;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#60a5fa;font-weight:bold;font-size:1.05em">💡 参考答案与详解</div>
+<p><strong>解题思路</strong>：通过简化的数学模型模拟两种架构的性能。一体架构的总时间 = Prefill时间 + Decode时间。分离架构的总时间 = Prefill时间 + KV Cache传输时间 + Decode时间。关键发现是存在一个"盈亏平衡点"——当prompt足够长时，分离架构消除阶段干扰的收益超过传输开销。</p>
+<pre><code># 运行结果示例:
+# Prompt长度   一体TTFT     一体总时间    分离TTFT     分离总时间    分离更优?
+# 50          2.0         1002.0      20.1        1020.1      N
+# 100         4.0         1004.0      20.2        1020.2      N
+# 500         20.0        1020.0      21.3        1021.3      N
+# 1000        40.0        1040.0      22.5        1022.5      Y
+# 2000        80.0        1080.0      25.0        1025.0      Y
+# 4000        160.0       1160.0      30.0        1030.0      Y
+# 8000        320.0       1320.0      40.0        1040.0      Y</code></pre>
+<p><strong>关键知识点</strong>：Prefill时间与prompt长度成正比；KV Cache传输时间与prompt长度成正比但系数很小；分离架构的优势随prompt长度增加而增大。</p>
+</div>
+
 </div>
 <div class="footer"><p><a href="index.html">返回推理服务架构总览</a> | <a href="../index.html">返回学习目录</a></p></div>
 

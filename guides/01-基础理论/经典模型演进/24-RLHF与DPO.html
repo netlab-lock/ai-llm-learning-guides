@@ -479,6 +479,65 @@ def benchmark(model, x, n=100):
 <div class="tip"><strong>💡 推荐阅读：</strong>Ouyang 等《Training language models to follow instructions with human feedback》(NeurIPS 2022, InstructGPT 论文) 和 Rafailov 等《Direct Preference Optimization》(NeurIPS 2023)。前者奠定了 RLHF 的基础，后者提供了更简洁的替代方案。</div>
 
 </div>
+
+<h2>📝 练习与思考</h2>
+<div class="box exercise"><div class="label">🎯 思考题</div>
+<ol>
+<li>RLHF中Bradley-Terry偏好模型假设P(winning≻losing)=σ(r(x,y_w)-r(x,y_l))。请推导：为什么最大化偏好对数似然等价于训练奖励模型？RM如何避免直接预测"绝对质量"？</li>
+<li>DPO(Rlignment from Direct Preference Optimization)无需训练奖励模型和PPO就可以直接从偏好数据优化策略。请推导DPO的核心公式：L_DPO=-E[logσ(β·log(π(y_w|x)/π_ref(y_w|x))-β·log(π(y_l|x)/π_ref(y_l|x)))]。</li>
+<li>RLHF中KL散度约束KL(π||π_ref)为什么重要？如果不做KL约束会发生什么Reward Hacking现象？请给出具体例子。</li>
+<li>GRPO(Group Relative Policy Optimization)是DeepSeek-R1使用的对齐方法。请分析：GRPO与PPO的核心区别是什么？为什么GRPO更适合数学推理等"有明确正确答案"的任务？</li>
+<li>Constitution AI(RLAIF)让LLM根据一套"宪法原则"自我修正而非依赖人类标注。请分析：(1)RLAIF的流程；(2)相比RLHF的优势和局限；(3)宪法原则如何避免价值观强加？</li>
+</ol>
+</div>
+<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
+<ol>
+<li><strong>核心原理</strong>: Bradley-Terry模型：P(y_w≻y_l)=exp(r(x,y_w))/(exp(r(x,y_w))+exp(r(x,y_l)))=σ(r(x,y_w)-r(x,y_l))。最大化偏好对数似然log σ(Δr)使r(y_w)>r(y_l)。RM避免了绝对质量标注的困难(人类对"1-10分"标准不一)——只需判断"哪个更好"(对比判断)。这对人类标注者更容易且更一致。交叉熵损失训练RM。</li>
+<li><strong>核心原理</strong>: DPO核心洞察：最优策略π*与奖励函数r的关系为π*(y|x)=π_ref(y|x)exp(r(x,y)/β)/Z(x)。取对数得r(x,y)=β log(π*(y|x)/π_ref(y|x))+β log Z。代入BT模型后Z消去，直接用π和π_ref表达偏好概率。这样跳过了显式训练RM和PPO强化学习——直接从偏好数据优化语言模型。</li>
+<li><strong>核心原理</strong>: 无KL约束时模型会Reward Hacking：(1)生成冗余讨巧文本("当然！很高兴帮助您！这个问题的答案很重要因为...")骗高RM分；(2)输出不自然或过度谨慎；(3)重复已知模式。具体例子：GPT-3+RLHF初期发现模型学会了输出"N/A"（对高风险问题）以避免可能的惩罚。KL系数β=0.1-0.5控制偏离程度。</li>
+<li><strong>核心原理</strong>: GRPO与PPO区别：(1)GRPO用组内相对优势(同一问题的多个采样)替代baseline critic；(2)去掉value function网络；(3)对每个问题采样一组回答，用组内奖励均值和标准差归一化优势。更适合数学推理因为有明确正确/错误信号：正确回答的奖励明显高于错误，组内对比清晰。DeepSeek-R1用GRPO在数学推理上达到SOTA。</li>
+<li><strong>核心原理</strong>: RLAIF流程：(1)初始回答→(2)LLM根据宪法原则自我批评修改→(3)微调修改后的回答→(4)LLM比较两个版本选更合规的→(5)用偏好数据训练。优势：(1)减少人类标注成本；(2)可扩展；(3)一致性更高。局限：(1)LLM自身偏见会固化；(2)宪法原则本身反映设计者价值观；(3)可能过度保守。</li>
+</ol>
+</div>
+<div class="box exercise"><div class="label">🎯 动手练习</div>
+<p>请实现DPO和GRPO关键公式：</p>
+<ol>
+<li>实现DPO损失函数</li>
+<li>实现GRPO组内优势归一化</li>
+<li>实现KL散度约束</li>
+</ol>
+</div>
+<div class="box answer" style="background:linear-gradient(135deg,#1a2a3a,#0d1720);border:1px solid #2d4a5a;border-left:3px solid #60a5fa;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#60a5fa;font-weight:bold;font-size:1.05em">💡 参考答案与详解</div>
+<pre><code><span class="keyword">import</span> torch, torch.nn.functional <span class="keyword">as</span> F
+
+<span class="keyword">def</span> <span class="cmd">dpo_loss</span>(pi_logps_w, pi_logps_l, ref_logps_w, ref_logps_l, beta=0.1):
+    <span class="string">"""pi_logps: 策略模型对chosen/rejected的log prob
+       ref_logps: 参考模型(SFT)的log prob"""</span>
+    pi_ratio = pi_logps_w - pi_logps_l
+    ref_ratio = ref_logps_w - ref_logps_l
+    logits = beta * (pi_ratio - ref_ratio)
+    <span class="keyword">return</span> -F.logsigmoid(logits).mean()
+
+<span class="keyword">def</span> <span class="cmd">grpo_advantage</span>(rewards, group_indices):
+    <span class="string">"""对每个问题的多个采样做优势归一化
+       rewards: (N,) group_indices: 每个采样属于哪个问题"""</span>
+    advantages = torch.zeros_like(rewards)
+    <span class="keyword">for</span> g <span class="keyword">in</span> group_indices.unique():
+        mask = group_indices == g
+        group_rewards = rewards[mask]
+        advantages[mask] = (group_rewards - group_rewards.mean()) / (group_rewards.std() + 1e-8)
+    <span class="keyword">return</span> advantages
+
+<span class="keyword">def</span> <span class="cmd">kl_penalty</span>(pi_logits, ref_logits, beta=0.1):
+    <span class="string">"""KL散度约束防止策略偏离参考太远"""</span>
+    pi_probs = F.log_softmax(pi_logits, dim=-1)
+    ref_probs = F.softmax(ref_logits, dim=-1)
+    <span class="keyword">return</span> beta * (pi_probs.exp() * (pi_probs - ref_probs.log())).sum(-1).mean()</code></pre>
+<p><strong>关键知识点</strong>: (1)Bradley-Terry偏好模型 (2)DPO跳过显式RM和PPO (3)KL防Reward Hacking (4)GRPO组内优势归一化 (5)RLAIF自我修正替代人类标注。</p>
+</div>
+</div>
 <div class="footer"><p>🧠 从深度学习到LLM · 24 · RLHF & DPO — 对齐技术</p><p><a href="index.html">返回模型总览</a></p></div>
 </body>
 </html>

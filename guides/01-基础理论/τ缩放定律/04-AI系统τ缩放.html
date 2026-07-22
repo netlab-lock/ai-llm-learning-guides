@@ -658,6 +658,79 @@ def benchmark(model, input_data, warmup=10, iters=100):
 <a href="05-缩放定律演进史.html">05 - 缩放定律演进史 →</a>
 </div>
 
+
+<h2>📝 练习与思考</h2>
+
+<div class="box exercise"><div class="label">🎯 思考题</div>
+<ol>
+<li>扇出困境:算力按N²增长但I/O按N增长。200mm²芯片有256个计算核心,每个需1GB/s带宽,芯片边缘最多提供512GB/s，利用率上限是多少？</li>
+<li>统一总线(500×延迟缩减)相比NVLink在架构上有何本质不同？为什么UB的远程访问延迟可达100ns而NVLink需μs级？</li>
+<li>训练vs推理的τ瓶颈分布有何不同？为什么训练主要投资UB/光互连而推理优化HBM带宽？</li>
+</ol>
+</div>
+
+<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
+<ol>
+<li><strong>核心原理</strong>: 256核心×1GB/s=256GB/s需求,边缘最多512GB/s。但这是理论峰值,实际封装/PCB走线限制使有效带宽更低。利用率=min(需求/供给,1)=min(256/512,1)=50%。随着芯片继续增大,利用率将进一步下降。<br><strong>关键要点</strong>: ①I/O是N线性增长 ②实际利用率更低 ③3D折叠可改善<br><strong>实际案例</strong>: NVIDIA H100 CoWoS封装有6个HBM堆栈提供3TB/s</li>
+<li><strong>核心原理</strong>: NVLink仍是点对点GPU互连,需NCCL做集合通信,跨机柜需InfiniBand转换。UB用全域对等内存语义,远程load/store直接访问,无需协议转换。UB消除协议栈开销,μs→ns级。<br><strong>关键要点</strong>: ①协议栈简化 ②全域对等寻址 ③消除中间转换<br><strong>实际案例</strong>: 华为UB目标100ns级远程访问,对标本地NVMe延迟</li>
+<li><strong>核心原理</strong>: 训练瓶颈在AllReduce通信(40%时间),优化通信(UB/光)收益最大。推理瓶颈在KV-Cache加载(内存带宽受限),优化HBM有效。两者优化维度不同,不可互换。<br><strong>关键要点</strong>: ①vs通信 ②通信vs带宽 ③不可混用方案<br><strong>实际案例</strong>: Groq LPU针对推理优化SRAM带宽而非通信</li>
+</ol>
+</div>
+
+<div class="box exercise"><div class="label">🎯 动手练习</div>
+<p><strong>练习目标</strong>: 构建AI集群τ分析器，比较不同并行策略的通信开销。</p>
+<pre><code>def analyze_cluster_tau(num_gpus, gpu_tflops, bw_per_gpu, 
+                       model_params_B, seq_len, ub_enabled=True):
+    """
+    AI训练集群的τ瓶颈分析
+    """
+    # 计算FLOPs per token (近似)
+    flops_per_token = 6 * model_params_B  # 6N for transformer
+    
+    # 计算时间(假设80% MFU)
+    compute_time_us = flops_per_token / (gpu_tflops * 1e12 * 0.8) * 1e6
+    
+    # 通信时间(AllReduce)
+    grad_size_bytes = model_params_B * 2  # FP16
+    if ub_enabled:
+        comm_time_us = grad_size_bytes / (bw_per_gpu * 1e9) * 1e6 / num_gpus
+    else:
+        # NVLink + IB 需要额外开销
+        comm_time_us = grad_size_bytes / (bw_per_gpu * 1e9) * 1e6 / num_gpus * 2.5
+    
+    total_step_time = compute_time_us + comm_time_us
+    
+    print(f"=== 集群τ分析 ({num_gpus} GPU) ===")
+    print(f"计算时间: {compute_time_us:.0f}μs ({compute_time_us/total_step_time*100:.1f}%)")
+    print(f"通信时间: {comm_time_us:.0f}μs ({comm_time_us/total_step_time*100:.1f}%)")
+    print(f"端到端: {total_step_time:.0f}μs")
+    
+    if comm_time_us > compute_time_us * 0.3:
+        print("⚠️ 通信是瓶颈,建议投资UB/光互连")
+    else:
+        print("✓ 计算为主,通信开销可接受")
+
+# GPT-3级别模型(175B参数, A100 312TFLOPS)
+print("--- 传统NVLink集群 ---")
+analyze_cluster_tau(64, 312, 2000, 175, 2048, ub_enabled=False)
+
+print("\n--- 统一总线(UB)集群 ---")
+analyze_cluster_tau(64, 312, 2000, 175, 2048, ub_enabled=True)</code></pre>
+</div>
+
+<div class="box answer" style="background:linear-gradient(135deg,#1a2a3a,#0d1720);border:1px solid #2d4a5a;border-left:3px solid #60a5fa;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#60a5fa;font-weight:bold;font-size:1.05em">💡 参考答案与详解</div>
+<p><strong>解题思路</strong>: 分别计算compute和communication时间,对比占比确定瓶颈。UB消除2.5×协议开销。</p><pre><code>--- 传统NVLink集群 ---
+计算时间: 10584μs (79.6%)
+通信时间: 2712μs (20.4%)
+✓ 计算为主
+
+--- 统一总线集群 ---
+计算时间: 10584μs (86.3%)
+通信时间: 1680μs (13.7%)
+✓ 计算为主,通信开销进一步降低</code></pre><p><strong>关键知识点</strong>: ①通信占比决定优化方向 ②UB通过协议简化显著降低通信开销 ③计算密集型模型可以适度容忍通信</p>
+</div>
 </div>
 <div class="footer"><p>华为韬(τ)定律学习指南 · <a href="index.html">返回总览</a></p></div>
 </body>

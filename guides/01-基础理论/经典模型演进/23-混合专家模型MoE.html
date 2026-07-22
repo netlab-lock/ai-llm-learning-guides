@@ -1544,6 +1544,72 @@ def benchmark(model, x, n=100):
 <div class="tip"><strong>💡 推荐阅读：</strong>Jiang 等《Mixtral of Experts》(2024) 和 DeepSeek-AI《DeepSeek-V2》(2024)。前者展示了开源 MoE 的威力，后者展示了 MoE 的工程创新。</div>
 
 </div>
+
+<h2>📝 练习与思考</h2>
+<div class="box exercise"><div class="label">🎯 思考题</div>
+<ol>
+<li>Mixture of Experts(MoE)的核心思想是稀疏激活：每个token只激活k/N个专家(N总专家数，k激活数)。请计算：Mixtral 8×7B(8专家，激活2个)的总参数和有效活跃参数比。MoE相比同等总参数的Dense模型有什么优势？</li>
+<li>MoE的Router通常用线性层+softmax实现g(x)=Softmax(W_g·x)。Top-K选取得分最高的专家。请分析：(1)为什么Router容易出现负载不均衡？(2)如何设计辅助损失鼓励专家均衡使用？</li>
+<li>MoE训练中常见的"专家坍缩"(expert collapse)是什么现象？如何从Router初始化、辅助损失、专家容量因子三个角度缓解它？</li>
+<li>Mixtral 8×7B用Mistral-7B的Dense模型初始化每个专家。为什么MoE可以从Dense模型"扩展"得到？这样初始化相比随机初始化有什么好处？</li>
+<li>MoE的通信开销是大规模分布式训练的瓶颈。请分析：(1)Expert Parallelism vs Tensor Parallelism的区别；(2)为什么跨节点通信是瓶颈？(3)如何减少All-to-All通信？</li>
+</ol>
+</div>
+<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
+<ol>
+<li><strong>核心原理</strong>: Mixtral 8×7B总参数约47B(8×7B减去共享层)，活跃参数约13B(每个token只通过2个专家)。相比同等47B Dense模型：(1)推理成本低(只需计算13B)；(2)训练信号更多(8个专家各自特化不同模式)；(3)MoE的"模型总容量"更大。Sparse MoE本质是用稀疏性在大容量和低计算间取得平衡——每个专家特化于特定类型输入。</li>
+<li><strong>核心原理</strong>: 负载不均衡因为Router的正反馈循环——某些专家被选中→学到更好→被更多选中→更专精。辅助损失L_aux = α·∑ᵢ(mᵢ·pᵢ)(mᵢ=分配给i的token比例，pᵅ=Router选中i的概率均值)鼓励均匀。Switch Transformer使用负载均衡损失让专家利用率差异<10%。</li>
+<li><strong>核心原理</strong>: 专家坍缩=少数专家承载大部分token而其余闲置。缓解：(1)Router初始化小权重使初始分布均匀；(2)辅助损失L_aux惩罚不均衡；(3)专家容量因子c：token数超过c·T/N时溢出(设置容量上限强制分流)。三者结合可使利用率>90%。</li>
+<li><strong>核心原理</strong>: MoE可以从Dense扩展：将Dense的FFN层复制N份+添加Router→初始化MoE。好处：(1)训练起点高(每个专家继承Dense能力)；(2)训练稳定(无需从零学Router到专家的映射)；(3)收敛速度更快。Mixtral-8×7B就采用此策略。</li>
+<li><strong>核心原理</strong>: Expert Parallelism将不同专家放不同GPU，token通过All-to-All通信路由到对应专家所在GPU。跨节点通信带宽低(100GB/s vs 节点内900GB/s)，所以跨节点All-to-All是瓶颈。减少方法：(1)节点内专家并行+节点间数据并行；(2)通信压缩；(3)MOE-Shaw用专家分组减少通信。</li>
+</ol>
+</div>
+<div class="box exercise"><div class="label">🎯 动手练习</div>
+<p>请实现MoE Router和专家选择：</p>
+<ol>
+<li>实现Top-K Router（线性层+Top-K+Softmax）</li>
+<li>实现带辅助损失的MoE层</li>
+<li>实现专家容量限制</li>
+</ol>
+</div>
+<div class="box answer" style="background:linear-gradient(135deg,#1a2a3a,#0d1720);border:1px solid #2d4a5a;border-left:3px solid #60a5fa;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#60a5fa;font-weight:bold;font-size:1.05em">💡 参考答案与详解</div>
+<pre><code><span class="keyword">import</span> torch, torch.nn <span class="keyword">as</span> nn, torch.nn.functional <span class="keyword">as</span> F
+
+<span class="keyword">class</span> <span class="cmd">TopKRouter</span>(nn.Module):
+    <span class="keyword">def</span> <span class="cmd">__init__</span__(self, dim, n_experts, top_k=2):
+        <span class="cmd">super</span>().<span class="cmd">__init__</span>()
+        self.gate = nn.Linear(dim, n_experts, bias=<span class="keyword">False</span>)
+        self.top_k = top_k
+        self.n_experts = n_experts
+    <span class="keyword">def</span> <span class="cmd">forward</span>(self, x):
+        logits = self.gate(x)  <span class="comment"># (B, T, N)</span>
+        top_k_vals, top_k_idx = logits.topk(self.top_k, dim=-1)
+        weights = F.softmax(top_k_vals, dim=-1)
+        <span class="comment"># 辅助损失: 鼓励均匀分配</span>
+        dispatch = F.one_hot(top_k_idx, self.n_experts).float()  <span class="comment"># (B, T, K, N)</span>
+        fraction = dispatch.mean(dim=[0,1])  <span class="comment"># 每个专家被选中比例</span>
+        prob = logits.softmax(-1).mean(dim=[0,1])
+        aux_loss = self.n_experts * (fraction * prob).sum()
+        <span class="keyword">return</span> top_k_idx, weights, aux_loss
+
+<span class="keyword">class</span> <span class="cmd">MoELayer</span>(nn.Module):
+    <span class="keyword">def</span> <span class="cmd">__init__</span__(self, dim, hidden, n_experts=8, top_k=2):
+        <span class="cmd">super</span>().<span class="cmd">__init__</span>()
+        self.experts = nn.ModuleList([nn.Sequential(nn.Linear(dim,hidden), nn.GELU(), nn.Linear(hidden,dim)) <span class="keyword">for</span> _ <span class="keyword">in</span> range(n_experts)])
+        self.router = TopKRouter(dim, n_experts, top_k)
+    <span class="keyword">def</span> <span class="cmd">forward</span>(self, x):
+        idx, weights, aux_loss = self.router(x)
+        output = torch.zeros_like(x)
+        <span class="keyword">for</span> i, expert <span class="keyword">in</span> enumerate(self.experts):
+            mask = (idx == i).any(-1)  <span class="comment"># 被选为第i个专家的token</span>
+            <span class="keyword">if</span> mask.any():
+                output[mask] += expert(x[mask])
+        <span class="keyword">return</span> output, aux_loss</code></pre>
+<p><strong>关键知识点</strong>: (1)稀疏激活大容量低计算 (2)Router负载不均衡问题 (3)辅助损失鼓励均衡 (4)Dense初始化加速收敛 (5)Expert Parallelism通信瓶颈。</p>
+</div>
+</div>
 <div class="footer"><p>🧠 从深度学习到LLM · 23 · 混合专家模型 (MoE)</p><p><a href="index.html">返回模型总览</a></p></div>
 </body>
 </html>

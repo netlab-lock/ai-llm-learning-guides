@@ -378,6 +378,48 @@ mean_pool = (outputs.last_hidden_state * mask).sum(1) / mask.sum(1)</code></pre>
 
 
 </div>
+
+<h2>📝 练习与思考</h2>
+<div class="box exercise"><div class="label">🎯 思考题</div>
+<ol>
+<li>BERT的MLM将15%的token替换为[MASK]，其中80%用[MASK]、10%用随机词、10%保持不变。请解释这种"噪声注入"设计的原因。</li>
+<li>NSP曾被BERT用来学习句间关系，但后续研究发现去掉NSP反而更好。请分析NSP存在的问题。</li>
+<li>BERT是Encoder-only架构，无法直接用于文本生成。请从注意力mask角度解释原因。</li>
+<li>对比BERT和GPT的预训练目标：MLM(双向) vs NTP(因果)。两者学到的语言表示有什么本质区别？</li>
+<li>微调BERT时学习率通常2e-5到5e-5，只需1-3个epoch。请从"灾难性遗忘"角度解释。</li>
+</ol>
+</div>
+<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
+<ol>
+<li><strong>核心原理</strong>: 如果100%选中token用[MASK]，下游任务无[MASK]标记造成预训练-微调不匹配。80%用[MASK]提供噪声信号，10%随机词迫使模型不只依赖[MASK]预测，10%保留原token提供"捷径"让模型判断是否被替换。噪声注入使表示更鲁棒，无此设计的版本GLUE低1-2个点。<br><strong>关键要点</strong>:①防止预训练-微调不匹配 ②消除[MASK]依赖 ③提供噪声学习信号 ④随机词增强上下文依赖 ⑤10%原token降低难度</li>
+<li><strong>核心原理</strong>: NSP只需判断两句是否来自同一文档——任务太简单，loss接近0无法提供有效梯度。连续采样两句子(而非随机配对)效果更好。ALBERT的SOP(判断两句顺序)比NSP更难且更有用。RoBERTa去NSP+更长训练从80.5提升到88.5分。<br><strong>关键要点</strong>:①任务太简单 ②loss迅速接近0 ③连续采样优于随机配对 ④SOP替代NSP更好 ⑤RoBERTa验证去NSP有效</li>
+<li><strong>核心原理</strong>: BERT双向注意力让每个位置看到所有位置。自回归生成时位置i不能看i+1的信息，但训练时看过了——信息泄漏导致训练-推理不一致。Causal Mask(只允许看过去)解决了这个问题，因此文本生成需要Decoder-only架构。<br><strong>关键要点</strong>:①双向vs因果信息不对称 ②训练-推理不一致 ③Causal Mask解决 ④Encoder难做生成 ⑤UniLM折中方案</li>
+<li><strong>核心原理</strong>: BERT的MLM利用双向上下文预测被mask token，学到"深度双向表示"——每个词融合全文信息，适合理解任务。GPT的自回归NTP只利用左侧上下文，学到"因果表示"——擅长生成因为训练推理一致。BERT擅长NLU，GPT擅长NLG。规模增大使Decoder-only也能超越Encoder-only。<br><strong>关键要点</strong>:①BERT双向表示适合理解 ②GPT因果表示适合生成 ③MLM全局特征vs NTP连贯性 ④预训练目标决定表示偏向 ⑤规模可弥补架构差异</li>
+<li><strong>核心原理</strong>: 低学习率和少epoch避免灾难性忘——预训练学到的通用语言知识被小数据微调覆盖。大学习率高epoch会破坏预训练权重并在小数据上过拟合。warmup+线性衰减进一步保护模型，LoRA只调0.1%参数更彻底避免遗忘。<br><strong>关键要点</strong>:①避免灾难性遗忘 ②小数据易过拟合 ③低学习率微调 ④warmup策略 ⑤LoRA避免遗忘</li>
+</ol>
+</div>
+<div class="box exercise"><div class="label">🎯 动手练习</div>
+<p>请用HuggingFace微调BERT：</p>
+<ol>
+<li>加载预训练BERT+分类头</li>
+<li>实现低学习率微调(warmup+衰减)</li>
+<li>对比全量微调vs LoRA微调</li>
+</ol>
+</div>
+<div class="box answer" style="background:linear-gradient(135deg,#1a2a3a,#0d1720);border:1px solid #2d4a5a;border-left:3px solid #60a5fa;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#60a5fa;font-weight:bold;font-size:1.05em">💡 参考答案与详解</div>
+<pre><code><span class="keyword">from</span> transformers <span class="keyword">import</span> BertForSequenceClassification, AdamW, get_linear_schedule_with_warmup
+model = BertForSequenceClassification.from_pretrained(<span class="string">'bert-base-uncased'</span>, num_labels=2)
+optimizer = AdamW([
+    {<span class="string">'params'</span>: model.bert.parameters(), <span class="string">'lr'</span>: 2e-5},
+    {<span class="string">'params'</span>: model.classifier.parameters(), <span class="string">'lr'</span>: 1e-4}
+], weight_decay=0.01)
+scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=int(0.1*total_steps), num_training_steps=total_steps)
+<span class="comment"># LoRA: 将W_q/W_v分解为W+BA (B∈R^{d×r}, A∈R^{r×d}, r&lt;&lt;d)，只训练A和B</span></code></pre>
+<p><strong>关键知识点</strong>: (1)MLM噪声注入策略 (2)NSP局限性与SOP替代 (3)双向vs因果注意力 (4)灾难性遗忘与低学习率 (5)LoRA减少可训练参数99%+。</p>
+</div>
+</div>
 <div class="footer"><p>🧠 从深度学习到LLM · 15 · BERT — 双向预训练</p><p><a href="index.html">返回模型总览</a></p></div>
 </body>
 </html>

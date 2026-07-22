@@ -444,6 +444,66 @@ def benchmark(model, x, n=100):
 
 </div>
 <p>LLaMA系列模型的开源策略极大地推动了学术界和工业界对大语言模型的研究与应用，催生了大量创新工作。</p>
+
+<h2>📝 练习与思考</h2>
+<div class="box exercise"><div class="label">🎯 思考题</div>
+<ol>
+<li>LLaMA使用RMSNorm替代LayerNorm：RMSNorm(x) = x / √(mean(x²)+ε) ⊙ γ。请分析：(1)RMSNorm相比LayerNorm少了什么？(2)为什么在LLM中RMSNorm比LayerNorm更高效且效果相当？</li>
+<li>LLaMA使用RoPE(旋转位置编码)替代绝对位置编码。请从 attention score = (Rₘq)ᵀ(Rₙk) = qᵀR_{ₘ-ₙ}k 的角度解释：为什么RoPE使attention天然依赖相对位置？这对长度外推有什么好处？</li>
+<li>LLaMA-2引入了Grouped-Query Attention(GQA)：多个查询头共享一个KV头。请计算：标准MHA(d=4096,nh=32) vs GQA(nh=32,ng=8)的KV Cache大小差异。为什么GQA几乎不损失质量却大幅降低推理成本？</li>
+<li>LLaMA系列成功的关键之一是"用更多数据训练更小模型"的Chinchilla范式。请分析：(1)为什么LLaMA-13B在多数benchmark上超越了GPT-3(175B)？(2)开源策略如何推动了后续LLM的发展？</li>
+<li>SwiGLU激活函数(LLaMA的FFN使用)：SwiGLU(x)=Swish(xW₁)⊙(xW₂)。请分析：为什么SwiGLU相比ReLU在LLM中效果更优？SwiGLU使FFN参数量增加了多少？</li>
+</ol>
+</div>
+<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
+<ol>
+<li><strong>核心原理</strong>: LN(x)=(x-mean)/√(var+ε)需计算均值和方差(2次遍历)；RMSNorm只计算均方根(0均值假设)，省去减均值计算。在LLM中RMSNorm：(1)计算少5-10%；(2)对初始化不敏感；(3)效果与LN相当。为什么有效？因为LLM归一化中减均值不是关键——"缩放"才是保证梯度大小的核心。LLaMA的所有子层前都使用RMSNorm。</li>
+<li><strong>核心原理</strong>: RoPE将位置m编码为旋转矩阵Rₘ：对d/2对分量分别旋转角度mθᵢ。关键性质：qᵀRₘᵀRₙk=qᵀR_{ₘ-ₙ}k——attention score只依赖(m-n)而非绝对位置。这使：(1)模型天然学到相对距离；(2)序列长度外推——训练长度内的旋转模式可推广到更长序列；(3)比可学习PE在外推时性能下降更少。</li>
+<li><strong>核心原理</strong>: 标准MHA KV Cache：2×n_layers×n_heads×d_head×seq_len。LLaMA-2 70B(80层,32头,d=128)：2×80×32×128×seq_len。GQA(8组)：2×80×8×128×seq_len——减少4倍。GQA几乎不降质因为：(1)多个Q头共享KV提供的信息冗余很低(每个Q头需要的信息高度相关)；(2)注意力分数矩阵在多个Q头间差异由Q的投影决定。</li>
+<li><strong>核心原理</strong>: (1)LLaMA-13B训了1T(远多于GPT-3的300B)token+高质量数据——更好的Chinchilla利用。13B×20=260B(Chinchilla最优)，GPT-3应训3.5T但只训了300B。开源使：(1)社区复现和改进；(2)微调生态爆炸；(3)推动ChatGPT竞争对手开源(LLaMA→Alpaca→Vicuna→各种变体)。</li>
+<li><strong>核心原理</strong>: SwiGLU优势：(1)Swish是自门控(σ(x)平滑)而非硬门控(ReLU阶梯)；(2)双线性投影使表达力更强。参数量增加33%：标准FFN=2d×4d=8d²；SwiGLU=3d×4d=12d²。LLaMA论文和PaLM证明SwiGLU在LLM中比ReLU/GELU优0.5-1个点。代价：推理时FFN计算慢33%。</li>
+</ol>
+</div>
+<div class="box exercise"><div class="label">🎯 动手练习</div>
+<p>请实现LLaMA核心组件：</p>
+<ol>
+<li>实现RMSNorm</li>
+<li>实现RoPE旋转位置编码</li>
+<li>实现SwiGLU FFN</li>
+<li>实现GQA注意力</li>
+</ol>
+</div>
+<div class="box answer" style="background:linear-gradient(135deg,#1a2a3a,#0d1720);border:1px solid #2d4a5a;border-left:3px solid #60a5fa;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#60a5fa;font-weight:bold;font-size:1.05em">💡 参考答案与详解</div>
+<pre><code><span class="keyword">import</span> torch, torch.nn <span class="keyword">as</span> nn, math
+
+<span class="keyword">class</span> <span class="cmd">RMSNorm</span>(nn.Module):
+    <span class="keyword">def</span> <span class="cmd">__init__</span__(self, dim, eps=1e-6):
+        <span class="cmd">super</span>().<span class="cmd">__init__</span__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+    <span class="keyword">def</span> <span class="cmd">forward</span>(self, x):
+        var = x.pow(2).mean(-1, keepdim=True)
+        <span class="keyword">return</span> self.weight * x * torch.rsqrt(var + self.eps)
+
+<span class="keyword">def</span> <span class="cmd">apply_rope</span>(q, k, cos, sin):
+    <span class="comment"># q: (B, H, T, D), cos/sin: (T, D)</span>
+    q1, q2 = q[..., :D//2], q[..., D//2:]
+    k1, k2 = k[..., :D//2], k[..., D//2:]
+    <span class="keyword">return</span> torch.cat([q1*cos - q2*sin, q1*sin + q2*cos], -1)
+
+<span class="keyword">class</span> <span class="cmd">SwiGLU</span>(nn.Module):
+    <span class="keyword">def</span> <span class="cmd">__init__</span__(self, dim, hidden):
+        <span class="cmd">super</span>().<span class="cmd">__init__</span__()
+        self.w1 = nn.Linear(dim, hidden, bias=<span class="keyword">False</span>)
+        self.w2 = nn.Linear(hidden, dim, bias=<span class="keyword">False</span>)
+        self.w3 = nn.Linear(dim, hidden, bias=<span class="keyword">False</span>)
+    <span class="keyword">def</span> <span class="cmd">forward</span>(self, x):
+        <span class="keyword">return</span> self.w2(torch.nn.functional.silu(self.w1(x)) * self.w3(x))</code></pre>
+<p><strong>关键知识点</strong>: (1)RMSNorm更高效且效果相当 (2)RoPE天然编码相对位置 (3)GQA减少KV Cache (4)Chinchilla范式=更多数据+更小模型 (5)SwiGLU优于ReLU。</p>
+</div>
+</div>
 <div class="footer"><p>🧠 从深度学习到LLM · 22 · LLaMA — 开源大模型的里程碑</p><p><a href="index.html">返回模型总览</a></p></div>
 </body>
 </html>
