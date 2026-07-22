@@ -221,6 +221,45 @@ tr:hover { background: rgba(88,166,255,0.05); }
   .warn { background: #2d1b00; border-left: 4px solid #d29922; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
   .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
   .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
+
+/* 可折叠答案样式 */
+.answer-toggle {
+  display: inline-block;
+  background: linear-gradient(135deg, #1a3a2a, #0d1f17);
+  color: #4ade80;
+  border: 1px solid #2d5a3d;
+  border-radius: 6px;
+  padding: 6px 14px;
+  margin: 8px 0;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s;
+  user-select: none;
+}
+.answer-toggle:hover {
+  background: linear-gradient(135deg, #2d5a3d, #1a3a2a);
+  border-color: #4ade80;
+}
+.answer-toggle .icon {
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.2s;
+}
+.answer-toggle.open .icon {
+  transform: rotate(90deg);
+}
+.answer-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+.answer-content.show {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 </style>
 </head>
 <body>
@@ -1974,7 +2013,8 @@ groups:
 </ol>
 </div>
 
-<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
+<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <ol>
 <li><strong>核心原理</strong>: 在传统Web服务中，请求是无状态的——任何节点都可以处理任何请求，迁移成本几乎为零。但LLM推理服务是有状态的：每个正在进行的请求都持有KV Cache，这是调度决策的根本差异。KV Cache对集群调度的影响体现在五个维度：①请求状态：KV Cache绑定到特定GPU，不能随意迁移；②资源模型：GPU内存（固定且昂贵），KV Cache占用显著（LLaMA-70B单请求约2.3GB/4K tokens）；③负载单位：不再是简单的请求数/QPS，而是Token数×序列长度+KV Cache大小；④迁移成本：KV Cache重新计算代价高昂；⑤并发模型：GPU批处理+连续调度，而非进程/线程池。调度器如果不感知KV Cache的内存占用，就会导致OOM崩溃——一个80G显存的GPU，即使有空间，也可能因KV Cache碎片无法调度新请求。<br><strong>关键要点</strong>: ①KV Cache是有状态的，绑定到特定GPU，迁移需重计算；②KV Cache大小公式：2×num_layers×num_kv_heads×head_dim×seq_len×dtype_bytes；③GPU内存容量直接决定并发数（LLaMA-70B单卡约5个并发/4K context）；④调度器必须预估每个请求的KV Cache开销；⑤KV Cache生命周期与请求生命周期完全绑定（T0到达→T1 Prefill→T2 Decode循环→T3完成→T4回收）。<br><strong>实际案例</strong>: 以LLaMA-70B部署在A100-80G上为例：模型权重占用约70GB，剩余约7GB可用于KV Cache。每个token的KV Cache约0.31MB，4K context的单请求需约1.25GB。因此最大并发约5个请求。调度器维护KV Cache使用率监控，当使用率超过95%（high watermark）时拒绝新请求，80%-95%之间正常接收，低于80%时积极接收。如果不做这种准入控制，第6个请求会导致GPU OOM。<br><strong>关联知识</strong>: 与PagedAttention技术直接相关——PagedAttention通过分页管理KV Cache（类似OS虚拟内存），解决了内存碎片问题，提高KV Cache内存利用率。同时关联Continuous Batching——每个decode iteration调度器需检查是否有请求完成并释放KV Cache，然后从等待队列接入新请求。

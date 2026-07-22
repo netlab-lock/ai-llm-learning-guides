@@ -62,6 +62,45 @@ tr:hover td{background:#161b22}
 
 .diagram{background:#0d1117;border:1px solid #30363d;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
 .diagram-title{color:#58a6ff;font-weight:700;font-size:1.05em;margin-bottom:1rem;text-align:center}
+
+/* 可折叠答案样式 */
+.answer-toggle {
+  display: inline-block;
+  background: linear-gradient(135deg, #1a3a2a, #0d1f17);
+  color: #4ade80;
+  border: 1px solid #2d5a3d;
+  border-radius: 6px;
+  padding: 6px 14px;
+  margin: 8px 0;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s;
+  user-select: none;
+}
+.answer-toggle:hover {
+  background: linear-gradient(135deg, #2d5a3d, #1a3a2a);
+  border-color: #4ade80;
+}
+.answer-toggle .icon {
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.2s;
+}
+.answer-toggle.open .icon {
+  transform: rotate(90deg);
+}
+.answer-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+.answer-content.show {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 </style>
 </head>
 <body>
@@ -338,7 +377,8 @@ S3/NFS ──→ GPU HBM       (从网络存储加载)
 <strong>L2 分析：</strong>在跨节点场景下（InfiniBand 400G），KV 缓存传输延迟约为 50ms。对于一个 TTFT 目标为 100ms 的系统，传输占了 50%。如何优化？<br><br>
 <strong>L3 创造：</strong>设计一个"流水线传输"方案，在 Prefill 计算的同时就开始传输已完成层的 KV 缓存，而不是等全部 Prefill 完成后再传输。
 </div>
-<div class="box answer" style="background:linear-gradient(135deg,#1a1a2e,#0d0d1f);border:1px solid #3d3d5a;border-left:3px solid #a78bfa;border-radius:8px;padding:16px;margin:12px 0">
+<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
+<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a1a2e,#0d0d1f);border:1px solid #3d3d5a;border-left:3px solid #a78bfa;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#a78bfa;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <p><strong>L1 理解</strong>: GPUDirect RDMA 实现零拷贝的核心原理是<strong>绕过 CPU 内存</strong>。传统传输路径为：GPU HBM → PCIe → CPU DRAM → CPU 处理 → CPU DRAM → PCIe → NIC → 网络 → NIC → PCIe → CPU DRAM → PCIe → GPU HBM，共 6 步拷贝，CPU 参与 4 次。GPUDirect RDMA 允许 NIC（网卡）直接通过 PCIe 总线访问 GPU 的 HBM 内存，路径简化为：GPU HBM → PCIe → NIC → 网络 → NIC → PCIe → GPU HBM，仅 2 次 DMA 操作。关键机制：NVIDIA 内核驱动注册 GPU 内存的物理地址到 NIC 的页表中，NIC 可以像访问自己的内存一样直接读写 GPU VRAM，无需 CPU 中转。这不仅减少了 4 次内存拷贝，更关键的是释放了 CPU 不参与数据搬运。</p>
 <p><strong>L2 分析</strong>: 跨节点场景下 KV 传输 50ms 占 TTFT 50% 的优化方案：<br>（1）<strong>压缩传输</strong>：对 KV 缓存使用 FP8 或 INT4 量化后再传输，数据量减少 2-4x，传输时间从 50ms 降到 12-25ms。解压在目标 GPU 上用 Tensor Core 完成，仅需 ~0.5ms；<br>（2）<strong>流水线传输</strong>：不等全部 Prefill 完成再传输，而是每完成一层就立即开始传输该层的 KV（详见 L3 方案）。这样传输延迟被计算延迟"掩盖"，净传输时间接近 0；<br>（3）<strong>前缀缓存复用</strong>：如果请求的前缀已在目标 Decode Worker 上缓存，只需传输增量部分（新计算的 KV），传输量可能减少 50-90%；<br>（4）<strong>就近调度</strong>：Router 优先将请求路由到同一 NVL 域内的 Decode Worker，节点内 NVLink 传输仅需 1-3ms，完全避免跨节点传输；<br>（5）<strong>预取</strong>：根据请求模式预测哪些 Decode Worker 可能需要 KV，提前建立 RDMA 连接并预注册内存区域，减少连接建立的延迟开销。</p>

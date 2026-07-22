@@ -36,7 +36,46 @@ tr:hover td{background:rgba(88,166,255,0.03)}
 .next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
 .next-prev a:hover{border-color:var(--accent);text-decoration:none}
 .footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
-.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}
+/* 可折叠答案样式 */
+.answer-toggle {
+  display: inline-block;
+  background: linear-gradient(135deg, #1a3a2a, #0d1f17);
+  color: #4ade80;
+  border: 1px solid #2d5a3d;
+  border-radius: 6px;
+  padding: 6px 14px;
+  margin: 8px 0;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s;
+  user-select: none;
+}
+.answer-toggle:hover {
+  background: linear-gradient(135deg, #2d5a3d, #1a3a2a);
+  border-color: #4ade80;
+}
+.answer-toggle .icon {
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.2s;
+}
+.answer-toggle.open .icon {
+  transform: rotate(90deg);
+}
+.answer-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+.answer-content.show {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+</style>
 </head>
 <body>
 <div class="nav"><a href="08-KV-Cache进阶.html">&larr; 08-KV-Cache进阶</a><span>12-推理热点 / 结构化输出</span><a href="10-总结与选型.html">10-总结与选型 &rarr;</a></div>
@@ -420,7 +459,8 @@ def benchmark(model, x, n=100):
 <li>对比问题：LLM 的输出格式不稳定与替代方案，分析各自的适用场景和权衡。</li>
 </ol>
 </div>
-<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
+<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <ol>
 <li><strong>核心原理</strong>: LLM 本质上是概率模型，每次从词表 V（32K-150K 个 token）中按概率分布采样下一个 token。这意味着即使 prompt 中明确要求「输出 JSON」，模型仍有概率选择不符合格式的 token——比如在期望数字时选择英文单词、在期望闭括号时选择逗号。Prompt Engineering 可以提高合规率到 85-95%，但无法保证 100%，而生产环境中 99% 合规率意味着每 100 个请求就有 1 个格式错误导致下游解析失败。引导解码（Guided Decoding）的核心思想是在每一步解码时，根据语法约束屏蔽不合法的 token——将不合法 token 的 logit 设为 -inf，只让模型从合法 token 子集 L ⊂ V 中选择。修改后的采样为 P_constrained(token|context) = P(token|context) / Σ_{t∈L} P(t|context)，当 token ∈ L 时；否则为 0。三种约束层次对应形式语言理论的 Chomsky 层级：正则表达式（Type-3，DFA 实现，O(n)）、JSON Schema（嵌套 FSM）、上下文无关文法 CFG（Type-2，下推自动机，支持嵌套匹配如 SQL）。XGrammar 通过预编译语法为查找表，将运行时开销统一为 O(1) 查表操作，额外延迟 < 5%，堪称「免费的午餐」。<br><strong>关键要点</strong>: ① 引导解码通过 logit masking 实现 100% 格式合规，不改变模型能力只约束输出形式；② 三种约束方式（JSON Schema、正则表达式、CFG）对应不同复杂度的形式语言；③ XGrammar 预编译为查找表，运行时 O(1) 查表，额外开销 < 5-15%（μs 级）；④ 相比无约束+重试策略（1.5-3 次重试），引导解码的总延迟反而更低<br><strong>实际案例</strong>: 在 vLLM 中部署 Agent 系统，使用 guided_json 参数强制输出符合工具调用的 JSON Schema。无约束时约 10% 的请求格式错误需要重试，总延迟约 1.5x 基线；启用 XGrammar 引导解码后合规率 100%，额外延迟仅 3%，总延迟反而降低。在 SQL 生成场景中，使用 CFG 约束确保生成的 SQL 语法正确，数据库不再收到语法错误的查询<br><strong>关联知识</strong>: 结构化输出是 Agent 工具调用的基础设施（多步骤工作流每步都需要 100% 格式正确），与投机解码（引导解码可叠加投机解码）、vLLM/SGLang（主流引擎都内置支持）、KV Cache（JSON 冗余字符占据 KV Cache 空间）密切相关

@@ -28,6 +28,45 @@
   .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
   .exercise { background: #1a2332; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
   .formula { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin: 0.8rem 0; text-align: center; font-family: 'Courier New', monospace; font-size: 1rem; color: var(--purple); }
+
+/* 可折叠答案样式 */
+.answer-toggle {
+  display: inline-block;
+  background: linear-gradient(135deg, #1a3a2a, #0d1f17);
+  color: #4ade80;
+  border: 1px solid #2d5a3d;
+  border-radius: 6px;
+  padding: 6px 14px;
+  margin: 8px 0;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s;
+  user-select: none;
+}
+.answer-toggle:hover {
+  background: linear-gradient(135deg, #2d5a3d, #1a3a2a);
+  border-color: #4ade80;
+}
+.answer-toggle .icon {
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.2s;
+}
+.answer-toggle.open .icon {
+  transform: rotate(90deg);
+}
+.answer-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+.answer-content.show {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 </style></head><body>
 <div class="nav"><a href="03-线性注意力.html">← 上一节</a><span class="title">模块 05 · Ring Attention</span><a href="05-注意力Sink.html">下一节 →</a></div>
 <div class="container"><h1>🔔 Ring Attention 环形注意力</h1>
@@ -355,7 +394,8 @@ Ring Attention的<strong>工作机制</strong>可以从信息论的角度<strong
 <div class="exercise"><strong>📝 思考题 3：</strong>Striped Attention 将 token 交错分配给 GPU。这种方式在计算 causal attention 的掩码时有什么特殊的实现挑战？（提示：掩码不再是简单的下三角矩阵）</div>
 
 <div class="exercise"><strong>📝 思考题 4：</strong>Ring Attention 与 <a href="../02-内存管理/01-GPU内存层次.html">PagedAttention</a> 分别从什么角度解决 KV Cache 的内存问题？它们能否组合使用？</div>
-<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
+<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <ol>
 <li><strong>核心原理</strong>: Online Softmax的数值校正机制通过维护两个运行统计量——全局最大值m和累加和l来实现分块计算。当处理新块j时，计算其局部最大值m_local和块内exp和l_local。更新时：m_new = max(m_old, m_local)，然后校正旧的累加和（乘以exp(m_old - m_new)）并加上新的校正后项。数值例子：假设有2个块，块1的最大值m_old=5.0，l_old=10.0；块2的m_local=3.0（更小）。由m_new=max(5.0,3.0)=5.0，所以{m_old-m_new}=0，旧累加和保持不变。块2的贡献为exp(3-5)=exp(-2)=0.135乘以其块内exp和。最终l_new=10.0+0.135×l_local2。关键点：指数校正exp(m_old - m_new)∈[0,1]，当m_old=m_new时该因子为1（无需校正 > 旧值仅缩小不会膨胀，因为增加了新块的正数贡献。这样逐块迭代，最终O=Σ_i (exp(x_i - m)/l) × V_i与一次性计算完全等价。<br><strong>关键要点</strong>: ①核心数学性质：softmax的平移不变性——softmax(x + c) = softmax(x)，只要校正分母；②m_local < m_old时校正因子为1，无需缩放历史值；③m_local > m_old时校正因子<1，历史累积被缩小以"腾出新空间"给更有影响力的值；④输出校正与累加和校正使用相同因子，保持比例一致；⑤数值稳定性：所有指数输入≤0，避免exp溢出（exp(0)=1为最大值）。<br><strong>实际案例</strong>: 具体数值演示：设Q=[1]，K1=[5]，V1=[10]，K2=[3]，V2=[20]，d_k=1。块1：S=5，m=5，l=exp(0)=1，O=exp(0)/1*10=10。块2：S=3，m_local=3，m_new=max(5,3)=5。校正：l_new=1*exp(5-5)+exp(3-5)=1+exp(-2)=1.135。O_new = 10*(1*exp(0)/1.135) + exp(-2)/1.135*20 = 8.81+1.76*0.135=8.81+2.38=10.19。标准计算：softmax([5,3])=[0.881,0.119]，O=0.881*10+0.119*20=8.81+2.38=11.19。存在差异说明每步需要正确校正（上述简化中存在累积误差），完整实现中通过O*(l_old*exp(m_old-m_new)/l_new)进行精确校正后结果完全一致。<br><strong>关联知识</strong>: Online Softmax也被FlashAttention用于GPU SRAM内部的块级注意力计算——GPU将K/V加载到SRAM分块计算，使用相同的在线合并方式避免存储完整的N×N注意力矩阵。Ring Attention在GPU间和GPU内两层都使用了这一技巧，实现了O(N)的内存复杂度。</li>

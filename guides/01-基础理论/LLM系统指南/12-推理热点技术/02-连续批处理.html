@@ -35,7 +35,46 @@ tr:hover td{background:rgba(88,166,255,0.03)}
 .next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
 .next-prev a:hover{border-color:var(--accent);text-decoration:none}
 .footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
-.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}
+/* 可折叠答案样式 */
+.answer-toggle {
+  display: inline-block;
+  background: linear-gradient(135deg, #1a3a2a, #0d1f17);
+  color: #4ade80;
+  border: 1px solid #2d5a3d;
+  border-radius: 6px;
+  padding: 6px 14px;
+  margin: 8px 0;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s;
+  user-select: none;
+}
+.answer-toggle:hover {
+  background: linear-gradient(135deg, #2d5a3d, #1a3a2a);
+  border-color: #4ade80;
+}
+.answer-toggle .icon {
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.2s;
+}
+.answer-toggle.open .icon {
+  transform: rotate(90deg);
+}
+.answer-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+.answer-content.show {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+</style>
 </head>
 <body>
 <div class="nav"><a href="01-总览.html">&larr; 01-总览</a><span>12-推理热点 / 连续批处理</span><a href="03-Chunked-Prefill.html">03-Chunked-Prefill &rarr;</a></div>
@@ -364,7 +403,8 @@ def benchmark(model, x, n=100):
 <li>对比背景：LLM 推理的"一问一答"特性与替代方案，分析各自的适用场景和权衡。</li>
 </ol>
 </div>
-<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
+<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <ol>
 <li><strong>核心原理</strong>: LLM推理的"一问一答"特性指每生成一个token都需要完整跑一遍模型前向传播，一个200字的回答需要200+次前向传播。这导致单次请求的GPU利用率极低——GPU的设计哲学是"大量简单核心并行计算"，单请求只用到一小部分核心。连续批处理的核心原理是将"调度"和"计算"解耦：调度器独立运行在CPU上，每生成一个token（每个iteration）就重新检查running队列和waiting队列，动态替换已完成的请求，确保GPU槽位始终满载。这与静态批处理形成鲜明对比——静态批处理必须等整批完成才能处理下一批，已完成请求的槽位空闲但无法被新请求填充。连续批处理的调度粒度精确到每个iteration（微秒级调度开销 vs 毫秒级GPU计算），使得GPU利用率从静态批处理的30-60%提升到80-95%。<br><strong>关键要点</strong>: ①连续批处理解决的是"GPU显存槽位的动态复用"问题，不是简单的多线程——即使有100个线程，如果batch中有超长请求，其他请求仍要等它完成才能被替换；②调度粒度是核心区别：静态批处理按"整个batch结束"调度，连续批处理按"每个iteration"调度；③"木桶效应"是静态批处理的致命问题——batch中最慢的请求决定整批完成时间，短请求完成后槽位空闲浪费；④所有现代推理引擎（vLLM/SGLang/TensorRT-LLM/llama.cpp）都内置连续批处理，已成为基础设施；⑤连续批处理不能解决长prompt阻塞（需Chunked Prefill）和KV Cache内存碎片（需PagedAttention）。<br><strong>实际案例</strong>: 用vLLM部署LLaMA-3-8B，发送100个并发请求（长度从10到500 token不等）。设置max_num_seqs=1模拟静态批处理：GPU利用率从100%逐步下降到30%，P99延迟超过30秒（长请求阻塞短请求）。设置max_num_seqs=64启用连续批处理：GPU利用率稳定在85-95%，吞吐量提升5-8倍，P99延迟降至3秒以内。短请求（10 token）完成后立刻让位给新请求，不再被长请求拖累。<br><strong>关联知识</strong>: 连续批处理是推理优化四层架构中调度层的基础技术，与Chunked Prefill（解决长prompt阻塞）、PagedAttention（解决KV Cache碎片）、FlashAttention（加速注意力计算）共同构成推理优化的四大基础设施。同时与推理总览中的TTFT/TPOT指标直接相关——连续批处理主要改善吞吐量和P99延迟。</li>

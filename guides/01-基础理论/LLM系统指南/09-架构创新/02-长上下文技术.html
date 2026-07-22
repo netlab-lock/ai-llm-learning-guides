@@ -36,7 +36,46 @@ tr:hover td{background:rgba(88,166,255,0.03)}
 .next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
 .next-prev a:hover{border-color:var(--accent);text-decoration:none}
 .footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
-.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}
+/* 可折叠答案样式 */
+.answer-toggle {
+  display: inline-block;
+  background: linear-gradient(135deg, #1a3a2a, #0d1f17);
+  color: #4ade80;
+  border: 1px solid #2d5a3d;
+  border-radius: 6px;
+  padding: 6px 14px;
+  margin: 8px 0;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s;
+  user-select: none;
+}
+.answer-toggle:hover {
+  background: linear-gradient(135deg, #2d5a3d, #1a3a2a);
+  border-color: #4ade80;
+}
+.answer-toggle .icon {
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.2s;
+}
+.answer-toggle.open .icon {
+  transform: rotate(90deg);
+}
+.answer-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+.answer-content.show {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+</style>
 </head>
 <body>
 <div class="nav"><a href="01-MoE混合专家.html">&larr; 01-MoE混合专家</a><span>09-架构 / 长上下文</span><a href="03-SSM与Mamba.html">03-SSM与Mamba &rarr;</a></div>
@@ -273,7 +312,8 @@ def benchmark(model, x, n=100):
 <li>对比上下文窗口演进与替代方案，分析各自的适用场景和权衡。</li>
 </ol>
 </div>
-<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
+<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <ol>
 <li><strong>核心原理</strong>: 长上下文技术的核心原理是通过四个层面的优化协同实现超长序列的有效处理：(1)位置编码层面——RoPE通过旋转矩阵将位置信息编码为旋转角度，使得注意力分数天然编码相对位置(m-n)，通过NTK-aware缩放或YaRN实现从训练长度(4K)到推理长度(128K+)的外推；(2)注意力计算层面——FlashAttention通过IO-aware分块技术，在GPU的SRAM中完成softmax分块计算，避免将O(n²)的完整注意力矩阵写入HBM，将IO复杂度从O(n²)降低到O(n²d/M)；(3)KV Cache压缩层面——GQA共享KV头(~8x压缩)、MLA低秩压缩(~14x压缩)、量化(INT4/INT8, 2-4x压缩)等技术组合可实现10-50倍总压缩比；(4)内存管理层面——PagedAttention借鉴OS虚拟内存的分页机制，将KV Cache分成固定大小的页按需分配，内存利用率从20-40%提升到95%以上。<br><strong>关键要点</strong>: (1)RoPE的外推问题是核心挑战——训练时只见过位置0-4095，低频维度编码远距离位置的角度组合可能从未见过；(2)NTK-aware缩放保持高频不变、只缩放低频，使远距离旋转角度落在训练范围内；(3)FlashAttention不改变数学计算只优化内存访问，FlashAttention-3利用Hopper GPU的WGMMA实现15-20x加速；(4)KV Cache量化中Key按通道维度量化、Value按token维度量化的非对称策略在INT2精度下仍保持较好质量；(5)"Lost in the Middle"现象表明重要信息应放在上下文开头或结尾。<br><strong>实际案例</strong>: 128K序列的标准注意力需要128K×128K=16B个元素(FP16约32GB显存)。通过FlashAttention可将显存降到O(n)级别。DeepSeek-V3的MLA将KV维度从16384压缩到512(32倍)，再INT8量化压缩2倍，总压缩比64倍。Gemini 1.5支持2M tokens上下文，Llama 4支持10M tokens，这些超长窗口都依赖RoPE+YaRN的位置编码外推和FlashAttention的高效计算。实际部署中应尽量控制输入在32K以内以避免"Lost in the Middle"效应。<br><strong>关联知识</strong>: 长上下文技术与Transformer架构基础密切相关——自注意力机制的O(n²)复杂度是所有优化的出发点。与MoE架构结合可进一步提升效率——MoE的稀疏激活减少FFN计算量，使注意力成为更突出的瓶颈。与推理优化(vLLM、SGLang)紧密相关——PagedAttention和KV Cache管理是推理引擎的核心功能。渐进式训练(先短后长)是获得长上下文能力的关键训练策略。</li>

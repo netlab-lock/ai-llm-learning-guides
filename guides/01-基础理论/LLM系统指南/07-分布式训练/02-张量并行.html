@@ -37,7 +37,46 @@ tr:hover td{background:rgba(88,166,255,0.03)}
 .next-prev a:hover{border-color:var(--accent);text-decoration:none}
 .footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
 .formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}
-.highlight{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin:16px 0;font-size:0.92em}</style>
+.highlight{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px 18px;margin:16px 0;font-size:0.92em}
+/* 可折叠答案样式 */
+.answer-toggle {
+  display: inline-block;
+  background: linear-gradient(135deg, #1a3a2a, #0d1f17);
+  color: #4ade80;
+  border: 1px solid #2d5a3d;
+  border-radius: 6px;
+  padding: 6px 14px;
+  margin: 8px 0;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s;
+  user-select: none;
+}
+.answer-toggle:hover {
+  background: linear-gradient(135deg, #2d5a3d, #1a3a2a);
+  border-color: #4ade80;
+}
+.answer-toggle .icon {
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.2s;
+}
+.answer-toggle.open .icon {
+  transform: rotate(90deg);
+}
+.answer-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+.answer-content.show {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+</style>
 </head>
 <body>
 <div class="nav"><a href="01-数据并行与FSDP.html">&larr; 01-数据并行与FSDP</a><span>07-分布式 / 张量并行</span><a href="03-流水线并行.html">03-流水线并行 &rarr;</a></div>
@@ -306,7 +345,8 @@ GPU (1,0): W10, GPU (1,1): W11
 <li>对比核心思想与数学原理与替代方案，分析各自的适用场景和权衡。</li>
 </ol>
 </div>
-<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
+<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <ol>
 <li><strong>核心原理</strong>: 张量并行的核心思想是将单个矩阵运算切分到多张 GPU 上并行执行，切分的是模型本身的权重矩阵。其数学基础是矩阵分块乘法：对于 Y = XW，将 W 按列切分为 [W1, W2]，则 Y = [X·W1, X·W2]，每张 GPU 独立计算一部分。Megatron-LM 的精妙之处在于 FFN 层的"列切+行切"交替模式：W1 按列切分（每 GPU 计算部分中间结果），激活函数 GeLU 是逐元素操作可分别应用，W2 按行切分后通过一次 AllReduce 聚合。这种交替模式确保每对连续层只需一次 AllReduce 而非两次。注意力层天然适合 TP：Q/K/V 投影矩阵按列切分（每 GPU 持有部分注意力头），W_O 按行切分。TP 的通信模式是每层 2 次 AllReduce（FFN + Attention 各一次），通信量为 4 × batch_size × seq_len × hidden_size × 2B/层。<br><strong>关键要点</strong>: ① W1 列切 + W2 行切的交替模式是最优策略，每层仅需 1 次 AllReduce；② MHA 的每个注意力头可独立计算，天然适合 TP；③ Flash Attention 与 TP 正交，可同时使用无额外通信；④ TP 度必须整除注意力头数和 FFN 中间层维度；⑤ TP 必须在 NVLink 互联的 GPU 上进行（PCIe 下 TP=8 通信开销 60%）。<br><strong>实际案例</strong>: 以 LLaMA-7B（hidden_size=4096, seq_len=2048, batch_size=1, TP=2）为例，每层前向 AllReduce 通信量为 32MB（FFN 16MB + Attn 16MB），32 层总计 1GB。在 NVLink 600 GB/s 上耗时仅 ~1.7ms（vs 计算时间 ~100ms，可忽略），但在 InfiniBand 50 GB/s 上耗时 ~20ms（占比 40%，不可接受）。这就是为什么 TP 通常限制在单机 8 卡内。DeepSeek-V3 通过 MLA 架构大幅减少注意力参数，实现 TP=1 完全消除 TP 通信开销。<br><strong>关联知识</strong>: TP 与流水线并行是互补的：TP 处理单层内的大通信量（需 NVLink），PP 处理层间的小通信量 P2P 传递（可跨机器）。在 3D 并行中，TP 通常设为单机 GPU 数（8），PP 跨机器。序列并行（Sequence Parallelism）将 LayerNorm/Dropout 沿序列维度切分，进一步减少显存。Ring Attention 将 KV 沿序列维度分布，支持百万 token 级别的超长序列处理。Expert Parallelism 是 TP 在 MoE 模型上的特殊形式。</li>

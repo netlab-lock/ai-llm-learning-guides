@@ -65,6 +65,45 @@ tr:hover td{background:#161b22}
 
 .diagram{background:#0d1117;border:1px solid #30363d;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
 .diagram-title{color:#58a6ff;font-weight:700;font-size:1.05em;margin-bottom:1rem;text-align:center}
+
+/* 可折叠答案样式 */
+.answer-toggle {
+  display: inline-block;
+  background: linear-gradient(135deg, #1a3a2a, #0d1f17);
+  color: #4ade80;
+  border: 1px solid #2d5a3d;
+  border-radius: 6px;
+  padding: 6px 14px;
+  margin: 8px 0;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s;
+  user-select: none;
+}
+.answer-toggle:hover {
+  background: linear-gradient(135deg, #2d5a3d, #1a3a2a);
+  border-color: #4ade80;
+}
+.answer-toggle .icon {
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.2s;
+}
+.answer-toggle.open .icon {
+  transform: rotate(90deg);
+}
+.answer-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+.answer-content.show {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 </style>
 </head>
 <body>
@@ -760,7 +799,8 @@ Local Planner: 每个区域独立的 SLA 驱动扩缩
 <strong>L2 分析：</strong>Request Migration 在什么场景下可能反而会降低系统性能？设计一个场景说明迁移的代价。<br><br>
 <strong>L3 创造：</strong>设计一个"成本感知"的扩缩策略——不仅考虑 SLA 达标，还考虑 GPU 成本。在什么条件下宁可牺牲一点延迟也要缩容节省成本？
 </div>
-<div class="box answer" style="background:linear-gradient(135deg,#1a1a2e,#0d0d1f);border:1px solid #3d3d5a;border-left:3px solid #a78bfa;border-radius:8px;padding:16px;margin:12px 0">
+<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
+<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a1a2e,#0d0d1f);border:1px solid #3d3d5a;border-left:3px solid #a78bfa;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#a78bfa;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <p><strong>L1 理解</strong>: Planner 四种扩缩模式的区别：<br>（1）<strong>Throughput 模式</strong>：最简单，基于队列深度和 KV 利用率等静态阈值扩缩——超过阈值就加 Worker，低于阈值就减。适合离线/批处理场景，不需要配置 SLA 目标；<br>（2）<strong>Load 模式</strong>：基于用户定义的负载指标（Prefill 队列 token 数、Decode KV 利用率）做反应式扩缩。比 Throughput 更精细，适合有明确负载特征的中等规模部署；<br>（3）<strong>SLA 模式</strong>：最强大，以 TTFT/ITL 延迟目标为驱动。内部使用性能模型（FPM）预测不同配置下的延迟表现，支持预测式（proactive）和反应式（reactive）两种策略。必须用 SLA 模式的场景：生产环境、有 SLA 承诺、需要精确控制延迟；<br>（4）<strong>Hierarchical 模式</strong>：跨多个集群/区域的全局调度，适合多区域全球部署。<br>选择指南：开发测试用 Throughput，中等规模生产用 Load，大规模有 SLA 要求的用 SLA，全球多区域用 Hierarchical。</p>
 <p><strong>L2 分析</strong>: Request Migration 反而降低性能的场景分析：<br>（1）<strong>高频迁移场景</strong>：假设 Worker 节点的 GPU 存在间歇性硬件问题（如显存 ECC 错误），每 30 秒触发一次故障。每次迁移的代价：① 状态重建延迟 ~100ms（在 Worker B 上重新注入已生成的 token 序列，需要重新计算 KV 缓存）；② 迁移期间客户端流式输出中断 100-200ms；③ 目标 Worker B 需要从当前 batch 中抢占一个槽位，影响该 batch 中其他请求的 ITL；<br>（2）<strong>具体量化</strong>：假设一个请求已生成 4K tokens（OSL=8K），迁移需要在 Worker B 上重做 4K tokens 的 Prefill（约 200ms），加上 KV 传输（~50ms），总延迟增加 250ms。如果迁移 3 次（最大限制），累计延迟增加 750ms，加上首次 Prefill 的 200ms，总 TTFT 变为 950ms，远超正常值 200ms；<br>（3）<strong>更优方案</strong>：对于这种场景，应该直接放弃该 Worker 的请求（返回错误让客户端重试），而非反复迁移。Dynamo 的迁移机制应该增加"迁移收益评估"——如果预估迁移延迟 > 重新发送请求的延迟，则放弃迁移。</p>

@@ -61,6 +61,45 @@ tr:hover td{background:#161b22}
 .kw{color:#ff7b72} .str{color:#a5d6ff} .cmt{color:#8b949e} .fn{color:#d2a8ff}
 .diagram{background:#0d1117;border:1px solid #30363d;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
 .diagram-title{color:#58a6ff;font-weight:700;font-size:1.05em;margin-bottom:1rem;text-align:center}
+
+/* 可折叠答案样式 */
+.answer-toggle {
+  display: inline-block;
+  background: linear-gradient(135deg, #1a3a2a, #0d1f17);
+  color: #4ade80;
+  border: 1px solid #2d5a3d;
+  border-radius: 6px;
+  padding: 6px 14px;
+  margin: 8px 0;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s;
+  user-select: none;
+}
+.answer-toggle:hover {
+  background: linear-gradient(135deg, #2d5a3d, #1a3a2a);
+  border-color: #4ade80;
+}
+.answer-toggle .icon {
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.2s;
+}
+.answer-toggle.open .icon {
+  transform: rotate(90deg);
+}
+.answer-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+.answer-content.show {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 </style>
 </head>
 <body>
@@ -382,7 +421,8 @@ dynamo_router_cache_affinity <span class="cmt"># 缓存亲和路由比例</span>
 <strong>L2 分析：</strong>在一个 8 卡 H100 节点上，如何分配 Prefill 和 Decode 的 GPU 数量？考虑 Llama-3-70B 模型和 50:50 的输入/输出比例。<br><br>
 <strong>L3 创造：</strong>设计一个监控告警方案，当 KV 缓存命中率下降时自动调整路由策略。
 </div>
-<div class="box answer" style="background:linear-gradient(135deg,#1a1a2e,#0d0d1f);border:1px solid #3d3d5a;border-left:3px solid #a78bfa;border-radius:8px;padding:16px;margin:12px 0">
+<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
+<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a1a2e,#0d0d1f);border:1px solid #3d3d5a;border-left:3px solid #a78bfa;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#a78bfa;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <p><strong>L1 理解</strong>: Dynamo 在 K8s 部署中的组件关系图：<br>用户通过 K8s Ingress/Gateway 进入集群 → DynamoGraphDeployment（DGD CRD）定义整个推理拓扑 → Grove Operator 监听 DGD CRD，创建和管理 Pod → Frontend Pod（API 网关）接收请求 → Router Pod（智能路由）查询 Radix Tree → Prefill Worker Pod 和 Decode Worker Pod 执行推理 → NIXL 在 Worker 间传输 KV 缓存 → KV Cache Manager Pod 管理多层缓存 → Planner Pod 监控 Prometheus 指标并调整 Worker 副本数。关键 CRD：DGD（定义模型、GPU 数、SLA 目标）、InferenceModel（定义模型配置）。Operator 通过 EndpointSlices 发现 Worker，无需 etcd/NATS。</p>
 <p><strong>L2 分析</strong>: 8 卡 H100 节点部署 Llama-3-70B（50:50 ISL/OSL）的 GPU 分配分析：<br>（1）<strong>模型约束</strong>：Llama-3-70B 需要 TP=8 才能放入单节点（70B × 2 bytes = 140GB > 80GB 单卡），因此无论 Prefill 还是 Decode 都至少需要 8 卡；<br>（2）<strong>分离式方案</strong>：由于 8 卡全部用于 TP=8，无法在单节点内同时运行独立的 Prefill 和 Decode 实例。方案选择：① 部署 2 个节点（节点 A 做 Prefill，节点 B 做 Decode），通过 IB 传输 KV；② 在单节点内使用"统一 Worker"模式，不做物理分离；<br>（3）<strong>单节点最优配置</strong>：使用 Unified Worker（混合模式），Planner 根据实时负载动态决定每个请求是否走分离路径。配置参数：--max-batch=128, --kv-cache-size=0.75（留 25% 显存给激活值），--router-strategy=kv-affinity；<br>（4）<strong>50:50 ISL/OSL 特征</strong>：输入输出均衡，Prefill 和 Decode 计算量相当，分离收益不如长输入短输出场景明显。单节点 Unified 模式的吞吐约比分离模式低 10-20%，但部署复杂度大幅降低。</p>

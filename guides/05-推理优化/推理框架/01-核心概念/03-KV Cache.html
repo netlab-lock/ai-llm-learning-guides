@@ -30,6 +30,45 @@
   .deep { background: #1a1024; border-left: 4px solid #a371f7; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
   .ascii { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.5rem; margin: 1rem 0; font-family: 'Courier New', monospace; font-size: 0.8rem; line-height: 1.4; white-space: pre; overflow-x: auto; color: var(--text-dim); }
   .exercise { background: #1a2332; border-left: 4px solid #58a6ff; padding: 12px 16px; margin: 15px 0; border-radius: 0 8px 8px 0; }
+
+/* 可折叠答案样式 */
+.answer-toggle {
+  display: inline-block;
+  background: linear-gradient(135deg, #1a3a2a, #0d1f17);
+  color: #4ade80;
+  border: 1px solid #2d5a3d;
+  border-radius: 6px;
+  padding: 6px 14px;
+  margin: 8px 0;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s;
+  user-select: none;
+}
+.answer-toggle:hover {
+  background: linear-gradient(135deg, #2d5a3d, #1a3a2a);
+  border-color: #4ade80;
+}
+.answer-toggle .icon {
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.2s;
+}
+.answer-toggle.open .icon {
+  transform: rotate(90deg);
+}
+.answer-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+.answer-content.show {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 </style></head><body>
 <div class="nav"><a href="02-自回归解码.html">← 上一节</a><span class="title">模块 01 · KV Cache</span><a href="04-注意力机制.html">下一节 →</a></div>
 <div class="container">
@@ -327,7 +366,8 @@ fn handle_request(prompt):
 <div class="exercise"><strong>📝 思考题 3：</strong>为什么 Decode 阶段是 memory-bound 而 Prefill 是 compute-bound？这对推理系统的批处理策略有什么影响？（提示：参考 <a href="../03-批处理技术/03-Chunked Prefill.html">Chunked Prefill</a>）</div>
 
 <div class="exercise"><strong>📝 思考题 4：</strong>假设你有 4 张 A100-80GB GPU，要部署 Llama-3-70B（80层、8 KV头、d_k=128、INT4 量化模型约 35GB），要求支持 32K 上下文。请计算单张 GPU 最多能放多少并发请求的 KV Cache，并思考如何用 <a href="../05-注意力优化/04-Ring Attention.html">Ring Attention</a> 或 <a href="../02-内存管理/01-GPU内存层次.html">PagedAttention</a> 优化。</div>
-<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
+<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <ol>
 <li><strong>核心原理</strong>: KV Cache之所以被称为"用空间换时间"，是因为它通过占用额外的GPU显存（空间）来存储已计算的K和V值，从而避免每次decode步骤中的重复计算（时间）。从数学角度分析：不使用KV Cache时，第t步需要重新计算所有t个token的K和V投影，投影部分的总FLOPs为Σ_{t=1}^{N} 2×t×d×d_k = O(N²·d·d_k)，即二次复杂度。使用KV Cache后，每个token的K和V只计算一次，投影总FLOPs降为Σ_{t=1}^{N} 2×d×d_k = O(N·d·d_k)，即线性复杂度。注意力计算部分仍为O(N²·d_k)。如果不用KV Cache，以N=1000为例，投影部分的计算量将增大约500倍！这使得推理延迟随序列长度急剧恶化，在工程上不可接受。<br><strong>关键要点</strong>: ①无KV Cache时投影计算为O(N²·d)，有KV Cache时为O(N·d)；②K和V能被缓存的根本原因是它们在计算后不再变化（W_k/W_v固定，x_i固定）；③Q不能缓存是因为每一步只需要当前token的Q；④K和V的角色不对称——Q是"提问者"，K/V是"知识库"；⑤即使有KV Cache，注意力计算本身仍为O(N²)，这是FlashAttention要解决的问题。<br><strong>实际案例</strong>: 以Llama-3-8B生成长度N=2048序列为例，无KV Cache时投影需重算约2048²×4096×128 ≈ 2.2×10¹²次操作，有KV Cache仅需2048×4096×128×2 ≈ 2.2×10⁹次操作，相差1000倍。实测中，无KV Cache的推理延迟将从每步10ms增长到全过程约10秒——完全无法实用。<br><strong>关联知识</strong>: "空间换时间"是计算机科学中最基本的权衡思想。类似的技术包括：数据库索引（用存储空间换取查询速度）、视频编码的参考帧缓存（用内存换取编码效率）、操作系统的页缓存（用RAM换取磁盘IO速度）。KV Cache的特殊之处在于它的"空间"需求是动态增长的——每生成一个token就多占一行KV，这带来了独特的内存管理挑战。</li>

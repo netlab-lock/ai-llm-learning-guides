@@ -36,7 +36,46 @@ tr:hover td{background:rgba(88,166,255,0.03)}
 .next-prev a{padding:10px 20px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:0.9em}
 .next-prev a:hover{border-color:var(--accent);text-decoration:none}
 .footer{text-align:center;padding:30px;color:var(--text2);font-size:0.82em}
-.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}</style>
+.formula{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;text-align:center;font-size:1.1em;margin:16px 0;color:#f0f6fc}
+/* 可折叠答案样式 */
+.answer-toggle {
+  display: inline-block;
+  background: linear-gradient(135deg, #1a3a2a, #0d1f17);
+  color: #4ade80;
+  border: 1px solid #2d5a3d;
+  border-radius: 6px;
+  padding: 6px 14px;
+  margin: 8px 0;
+  cursor: pointer;
+  font-size: 0.9em;
+  transition: all 0.2s;
+  user-select: none;
+}
+.answer-toggle:hover {
+  background: linear-gradient(135deg, #2d5a3d, #1a3a2a);
+  border-color: #4ade80;
+}
+.answer-toggle .icon {
+  display: inline-block;
+  margin-right: 6px;
+  transition: transform 0.2s;
+}
+.answer-toggle.open .icon {
+  transform: rotate(90deg);
+}
+.answer-content {
+  display: none;
+  animation: fadeIn 0.3s ease;
+}
+.answer-content.show {
+  display: block;
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+</style>
 </head>
 <body>
 <div class="nav"><a href="03-SSM与Mamba.html">&larr; 03-SSM与Mamba</a><span>09-架构 / 注意力与FFN变体</span><a href="05-总结与练习.html">05-总结与练习 &rarr;</a></div>
@@ -294,7 +333,8 @@ def benchmark(model, x, n=100):
 <li>对比注意力变体详解与替代方案，分析各自的适用场景和权衡。</li>
 </ol>
 </div>
-<div class="box answer" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
+<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
+<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <ol>
 <li><strong>核心原理</strong>: 注意力变体的核心原理是在保持模型表达能力的前提下，优化推理阶段的 KV Cache 内存占用和计算效率。标准 MHA 中每个注意力头都维护独立的 Key 和 Value 向量，导致 KV Cache 大小与头数成正比——以 LLaMA-3 70B 为例，80 层 × 64 头 × 128 维 × 128K 序列 × 2 字节 ≈ 33 GB，这已超过单张 A100 显存的一半。MQA 将所有头共享同一组 KV（压缩到 ~3%），GQA 将头分组共享（如 8 组，压缩到 ~25%），MLA 则通过低秩压缩将 KV 缓存为潜在向量（压缩到 ~7%）。在 FFN 侧，SwiGLU 引入门控机制 Swish(W₁x) ⊙ Vx，允许模型选择性激活特征维度，比传统 ReLU FFN 的"全有或全无"更精细。实际应用场景：在 vLLM 部署 LLaMA-3 70B 时，使用 GQA（8 个 KV 头）可将 KV Cache 从 33 GB 降至约 4 GB，使单卡可服务更多并发请求。<br><strong>关键要点</strong>: ① MHA→GQA→MQA→MLA 是 KV Cache 逐步压缩的谱系，MLA 通过低秩投影实现最高压缩比且性能损失最小；② SwiGLU 的门控机制让 FFN 也能"选择性激活"特征，中间维度需调整为 8d/3 以保持总参数量一致；③ MLA 不仅省空间还省算力——压缩后的低维向量减少了注意力计算的 FLOPs；④ MoE 是 FFN 层面的稀疏化策略，DeepSeek-V3 的 256 专家 top-8 路由使 671B 参数模型推理仅用 37B；⑤ GQA 可通过"uptraining"从 MHA 模型转换而来，将 KV 头分组平均后少量微调即可。<br><strong>实际案例</strong>: DeepSeek-V3 同时采用 MLA + SwiGLU + MoE 三种变体：MLA 将每层 KV Cache 从 16384 维压缩到 512 维（32x 压缩），SwiGLU 的门控 FFN 提供更强的特征表达能力，256 个细粒度专家配合无辅助损失负载均衡实现了高效稀疏激活。这种组合使其在推理效率和模型能力之间达到了 2025 年的帕累托最优。<br><strong>关联知识</strong>: 注意力变体与 FlashAttention（IO-aware 分块加速）、RoPE（位置编码）、以及长上下文技术紧密相关——GQA 的 KV Cache 压缩使 128K 长上下文推理成为可能；SwiGLU 的门控思想与 MoE 的路由机制一脉相承（都是"按需激活"）；MLA 的低秩压缩原理与 PCA 类似，揭示了 KV 向量间的冗余性。</li>
