@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>03 · 分离式推理 | NVIDIA Dynamo深度解读</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d1117;color:#c9d1d9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;line-height:1.7}
+.nav{background:#161b22;border-bottom:1px solid #30363d;padding:12px 24px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}
+.nav a{color:#58a6ff;text-decoration:none;font-size:14px}
+.nav a:hover{text-decoration:underline}
+.nav span{color:#8b949e;font-size:14px}
+.container{max-width:900px;margin:0 auto;padding:24px 20px 60px}
+h1{color:#f0f6fc;font-size:28px;margin:30px 0 16px;border-bottom:2px solid #21262d;padding-bottom:12px}
+h2{color:#f0f6fc;font-size:22px;margin:28px 0 12px;border-left:4px solid #58a6ff;padding-left:12px}
+h3{color:#e6edf3;font-size:18px;margin:20px 0 8px;color:#79c0ff}
+p{margin:10px 0;color:#c9d1d9}
+a{color:#58a6ff}
+ul,ol{margin:10px 0 10px 24px}
+li{margin:4px 0}
+code{background:#21262d;color:#79c0ff;padding:2px 6px;border-radius:4px;font-size:14px}
+pre{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;overflow-x:auto;margin:12px 0;font-size:13px;line-height:1.5}
+pre code{background:none;padding:0;color:#c9d1d9}
+table{width:100%;border-collapse:collapse;margin:16px 0;font-size:14px}
+th{background:#161b22;color:#58a6ff;padding:10px 12px;border:1px solid #30363d;text-align:left}
+td{padding:10px 12px;border:1px solid #30363d}
+tr:hover td{background:#161b22}
+.ascii{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;font-family:'Courier New',monospace;font-size:13px;line-height:1.4;overflow-x:auto;margin:12px 0;white-space:pre}
+.callout-tip{background:#0d1d30;border-left:4px solid #58a6ff;padding:12px 16px;margin:12px 0;border-radius:0 8px 8px 0}
+.callout-tip strong{color:#58a6ff}
+.callout-warn{background:#2d1b00;border-left:4px solid #d29922;padding:12px 16px;margin:12px 0;border-radius:0 8px 8px 0}
+.callout-warn strong{color:#d29922}
+.callout-deep{background:#1a1024;border-left:4px solid #a371f7;padding:12px 16px;margin:12px 0;border-radius:0 8px 8px 0}
+.callout-deep strong{color:#a371f7}
+.callout-exercise{background:#0d2818;border-left:4px solid #238636;padding:12px 16px;margin:12px 0;border-radius:0 8px 8px 0}
+.callout-exercise strong{color:#238636}
+.highlight{background:#1c1f26;border:1px solid #30363d;border-radius:8px;padding:16px;margin:16px 0}
+.tag{display:inline-block;background:#21262d;color:#8b949e;padding:2px 8px;border-radius:12px;font-size:12px;margin:2px}
+.tag-blue{background:#0d419d;color:#79c0ff}
+.tag-green{background:#0d2818;color:#3fb950}
+.tag-orange{background:#3d1e00;color:#f0883e}
+.tag-red{background:#3d0d0d;color:#f85149}
+.hero{text-align:center;padding:40px 0 30px;border-bottom:1px solid #21262d;margin-bottom:30px}
+.hero h1{border:none;font-size:32px;margin-bottom:8px}
+.hero .subtitle{color:#8b949e;font-size:16px;margin-top:8px}
+.badge{display:inline-block;background:#21262d;border:1px solid #30363d;border-radius:6px;padding:4px 10px;font-size:12px;margin:4px}
+.badge-green{background:#0d2818;border-color:#238636;color:#3fb950}
+.next-prev{display:flex;justify-content:space-between;border-top:1px solid #21262d;padding-top:16px;margin-top:40px}
+.footer{text-align:center;padding:20px;color:#484f58;font-size:13px;border-top:1px solid #21262d;margin-top:40px}
+.footer a{color:#58a6ff}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:16px 0}
+.stat-card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;text-align:center}
+.stat-card .num{font-size:28px;font-weight:bold;color:#58a6ff}
+.stat-card .label{font-size:12px;color:#8b949e;margin-top:4px}
+.card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin:16px 0}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;transition:border-color 0.2s}
+.card:hover{border-color:#58a6ff}
+.card h3{margin-top:0;font-size:16px}
+.card p{font-size:13px;color:#8b949e;margin:8px 0 0}
+.kw{color:#ff7b72} .str{color:#a5d6ff} .cmt{color:#8b949e} .fn{color:#d2a8ff}
+
+.diagram{background:#0d1117;border:1px solid #30363d;border-radius:12px;padding:1.5rem;margin:1.5rem 0;overflow-x:auto}
+.diagram-title{color:#58a6ff;font-weight:700;font-size:1.05em;margin-bottom:1rem;text-align:center}
+</style>
+</head>
+<body>
+<div class="nav"><a href="02-核心架构.html">&larr; 02-核心架构</a><span>03 · 分离式推理</span><a href="04-KV缓存管理.html">04-KV缓存管理 &rarr;</a></div>
+<div class="container">
+
+<h1>03 · 分离式推理（Disaggregated Serving）</h1>
+
+<h2>🎯 学习目标</h2>
+<ul>
+<li>深入理解 Prefill 和 Decode 阶段的本质差异</li></li>
+<li>掌握分离式推理的原理和调度策略</li>
+<li>理解分离带来的性能收益及其量化分析</li></li>
+<li>了解分离式推理的代价和适用场景</li>
+</ul>
+
+<h2>3.1 Prefill vs Decode：为什么必须分离？</h2>
+
+<div class="callout-tip">
+<strong>通俗理解：</strong>想象一个餐厅。Prefill 是"备菜"阶段——厨师要把所有食材洗好切好（处理所有输入 tokens），这个过程需要大量操作台（计算资源）。Decode 是"炒菜"阶段——一道一道上菜（逐 token 生成），这个过程需要快速出菜（带宽）。如果同一个厨师既要备菜又要炒菜，备菜时炒菜要等，炒菜时备菜做不了。分离后，备菜厨师和炒菜厨师各司其职，效率最大化。
+</div>
+
+<h3>计算特性对比</h3>
+
+<table>
+<tr><th>特性</th><th>Prefill（预填充）</th><th>Decode（解码）</th></tr>
+<tr>
+<td><strong>操作类型</strong></td>
+<td>大矩阵乘法（所有输入 tokens 同时处理）</td>
+<td>向量-矩阵乘法（逐 token 处理）</td>
+</tr>
+<tr>
+<td><strong>瓶颈</strong></td>
+<td>计算密集（Compute-bound）</td>
+<td>带宽密集（Memory-bandwidth-bound）</td>
+</tr>
+<tr>
+<td><strong>GPU 利用率</strong></td>
+<td>高（大矩阵充分利用 Tensor Core）</td>
+<td>低（小向量无法饱和计算单元）</td>
+</tr>
+<tr>
+<td><strong>批处理效率</strong></td>
+<td>单请求即可高效（长序列 = 大矩阵）</td>
+<td>需要大批量才能提高利用率</td>
+</tr>
+<tr>
+<td><strong>理想 GPU 配置</strong></td>
+<td>高算力 GPU（FP16/FP8 TFLOPS 高）</td>
+<td>高带宽 GPU（HBM 带宽高）</td>
+</tr>
+<tr>
+<td><strong>并行策略</strong></td>
+<td>低张量并行（减少通信开销）</td>
+<td>高张量并行（提高显存带宽利用率）</td>
+</tr>
+<tr>
+<td><strong>延迟特征</strong></td>
+<td>与输入长度成正比（O(n^2) 注意力）</td>
+<td>每 token 延迟相对恒定</td>
+</tr>
+</table>
+
+<h3>数学分析</h3>
+
+<div class="callout-deep">
+<strong>数学本质：</strong>Prefill 阶段的计算量约为 O(n^2 * d)（n 为序列长度，d 为隐藏维度），其中注意力矩阵计算是二次的。Decode 阶段每生成一个 token 的计算量约为 O(n * d)，但主要瓶颈是从 HBM 读取 KV 缓存的 O(n * d) 带宽。<br><br>
+对于一个 70B 参数模型（d=8192），处理 4K tokens 的 Prefill：<br>
+- 计算量：~4K^2 * 8192 = ~134 TFLOPs（FP16）<br>
+- 在 H100（989 TFLOPS FP16）上需要 ~135ms<br><br>
+Decode 每个 token：<br>
+- 带宽需求：~4K * 8192 * 2 bytes * 80 layers = ~5 GB<br>
+- 在 H100（3.35 TB/s HBM 带宽）上需要 ~1.5ms<br>
+- 但计算量只有 ~0.13 TFLOPs，GPU 计算利用率仅 ~2%
+</div>
+
+<h2>3.2 分离式推理架构</h2>
+
+<div class="diagram">
+<div class="diagram-title">传统耦合架构 vs Dynamo 分离式架构</div>
+<svg width="100%" viewBox="0 0 720 420" xmlns="http://www.w3.org/2000/svg">
+  
+    <defs>
+      <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+        <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+      </pattern>
+      <marker id="arrow" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#475569"/>
+      </marker>
+      <marker id="arrow-cyan" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/>
+      </marker>
+      <marker id="arrow-emerald" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#34d399"/>
+      </marker>
+      <marker id="arrow-amber" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#fbbf24"/>
+      </marker>
+      <marker id="arrow-rose" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto">
+        <polygon points="0 0, 10 3.5, 0 7" fill="#fb7185"/>
+      </marker>
+    </defs>
+
+  <rect width="720" height="420" fill="#020617" rx="8"/>
+  <rect width="720" height="420" fill="url(#grid)" rx="8"/>
+
+  <!-- Left: Traditional -->
+  <text x="170" y="28" text-anchor="middle" fill="#fb7185" font-size="14" font-weight="700">传统架构（耦合）</text>
+  <rect x="30" y="35" width="280" height="160" rx="10" fill="rgba(136,19,55,0.15)" stroke="#fb7185" stroke-width="1" stroke-dasharray="6,3"/>
+  <rect x="50" y="50" width="240" height="55" rx="8" fill="rgba(136,19,55,0.3)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="170" y="75" text-anchor="middle" fill="#fb7185" font-size="13" font-weight="600">GPU 0-7 (混合)</text>
+    <text x="170" y="93" text-anchor="middle" fill="#94a3b8" font-size="11">Prefill + Decode 耦合在同一组 GPU</text>
+  <rect x="70" y="125" width="90" height="50" rx="8" fill="rgba(136,19,55,0.2)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="115" y="148" text-anchor="middle" fill="#fb7185" font-size="13" font-weight="600">Prefill</text>
+    <text x="115" y="166" text-anchor="middle" fill="#94a3b8" font-size="11">计算密集</text>
+  <rect x="180" y="125" width="90" height="50" rx="8" fill="rgba(136,19,55,0.2)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="225" y="148" text-anchor="middle" fill="#fb7185" font-size="13" font-weight="600">Decode</text>
+    <text x="225" y="166" text-anchor="middle" fill="#94a3b8" font-size="11">带宽密集</text>
+  <line x1="160" y1="150" x2="180" y2="150" stroke="#fb7185" stroke-width="1" stroke-dasharray="3,3"/>
+  <text x="170" y="220" text-anchor="middle" fill="#fb7185" font-size="10">Prefill 突发时 Decode 被抢占</text>
+
+  <!-- VS -->
+  <text x="360" y="120" text-anchor="middle" fill="#94a3b8" font-size="24" font-weight="700">VS</text>
+
+  <!-- Right: Dynamo -->
+  <text x="550" y="28" text-anchor="middle" fill="#34d399" font-size="14" font-weight="700">Dynamo 分离架构</text>
+
+  <!-- Prefill Pool -->
+  <rect x="380" y="35" width="150" height="160" rx="10" fill="rgba(6,78,59,0.15)" stroke="#34d399" stroke-width="1"/>
+  <text x="455" y="55" text-anchor="middle" fill="#34d399" font-size="12">Prefill GPU 池</text>
+  <rect x="395" y="65" width="55" height="40" rx="8" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="422" y="90" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">P0</text>
+  <rect x="460" y="65" width="55" height="40" rx="8" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="487" y="90" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">P1</text>
+  <rect x="395" y="115" width="55" height="40" rx="8" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="422" y="140" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">P2</text>
+  <rect x="460" y="115" width="55" height="40" rx="8" fill="rgba(6,78,59,0.3)" stroke="#34d399" stroke-width="1.5"/>
+    <text x="487" y="140" text-anchor="middle" fill="#34d399" font-size="11" font-weight="600">P3</text>
+  <text x="455" y="175" text-anchor="middle" fill="#94a3b8" font-size="10">低 TP, 高吞吐</text>
+  <text x="455" y="188" text-anchor="middle" fill="#94a3b8" font-size="10">独立扩缩容</text>
+
+  <!-- Decode Pool -->
+  <rect x="560" y="35" width="140" height="160" rx="10" fill="rgba(8,51,68,0.15)" stroke="#22d3ee" stroke-width="1"/>
+  <text x="630" y="55" text-anchor="middle" fill="#22d3ee" font-size="12">Decode GPU 池</text>
+  <rect x="575" y="65" width="50" height="40" rx="8" fill="rgba(8,51,68,0.3)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="600" y="90" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="600">D0</text>
+  <rect x="635" y="65" width="50" height="40" rx="8" fill="rgba(8,51,68,0.3)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="660" y="90" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="600">D1</text>
+  <rect x="575" y="115" width="50" height="40" rx="8" fill="rgba(8,51,68,0.3)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="600" y="140" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="600">D2</text>
+  <rect x="635" y="115" width="50" height="40" rx="8" fill="rgba(8,51,68,0.3)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="660" y="140" text-anchor="middle" fill="#22d3ee" font-size="11" font-weight="600">D3</text>
+  <text x="630" y="175" text-anchor="middle" fill="#94a3b8" font-size="10">高 TP, 低延迟</text>
+  <text x="630" y="188" text-anchor="middle" fill="#94a3b8" font-size="10">独立扩缩容</text>
+
+  <!-- NIXL arrow -->
+  <line x1="530" y1="100" x2="560" y2="100" stroke="#fbbf24" stroke-width="2.5" marker-end="url(#arrow-amber)"/>
+  <text x="545" y="90" text-anchor="middle" fill="#fbbf24" font-size="9">NIXL</text>
+
+  <!-- Bottom: Performance comparison -->
+  <rect x="30" y="240" width="660" height="165" rx="10" fill="rgba(251,146,60,0.08)" stroke="#fb923c" stroke-width="1"/>
+  <text x="360" y="265" text-anchor="middle" fill="#fb923c" font-size="14">分离式推理性能收益</text>
+
+  <!-- Bar chart style comparison -->
+  <text x="130" y="295" text-anchor="middle" fill="#c9d1d9" font-size="11">DeepSeek-R1 请求数</text>
+  <rect x="130" y="300" width="10" height="25" fill="#fb7185" rx="2"/>
+  <text x="155" y="318" text-anchor="middle" fill="#fb7185" font-size="10">基线</text>
+  <rect x="130" y="330" width="300" height="25" fill="#34d399" rx="2"/>
+  <text x="290" y="348" text-anchor="middle" fill="#34d399" font-size="12">30x ↑</text>
+
+  <text x="360" y="295" text-anchor="middle" fill="#c9d1d9" font-size="11">MoE 吞吐量</text>
+  <rect x="340" y="300" width="10" height="25" fill="#fb7185" rx="2"/>
+  <text x="365" y="318" text-anchor="middle" fill="#fb7185" font-size="10">基线</text>
+  <rect x="340" y="330" width="210" height="25" fill="#34d399" rx="2"/>
+  <text x="455" y="348" text-anchor="middle" fill="#34d399" font-size="12">7x ↑</text>
+
+  <text x="560" y="295" text-anchor="middle" fill="#c9d1d9" font-size="11">TTFT 加速</text>
+  <rect x="540" y="300" width="10" height="25" fill="#fb7185" rx="2"/>
+  <text x="565" y="318" text-anchor="middle" fill="#fb7185" font-size="10">基线</text>
+  <rect x="540" y="330" width="60" height="25" fill="#34d399" rx="2"/>
+  <text x="580" y="348" text-anchor="middle" fill="#34d399" font-size="12">2x ↑</text>
+
+</svg>
+</div>
+
+<h2>3.3 Dynamo 的三种推理模式</h2>
+
+<p>Planner 根据实时负载和 SLA 指标动态选择推理模式：</p>
+
+<table>
+<tr><th>模式</th><th>适用场景</th><th>工作方式</th></tr>
+<tr>
+<td><strong>非分离模式</strong></td>
+<td>低负载、短序列</td>
+<td>请求在同一组 GPU 上完成 Prefill + Decode</td>
+</tr>
+<tr>
+<td><strong>分离模式</strong></td>
+<td>高负载、长序列</td>
+<td>Prefill 和 Decode 在不同 GPU 池完成</td>
+</tr>
+<tr>
+<td><strong>混合模式</strong></td>
+<td>中等负载、多变序列</td>
+<td>Planner 动态决定每个请求走哪条路径</td>
+</tr>
+</table>
+
+<div class="callout-tip">
+<strong>通俗理解：</strong>这就像出租车调度——短途（低负载）直接派一辆车全程服务；长途（高负载）在中途换一辆车（分离模式）；中等距离由调度员根据路况动态决定。
+</div>
+
+<h2>3.4 分离式推理的调度策略</h2>
+
+<h3>策略 1: 静态分离</h3>
+<p>预先分配固定的 Prefill 和 Decode GPU 比例。简单但不灵活。</p>
+
+<h3>策略 2: 动态分离（Dynamo 默认）</h3>
+<p>Planner 根据实时指标动态调整：</p></p>
+<ul>
+<li>监控 TTFT（首 Token 延迟）和 ITL（Token 间延迟）</li></li>
+<li>当 Prefill 队列积压时，临时将 Decode GPU 转为 Prefill</li>
+<li>当 Decode 负载低时，合并空闲 GPU</li></li>
+</ul>
+
+<h3>策略 3: 请求级分离</h3>
+<p>每个请求独立决定是否走分离路径：</p></p>
+<ul>
+<li>短序列（&lt;512 tokens）：不分离，减少传输开销</li></li>
+<li>长序列（&gt;4K tokens）：分离，充分利用并行性</li>
+<li>中等序列：根据当前负载动态决定</li></li>
+</ul>
+
+<h2>3.5 KV 缓存传输：分离的关键挑战</h2>
+
+<p>分离式推理的核心挑战是<strong>如何高效地将 KV 缓存从 Prefill Worker 传输到 Decode Worker</strong>。</p>
+
+<div class="ascii">
+Prefill Worker                          Decode Worker
+┌─────────────┐                        ┌─────────────┐
+│  GPU HBM    │  ──── NVLink ────→    │  GPU HBM    │
+│  KV Cache   │  (900 GB/s, <1ms)     │  KV Cache   │
+│             │                        │             │
+│             │  ──── RDMA ──────→    │             │
+│             │  (400 Gb/s, ~ms)      │             │
+│             │                        │             │
+│             │  ──── UCX ───────→    │             │
+│             │  (通用, 灵活)          │             │
+└─────────────┘                        └─────────────┘
+</div>
+
+<h3>传输延迟分析</h3>
+
+<table>
+<tr><th>传输路径</th><th>带宽</th><th>KV 大小 (70B, 4K seq)</th><th>传输时间</th></tr>
+<tr>
+<td>NVLink 5.0（节点内）</td>
+<td>1.8 TB/s</td>
+<td>~2.5 GB</td>
+<td>~1.4 ms</td>
+</tr>
+<tr>
+<td>NVLink 4.0（节点内）</td>
+<td>900 GB/s</td>
+<td>~2.5 GB</td>
+<td>~2.8 ms</td>
+</tr>
+<tr>
+<td>InfiniBand 400G（跨节点）</td>
+<td>50 GB/s</td>
+<td>~2.5 GB</td>
+<td>~50 ms</td>
+</tr>
+<tr>
+<td>RoCE 400G（跨节点）</td>
+<td>50 GB/s</td>
+<td>~2.5 GB</td>
+<td>~50 ms</td>
+</tr>
+</table>
+
+<div class="callout-warn">
+<strong>关键权衡：</strong>分离式推理的收益 = GPU 独立优化的收益 - KV 传输的开销。只有当序列足够长、负载足够高时，分离的收益才会超过传输开销。对于短序列（&lt;512 tokens），传输开销可能超过分离收益。
+</div>
+
+<h2>3.6 性能收益量化</h2>
+
+<p>NVIDIA 官方公布的基准测试结果：</p>
+
+<table>
+<tr><th>模型</th><th>配置</th><th>指标</th><th>提升</th></tr>
+<tr>
+<td>DeepSeek-R1</td>
+<td>GB200 NVL72</td>
+<td>请求数</td>
+<td><strong>30x</strong></td>
+</tr>
+<tr>
+<td>DeepSeek-R1</td>
+<td>GB200 NVL72</td>
+<td>吞吐量</td>
+<td><strong>2x+</strong></td>
+</tr>
+<tr>
+<td>MoE 模型</td>
+<td>GB200 NVL72</td>
+<td>每 GPU 吞吐</td>
+<td><strong>7x</strong></td>
+</tr>
+<tr>
+<td>MoE 模型</td>
+<td>GB300 NVL72</td>
+<td>vs Hopper</td>
+<td><strong>50x</strong></td>
+</tr>
+</table>
+
+<h3>为什么 DeepSeek-R1 提升最大？</h3>
+<div class="callout-deep">
+<strong>技术原因：</strong>DeepSeek-R1 是推理模型（Reasoning Model），其特点是：
+<ol>
+<li><strong>超长输入</strong>：推理链（Chain-of-Thought）导致输入序列极长（32K+ tokens）</li></li>
+<li><strong>计算密集</strong>：长序列的 Prefill 计算量是 O(n^2)，对 GPU 压力巨大</li>
+<li><strong>MoE 架构</strong>：Expert Parallelism 需要跨 GPU 通信，分离后可以独立优化</li></li>
+</ol>
+分离后，Prefill 池可以专注于处理长序列的 O(n^2) 计算，Decode 池可以专注于高效生成，互不干扰。
+</div>
+
+<h2>3.7 分离式推理的代价</h2>
+
+<table>
+<tr><th>代价</th><th>说明</th><th>缓解措施</th></tr>
+<tr>
+<td>KV 传输延迟</td>
+<td>Prefill→Decode 传输 KV 缓存需要时间</td>
+<td>NIXL 零拷贝传输，NVLink 高带宽</td>
+</tr>
+<tr>
+<td>额外 GPU 内存</td>
+<td>KV 缓存在 Prefill 和 Decode 端各存一份</td>
+<td>传输完成后释放 Prefill 端缓存</td>
+</tr>
+<tr>
+<td>架构复杂度</td>
+<td>需要额外的编排层（Dynamo）</td>
+<td>Dynamo 开源，K8s Operator 简化部署</td>
+</tr>
+<tr>
+<td>短序列不划算</td>
+<td>短序列的传输开销 &gt; 分离收益</td>
+<td>Planner 自动判断是否分离</td>
+</tr>
+</table>
+
+<h2>⚡ 关键洞察</h2>
+<div class="highlight">
+<p><strong>洞察 1：</strong>分离式推理的本质是<strong>用网络带宽换 GPU 计算效率</strong>。当 KV 传输速度足够快（NVLink）且序列足够长时，这笔交易非常划算。</p>
+<p><strong>洞察 2：</strong>推理模型（如 DeepSeek-R1）是分离式推理的<strong>杀手级应用场景</strong>——超长输入 + 有限输出的特征完美匹配 Prefill/Decode 分离的优势。</p>
+<p><strong>洞察 3：</strong>Dynamo 的 Planner 实现了<strong>"每个请求独立决策"</strong>——不是所有请求都走分离路径，而是根据序列长度和当前负载动态决定。这是比静态分离更聪明的策略。</p>
+</div>
+
+<h2>📝 本章小结</h2>
+<table>
+<tr><th>概念</th><th>要点</th></tr>
+<tr><td>Prefill 特性</td><td>计算密集，O(n^2) 注意力，高 GPU 利用率</td></tr>
+<tr><td>Decode 特性</td><td>带宽密集，每 token 恒定开销，低 GPU 利用率</td></tr>
+<tr><td>分离收益</td><td>吞吐 2-7x，请求 30x，推理模型收益最大</td></tr>
+<tr><td>核心挑战</td><td>KV 缓存传输延迟，短序列不划算</td></tr>
+<tr><td>Dynamo 方案</td><td>Planner 动态决策 + NIXL 零拷贝传输</td></tr>
+</table>
+
+<h2>🧠 深度思考题</h2>
+<div class="callout-exercise">
+<strong>L1 理解：</strong>解释为什么 Decode 阶段的 GPU 计算利用率只有 ~2%。剩余 98% 的 GPU 算力在做什么？<br><br>
+<strong>L2 分析：</strong>在一个 8 卡 H100 节点上，如果你有 2 张卡做 Prefill、6 张卡做 Decode，这种配置在什么负载特征下最优？<br><br>
+<strong>L3 创造：</strong>设计一个自适应算法，根据实时 TTFT 和 ITL 指标动态调整 Prefill/Decode GPU 比例。考虑什么条件下应该增加 Prefill GPU？
+</div>
+<div class="box answer" style="background:linear-gradient(135deg,#1a1a2e,#0d0d1f);border:1px solid #3d3d5a;border-left:3px solid #a78bfa;border-radius:8px;padding:16px;margin:12px 0">
+<div class="label" style="color:#a78bfa;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
+<p><strong>L1 理解</strong>: Decode 阶段 GPU 计算利用率仅约 2% 的根本原因是<strong>内存带宽瓶颈</strong>。每生成一个 token，需要从 HBM 读取整个 KV 缓存（对于 70B 模型 4K 序列约 5GB），但实际的矩阵计算量只有 ~0.13 TFLOPs。H100 的 HBM 带宽为 3.35TB/s，读取 5GB 需要 ~1.5ms，而 0.13 TFLOPs 的计算在 989 TFLOPS 的算力下仅需 ~0.13μs。GPU 98% 的时间在等待数据从 HBM 搬运到计算单元，这就是所谓的"带宽密集"（Memory-bandwidth-bound）。剩余的算力完全空闲，因为单个 token 的向量-矩阵乘法无法充分利用 Tensor Core 的大规模并行能力。</p>
+<p><strong>L2 分析</strong>: 2 Prefill + 6 Decode 的配置在以下负载特征下最优：（1）输入序列较短（ISL < 2K tokens），Prefill 计算量不大，2 张卡即可满足；（2）输出序列较长（OSL > 4K tokens），Decode 阶段需要大量带宽和批处理能力，6 张卡可以维持更大的 batch size 提高 GPU 利用率；（3）并发请求数中等（50-200），不足以让 Prefill 积压但 Decode 需要足够容量。对比分析：如果是长输入短输出（ISL=32K, OSL=8K，如 DeepSeek-R1），则应反过来分配 6P+2D，因为 Prefill 的 O(n²) 计算是主要瓶颈；如果是均匀负载（ISL=OSL=2K），则 4P+4D 更均衡。关键公式：Prefill GPU 数 ∝ ISL²/BW_prefill，Decode GPU 数 ∝ 并发数 × ISL × OSL/BW_decode。</p>
+<p><strong>L3 创造</strong>: 自适应算法设计——"TTFT-ITL 双指标反馈控制器"：<br>（1）<strong>监控</strong>：每 10 秒采集 TTFT P95 和 ITL P95，用卡尔曼滤波平滑波动；<br>（2）<strong>决策规则</strong>：当 TTFT P95 > 目标值 × 1.2 且 ITL P95 < 目标值 × 0.8 时，说明 Prefill 资源不足而 Decode 有余量，应将 1 张 Decode GPU 转为 Prefill；反之，当 ITL P95 > 目标值 × 1.2 且 TTFT P95 < 目标值 × 0.8 时，应将 1 张 Prefill GPU 转为 Decode；<br>（3）<strong>冷却期</strong>：每次调整后设置 60 秒冷却期，避免频繁切换；<br>（4）<strong>安全边界</strong>：Prefill GPU 不少于 1 张、不多于 N-1 张；<br>（5）<strong>迁移开销考量</strong>：GPU 切换角色需要重新加载模型分片（~30s），因此只在偏差持续超过 2 分钟时才触发切换。增加 Prefill GPU 的条件：TTFT 持续高于目标 + Prefill 队列深度 > 10 + KV 缓存命中率正常（非路由问题）。</p>
+</div>
+
+</div>
+<div class="footer"><p>NVIDIA Dynamo深度解读 · 03 · 分离式推理</p><p><a href="index.html">返回总览</a></p></div>
+</body>
+</html>
