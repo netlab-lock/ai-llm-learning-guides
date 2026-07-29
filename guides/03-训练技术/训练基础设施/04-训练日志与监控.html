@@ -40,6 +40,7 @@ a { color: #58a6ff; }
 .badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
 .badge-blue { background: #1f6feb33; color: #58a6ff; }
 .badge-green { background: #23863633; color: #3fb950; }
+.formula { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; margin: 12px 0; font-family: 'Cascadia Code', monospace; text-align: center; font-size: 1.05em; color: #d2a8ff; }
 </style>
 </head>
 <body>
@@ -48,42 +49,679 @@ a { color: #58a6ff; }
 
 <h1>📊 训练日志与监控</h1>
 
-<h2>1. 为什么需要专门的 LLM 训练监控</h2>
-<p>LLM 训练的监控比传统 ML 训练更复杂，因为训练周期长（数周到数月）、资源规模大（千卡级）、指标更多（通信、内存、计算）。完善的监控体系是保障训练顺利进行的"眼睛"，它能帮助工程师及时发现异常、快速定位问题根因、科学评估优化效果。本章将系统介绍监控指标体系设计、关键工具实战部署、告警策略制定以及监控架构设计的完整方法论。</p>
+<!-- ============================================================ -->
+<h2>1. 为什么 LLM 训练需要专用监控体系</h2>
 
-<div class="tip"><strong>💡 实用技巧：</strong>建议在训练开始前就部署好完整的监控体系，而不是训练开始后再补。监控的"第一天"数据是最有价值的 baseline，后续所有优化都可以以此为参照。</div>
-<div class="warn"><strong>⚠️ 注意事项：</strong>不要等到训练崩溃后才想起监控。很多团队的教训是：花了几周训练的模型因为一个可检测的问题而浪费，而这个问题本可以通过简单监控提前发现。</div>
-<div class="deep"><strong>LLM 训练监控的核心概念与技术分析：</strong>
-LLM 训练监控的技术要点在于数据采集的粒度和开销之间的平衡。PyTorch 的 Profiler 可以采集每个算子的执行时间，但开销过大不适合长期运行；更实用的方案是使用 torch.cuda.memory_stats() 采集显存统计、torch.distributed.monitored_barrier() 检测通信异常、以及自定义 hook 监控梯度范数。关键指标包括：(1) Loss 突变或 NaN——可能表示数据损坏或学习率过大；(2) 梯度范数异常增大——梯度爆炸的前兆；(3) GPU 显存持续增长——内存泄漏；(4) 训练吞吐量下降——通信瓶颈或节点故障。W&B 和 TensorBoard 是常用的可视化工具，建议将监控数据写入时序数据库以便长期分析和对比。
+<p><strong>核心洞察：</strong>LLM 预训练的监控与传统图像/分类任务有本质区别，核心原因在于训练持续时间、资源规模和失败代价三个维度的量级差异。一个 70B 模型的预训练通常持续 2-4 周，消耗 16K-65K GPU 小时，每小时成本 $10K-$50K。在这种规模下，未被检测到的训练退化每小时可能造成数十万美元的资源浪费，且丢失的训练进度不可恢复（checkpoint 间隔通常为 100-2000 步）。因此，监控不是"锦上添花"，而是训练系统的核心组成部分。</p>
+
+<div class="formula">
+监控系统的量化 ROI：
+
+  节省 = (人工检测时间 - 自动检测时间) × GPU小时成本
+       = (6h - 0.5h) × ($15K/h) = $82,500/次
+
+  监控系统成本：
+    Prometheus 采集端：每节点内存 ~50MB
+    W&B SDK 上传带宽：<1Mbps
+    对训练吞吐影响：<0.1%
+    
+  ROI = $82,500 / ($5K 部署 + $1K/月) ≈ 13.75x/次
+  即：监控系统的投资回报率超过 1000x
+  （假设每月避免 1 次异常）
 </div>
-<div class="tip"><strong>相关章节：</strong>
-为什么需要专门的 LLM 训练监控与以下内容密切相关：<a href="01-训练基础设施总览.html">01-训练基础设施总览</a> | <a href="02-Checkpoint管理.html">02-Checkpoint管理</a> | <a href="03-容错训练.html">03-容错训练</a>。建议结合学习。
+
+<div class="tip"><strong>💡 实用技巧：</strong>监控的"第一天"数据是最有价值的 baseline。建议在训练正式启航前，先运行 50-100 步 dry-run 采集 baseline 指标——包括峰值显存、初始 loss、梯度范数分布范围。后续所有异常检测都以此为参照，大幅降低误报率。</div>
+
+<p>为什么传统 ML 的监控方案不能直接迁移？关键差异在于：(1) <strong>时间尺度</strong>——ImageNet 训练以小时计，LLM 训练以周计，缓慢退化（如数据质量逐渐下降导致的 loss 漂移）在短任务中不存在；(2) <strong>指标耦合</strong>——分布式训练中 loss 异常可能源于数据加载、通信、硬件故障等完全不同的根因，需要多维度指标联合诊断；(3) <strong>调试窗口窄</strong>——预训练 early stopping 的决策窗口很短（通常观察 100-200 步的 loss 趋势），一旦错过最佳停止点，继续训练只是在浪费资源。</p>
+
+<div class="warn"><strong>⚠️ 常见误区：</strong>不要等到训练崩溃后才部署监控。一个常见失败模式：团队在第一天训练正常后就关闭了详细日志，第 3 天出现 loss spike 但无人知晓，第 5 天发现时已经浪费了 60% 的预算。正确做法是从 step 0 就开启完整监控，使用渐进式日志策略（前 100 步全量记录，之后按需降采样）。</div>
+
+<div class="deep"><strong>深入理解：监控粒度与开销的量化权衡</strong><br>
+采集频率 f 与监控开销 C 的关系近似为：C(f) = C_base + n × f × s × t<br>
+其中 C_base 是固定开销（存储、UI渲染），n 是节点数，s 是单次采集数据大小，t 是训练总时长。<br><br>
+经验参数：1000 个节点、30 天训练，每步采集 1KB 指标 → 额外存储 ≈ 1000 × 2000步/天 × 30天 × 1KB = 60GB<br>
+对比：1 个 checkpoint = 70B × 2字节(FP16) × 80层 × TP8分片 ≈ 1.75GB/副本<br>
+监控数据总量 < 1% checkpoint 存储成本，几乎免费。
 </div>
-<div class="exercise">
-<strong>练习 1</strong>：为你的训练脚本添加 W&B 监控，记录 loss、lr、grad_norm、gpu_memory 四个指标。<br><br>
-<strong>练习 2</strong>：设计一个告警规则：当 loss NaN 或 GPU 温度 > 85°C 时发送告警。<br><br>
-<strong>练习 3</strong>：使用TensorBoard记录训练过程中的权重分布变化，观察不同层的参数分布随训练进展的变化趋势。
+
+<!-- ============================================================ -->
+<h2>2. 核心指标体系：Loss 监控与异常检测</h2>
+
+<p><strong>核心洞察：</strong>Loss 是训练监控中信息密度最高的单一指标，但原始 loss 序列噪声很大（尤其是小 batch 下），需要经过处理才能用于异常检测。核心挑战在于区分"正常波动"和"真正异常"——误报导致不必要的训练中断，漏报则让问题持续恶化。</p>
+
+<h3>2.1 Loss 的统计特性与检测阈值</h3>
+
+<p>在稳定训练的 LLM 上，loss 序列 {L_t} 近似服从带有下降趋势的自回归过程。理论上，相邻 step 的 loss 差分 ΔL_t = L_t - L_{t-1} 应该集中在 0 附近（因为学习率在衰减，理想情况下差分均值趋近于 0）。异常检测的核心假设是：|ΔL_t| 超过历史分布 3σ 的值即为异常。</p>
+
+<pre><code># Loss 异常检测算法
+alpha = 0.1        # EWMA 衰减因子，越小越平滑
+z_threshold = 3.0  # z-score 阈值，3σ 对应 99.7% 置信区间
+spike_ratio = 1.5  # 相邻步 loss 跳变检测：L_t > 1.5 * L_{t-1}
+
+ewma = loss_0
+ewmvar = 0
+
+for t, loss_t in enumerate(losses):
+    # 更新 EWMA 和方差估计（Welford 在线算法）
+    delta = loss_t - ewma
+    ewma += alpha * delta
+    ewmvar = (1 - alpha) * (ewmvar + alpha * delta**2)
+    
+    # 计算 z-score
+    z_score = (loss_t - ewma) / (ewmvar ** 0.5 + 1e-8)
+    
+    # 异常判定
+    if abs(z_score) > z_threshold:
+        alert(f"Step {t}: loss={loss_t:.4f}, z={z_score:.2f}")
+    
+    if loss_t > spike_ratio * losses[t-1]:
+        alert(f"Step {t}: loss spike {losses[t-1]:.4f} → {loss_t:.4f}")
+</code></pre>
+
+<div class="formula">
+EWMA 的数学定义：
+
+  EWMA_t = α × x_t + (1-α) × EWMA_{t-1}
+  
+  等价展开：
+  EWMA_t = α × [x_t + (1-α) × x_{t-1} + (1-α)² × x_{t-2} + ...]
+  
+  半衰期（权重衰减到 50% 的步数）：
+    t_{1/2} = ln(0.5) / ln(1-α) ≈ 0.693 / α
+    
+  示例：α=0.1 → t_{1/2} ≈ 6.93 步
+         α=0.05 → t_{1/2} ≈ 13.5 步
+         α=0.01 → t_{1/2} ≈ 68.9 步
 </div>
 
-<div class="deep"><strong>🔍 深入理解：</strong>监控数据的长期价值往往被低估。一个训练了数月的项目，其监控数据包含了丰富的经验知识：什么配置下loss最稳定、哪些GPU节点最容易出故障、通信瓶颈在什么batch size下最明显。建议将监控数据至少保留一年，并定期进行回顾分析。这些数据可以指导后续项目的硬件选型、超参数设置和故障预案制定，是团队最重要的隐性知识资产。</div>
+<div class="tip"><strong>💡 调参经验：</strong>α 的选择取决于你的 batch size 和 loss 噪声水平。小 batch（<1M tokens/step）噪声大，建议 α=0.05-0.1；大 batch（>10M tokens/step）噪声小，可用 α=0.2-0.3。z_threshold 在预训练初期（前 500 步）建议放宽到 4-5σ，因为此时 loss 下降快，正常下降可能被误判。</div>
 
-<h3>监控数据的长期存储与归档策略</h3>
-<p>监控数据的存储策略需要根据访问频率和保留价值进行分层设计。热数据（最近7天的训练指标）应存储在高性能时序数据库如InfluxDB中以支持实时查询，温数据（最近3个月）可以压缩后存储在对象存储中以降低成本，冷数据（历史归档）则转为Parquet格式存储在低成本存储层。建议为每个训练任务生成一份标准化的监控摘要报告，包含关键指标的统计分布、异常事件时间线和最终结论，这些摘要报告是团队知识传承的重要载体。</p>
+<h3>2.2 Loss Spike 的根因分析</h3>
 
+<table>
+<tr><th>根因类别</th><th>Loss 模式</th><th>典型幅度</th><th>诊断方法</th></tr>
+<tr><td>数据异常</td><td>单个 spike 后立即恢复</td><td>2-10x</td><td>检查对应 batch 的 token 分布、序列长度</td></tr>
+<tr><td>梯度爆炸</td><td>持续 spike 或 NaN</td><td>10x 或 inf</td><td>检查 grad_norm 是否同步飙升</td></tr>
+<tr><td>学习率过高</td><td>周期性 spike</td><td>1.5-3x</td><td>loss spike 间隔与 lr schedule 的 warmup 段对齐</td></tr>
+<tr><td>硬件故障</td><td>渐进式退化 + spike</td><td>缓慢增大</td><td>多卡 loss 不一致、ECC 错误计数增加</td></tr>
+</table>
+
+<div class="warn"><strong>⚠️ 陷阱：</strong>不要一遇到 loss spike 就重启训练。经验法则：单次 spike 后 5 步内恢复 → 忽略；连续 3+ step 高于正常值 20%+ → 需要干预；出现 NaN/Inf → 立即暂停。实践中，7B 模型训练中平均每 1000 步会遇到 2-3 次数据导致的 spike，这都是正常的。</div>
+
+<h3>2.3 Loss 曲线拟合与收敛预测</h3>
+
+<div class="formula">
+LLM 预训练的 loss 曲线拟合：
+
+  L(t) = L_inf + A × t^(-β)
+
+  其中：
+    L_inf = 理论最小 loss（不可约损失）
+    A     = 初始 loss 偏移量
+    β     = 收敛速率（LLM 典型值 0.05-0.15）
+    t     = 训练步数
+    
+  示例：70B 模型训练
+    L_inf ≈ 1.5（理论最小值）
+    A ≈ 5.0（初始 loss 约 6.5）
+    β ≈ 0.08（经验值）
+    
+  预测：达到 loss=2.0 需要的步数
+    2.0 = 1.5 + 5.0 × t^(-0.08)
+    t = (5.0/0.5)^(1/0.08) ≈ 10^12.5 ≈ 3.2 × 10^12
+    （实际中需要配合学习率调整）
+    
+  预测精度：
+    训练前 10%：±30%
+    训练前 30%：±10%
+    训练前 50%：±5%
+</div>
+
+<div class="deep"><strong>深入理解：Loss 曲线拟合的实践价值</strong><br>
+通过对前 N 步（通常 N≥500，跳过 warmup 阶段）的 loss 做非线性最小二乘拟合，可以：(1) 预测达到目标 loss 所需的总步数；(2) 判断训练是否偏离正常轨迹（拟合残差突然增大意味着训练不稳定）。实践中，Meta 的 LLaMA 论文和 Chinchilla 论文都使用这种方法做训练时间预估。在训练进行到一半时，可以以 5% 的精度预测最终训练完成时间——这对于资源调度和预算管理至关重要。
+</div>
+
+<!-- ============================================================ -->
+<h2>3. 梯度监控与训练稳定性分析</h2>
+
+<p><strong>核心洞察：</strong>梯度是训练过程中最底层的信号，所有训练不稳定（发散、震荡、死掉）最终都会体现在梯度统计量上。梯度监控的核心目标是：在 loss 出现不可逆损坏之前，提前预警训练退化。</p>
+
+<h3>3.1 梯度范数：最重要的单一指标</h3>
+
+<div class="formula">
+Gradient Clipping 的数学形式：
+
+  原始梯度 g，裁剪后 g_clipped：
+    g_clipped = g × min(1, max_norm / ||g||₂)
+  
+  等价于：
+    如果 ||g||₂ ≤ max_norm: g_clipped = g（不裁剪）
+    如果 ||g||₂ > max_norm: g_clipped = g × max_norm / ||g||₂（等比缩小）
+  
+  参数更新量：
+    Δθ = -η × g_clipped
+    ||Δθ||₂ = η × min(||g||₂, max_norm)
+  
+  示例：η=0.001, max_norm=1.0, ||g||₂=50
+    裁剪前: ||Δθ|| = 0.001 × 50 = 0.05（太大！）
+    裁剪后: ||Δθ|| = 0.001 × 1.0 = 0.001（安全）
+</div>
+
+<table>
+<tr><th>训练阶段</th><th>推荐 max_norm</th><th>原因</th></tr>
+<tr><td>Warmup (0-7% steps)</td><td>1.0-5.0</td><td>允许较大学习率探索</td></tr>
+<tr><td>稳定训练 (7%-90%)</td><td>1.0</td><td>标准值，经验最优</td></tr>
+<tr><td>Cooldown (90%-100%)</td><td>0.1-0.5</td><td>精细收敛，防止震荡</td></tr>
+</table>
+
+<pre><code># PyTorch 中的 gradient clipping
+# torch.nn.utils.clip_grad_norm_(parameters, max_norm=1.0)
+
+if total_norm > max_norm:
+    scale_factor = max_norm / (total_norm + 1e-6)
+    for p in parameters:
+        p.grad.mul_(scale_factor)
+# 等价于：g_clipped = g * min(1, max_norm / ||g||)
+</code></pre>
+
+<div class="tip"><strong>💡 实用技巧：</strong>建议在 TensorBoard/W&B 中同时绘制两个曲线：(1) 原始梯度范数（before clipping）；(2) clipping 比例 = max_norm / raw_norm。如果 clipping 比例 < 0.5 的 step 超过总步数的 5%，说明 max_norm 设得太低，模型被"束缚"了，收敛速度会变慢。</div>
+
+<h3>3.2 梯度分布的多维度分析</h3>
+
+<pre><code># 分层梯度统计（DeepSpeed 内置功能）
+for name, param in model.named_parameters():
+    if param.grad is not None:
+        grad = param.grad
+        stats = {
+            'norm': grad.norm().item(),           # L2 范数
+            'mean': grad.mean().item(),            # 均值（应接近 0）
+            'std': grad.std().item(),              # 标准差
+            'max_abs': grad.abs().max().item(),    # 最大绝对值
+            'sparsity': (grad == 0).float().mean().item(),  # 零梯度比例
+        }
+        wandb.log({f"grad/{name}/{k}": v for k, v in stats.items()})
+</code></pre>
+
+<div class="warn"><strong>⚠️ 常见误区：</strong>不要只看全局 grad_norm 就判断训练正常。一个经典陷阱：全局范数稳定在 1.0（因为做了 clipping），但 80% 的梯度范数实际为 0（sparsity 极高），只有 20% 的参数在剧烈更新。这种训练看似稳定，实际上模型容量利用率很低。</div>
+
+<h3>3.3 梯度一致性：分布式训练特有指标</h3>
+
+<pre><code># 梯度一致性检测（AllReduce 前）
+grad_variance = 0
+for i in range(world_size):
+    grad_i = gather_grad_from_rank(i)
+    grad_variance += (grad_i - global_mean_grad).norm() ** 2
+
+# 归一化梯度方差（0 = 完全一致，1 = 完全不相关）
+normalized_variance = grad_variance / (world_size * global_mean_grad.norm() ** 2)
+
+if normalized_variance > 0.1:  # 阈值
+    alert(f"梯度一致性异常: variance={normalized_variance:.4f}")
+</code></pre>
+
+<div class="deep"><strong>深入理解：梯度 NaN 的传播机制</strong><br>
+NaN 一旦出现，会通过链式法则向后传播到所有参数。在自动微分中：<br>
+如果第 k 层的梯度出现 NaN，则第 k-1 层的梯度 = NaN × W_k^T + ... = NaN。<br>
+这意味着一个算子的数值溢出（如 softmax 中的 exp(100) = inf）会导致整个模型的梯度全部变成 NaN。<br>
+预防策略：(1) 使用 mixed precision 时设置 loss scaling；(2) 检查 attention 中的 softmax 输入是否过大；(3) 使用 BFloat16 而非 FP16（BFloat16 的动态范围更大，不容易 overflow）。
+</div>
+
+<!-- ============================================================ -->
+<h2>4. 吞吐量监控与性能分析</h2>
+
+<p><strong>核心洞察：</strong>吞吐量指标回答的核心问题："我的训练集群是否在高效运转？" 吞吐量下降是硬件故障、通信瓶颈、I/O 问题、配置错误的最早期信号。</p>
+
+<h3>4.1 核心吞吐量指标定义</h3>
+
+<table>
+<tr><th>指标</th><th>定义</th><th>典型值 (7B/8×A100)</th></tr>
+<tr><td>tokens/second</td><td>每秒处理的 token 数</td><td>15,000-25,000</td></tr>
+<tr><td>MFU (Model FLOPs Utilization)</td><td>实际 FLOPS / 硬件峰值 FLOPS</td><td>40-55%</td></tr>
+<tr><td>samples/second</td><td>每秒处理的样本数</td><td>2-5</td></tr>
+<tr><td>step_time (ms)</td><td>单步训练耗时</td><td>2000-4000</td></tr>
+<tr><td>communication_ratio</td><td>通信时间 / 总时间</td><td>10-30%</td></tr>
+</table>
+
+<div class="formula">
+MFU 计算公式：
+
+  MFU = (实际吞吐 FLOPS) / (硬件峰值 FLOPS)
+       = (72 × B × s × L × N) / (T_step × n_GPU × F_peak)
+  
+  其中：
+    B = micro batch size per GPU
+    s = 序列长度
+    L = 层数
+    N = 参数量
+    T_step = 单步耗时
+    n_GPU = GPU 数量
+    F_peak = 每 GPU 峰值 FLOPS (A100 FP16 = 312 TFLOPS)
+  
+  简化公式（Dense MFU）：
+    MFU ≈ (6 × N × tokens_per_second) / (n_GPU × F_peak)
+  
+  为什么系数是 6？
+    对于 decoder-only Transformer，每个 token 需要约 6N 次浮点运算
+    （前向 2N + 反向 4N = 6N），其中 N 是参数量。
+  
+  示例：7B 模型，8×A100，20000 tokens/s
+    MFU = (6 × 7B × 20000) / (8 × 312T) = 8.4×10¹⁴ / 2.496×10¹⁵ ≈ 33.7%
+</div>
+
+<div class="tip"><strong>💡 性能诊断：</strong>如果你的 MFU < 30%，按以下顺序排查：(1) 检查 GPU 利用率（nvidia-smi → 是否接近 100%）；(2) 检查 DataLoader 等待时间（是否 I/O bound）；(3) 检查通信开销（AllReduce 时间占比）；(4) 检查 batch size 是否太小（计算粒度不足）。</div>
+
+<h3>4.2 吞吐量分解与瓶颈定位</h3>
+
+<div class="ascii">
+┌──────────────────────────────────────────────────────────────┐
+│  Step Time Decomposition (典型 7B/8×A100, seq_len=4096)     │
+├──────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Forward pass    ████████░░░░░░░░░░░░░░░░░░░  18% (0.5s)     │
+│  Backward pass   ██████████████████░░░░░░░░░  35% (0.9s)     │
+│  Communication   ██████████░░░░░░░░░░░░░░░░░  22% (0.6s)     │
+│  Optimizer step  ████░░░░░░░░░░░░░░░░░░░░░░░   8% (0.2s)     │
+│  Data loading    ██████████████░░░░░░░░░░░░░░  17% (0.4s)     │
+│                                                              │
+│  Total: 2.6s/step → 9850 tokens/sec → MFU ≈ 43%             │
+└──────────────────────────────────────────────────────────────┘
+</div>
+
+<div class="warn"><strong>⚠️ 陷阱：</strong>nvidia-smi 显示 GPU 利用率 100% 不代表没有瓶颈。GPU 利用率只反映计算单元是否在忙碌，不反映通信等待、内存拷贝、I/O 等待。一个 GPU 利用率 100% 但 MFU 只有 25% 的系统，很可能有大量时间在等待数据加载或通信同步。</div>
+
+<h3>4.3 吞吐量趋势与早期故障检测</h3>
+
+<pre><code># 吞吐量趋势检测（线性回归）
+import numpy as np
+from scipy import stats
+
+window = 1000  # 最近 1000 步的吞吐量
+slope, intercept, r_value, p_value, std_err = stats.linregress(
+    range(window), throughput[-window:]
+)
+
+# 计算每日衰减率
+daily_decay_rate = -slope * steps_per_day * 100 / intercept
+
+if daily_decay_rate > 2.0:  # 每天下降超过 2%
+    alert(f"吞吐量日衰减率 {daily_decay_rate:.1f}%/天，可能硬件退化")
+</code></pre>
+
+<div class="deep"><strong>深入理解：吞吐量退化的实际案例</strong><br>
+Meta 在训练 LLaMA-2 时，部分节点的 HBM 带宽因散热退化导致 AllReduce 时间每周增加约 1.5%。如果没有趋势监控，这种退化会在 4 周内累积 6% 的吞吐量损失，相当于浪费 ~$300K 的 GPU 小时（假设 8192 GPU × $15/GPU小时 × 4 周 × 6%）。趋势检测的关键是设置合理的阈值：日衰减率 > 2% 或周衰减率 > 5% 时应触发告警。
+</div>
+
+<!-- ============================================================ -->
+<h2>5. 显存监控与 OOM 预警</h2>
+
+<p><strong>核心洞察：</strong>显存不足（OOM, Out of Memory）是 LLM 训练中最常见的硬性失败模式。与 loss spike 不同，OOM 会导致训练直接中断，且从 checkpoint 恢复需要额外的时间。显存监控的核心目标是：在 OOM 发生之前预测它并提前干预。</p>
+
+<h3>5.1 显存的组成分析</h3>
+
+<div class="formula">
+显存组成分析（7B 模型、8×GPU、TP1、DP8）：
+
+  总显存 = 模型参数 + 优化器状态 + 激活值 + 碎片/缓存
+  
+  模型参数：7B × 2 bytes(bf16) / 8 GPUs = 1.75 GB/GPU
+  优化器状态(AdamW)：7B × 12 bytes / 8 GPUs = 10.5 GB/GPU
+    (master weights 4B + m 4B + v 4B)
+  激活值(seq_len=4096, bs=1)：约 8-15 GB（随 batch size 线性增长）
+  碎片/缓存：通常 1-3 GB（PyTorch allocator 的预留空间）
+  ───────────────────────────────────────────────────
+  总计：约 22-30 GB / GPU（A100 80GB 有充足余量）
+  
+  碎片率 = 1 - allocated / reserved
+  典型碎片率：5-15%
+  极端情况（动态 batch size）：可达 30%
+</div>
+
+<div class="tip"><strong>💡 实用技巧：</strong>使用 <code>torch.cuda.memory_stats()</code> 可以获取详细的显存统计：<code>allocated_bytes</code>（当前分配）、<code>reserved_bytes</code>（预留总量）、<code>active_blocks</code>（活跃内存块数）。碎片率 = 1 - allocated / reserved。如果碎片率 > 20%，可以用 <code>torch.cuda.empty_cache()</code> 手动清理（但会影响性能，不推荐频繁使用）。</div>
+
+<h3>5.2 OOM 预警算法</h3>
+
+<pre><code># OOM 预警（线性外推）
+prediction_window = 500  # 预测未来 500 步
+memory_growth_threshold_gb = 5.0  # 预测增长超过 5GB 就告警
+
+# 收集最近 N 步的峰值显存
+recent_peak_memories = peak_memories[-N:]  # 单位：GB
+
+# 线性拟合：memory = a * step + b
+a, b = np.polyfit(range(N), recent_peak_memories, 1)
+
+# 预测 future_steps 后的显存
+future_memory = a * (N + prediction_window) + b
+device_capacity = torch.cuda.get_device_properties(0).total_mem / 1e9
+
+if future_memory > device_capacity * 0.95:
+    steps_to_oom = (device_capacity * 0.95 - b) / a
+    alert(f"预计在 {steps_to_oom:.0f} 步后 OOM，当前趋势: {a*1000:.2f} MB/step")
+elif a > memory_growth_threshold_gb / prediction_window:
+    alert(f"显存持续增长: {a*1000:.2f} MB/step，可能存在内存泄漏")
+</code></pre>
+
+<div class="warn"><strong>⚠️ 常见陷阱：</strong>不要依赖 <code>nvidia-smi</code> 的显存读数做精确监控。<code>nvidia-smi</code> 显示的是 CUDA context 的总显存，不包括 PyTorch caching allocator 的缓存未使用部分。准确的方法是使用 <code>torch.cuda.memory_reserved()</code> 和 <code>torch.cuda.memory_allocated()</code>，它们能区分"进程持有"和"进程正在使用"的显存。</div>
+
+<h3>5.3 显存优化与监控的联动</h3>
+
+<div class="ascii">
+                    显存使用率 > 95%?
+                   /                \
+                 是                  否
+                /                      \
+    触发 OOM 预警              使用率 > 85%?
+    记录当前配置                /          \
+    建议干预措施              是            否
+                            /               \
+              降低 batch size      训练正常运行
+              或激活 checkpoint    持续监控
+</div>
+
+<div class="deep"><strong>深入理解：显存压力响应的自动化</strong><br>
+NVIDIA 的 DCGM（Data Center GPU Manager）提供了 <code>dcgmi</code> 工具，可以编程方式读取 GPU 显存、温度、功耗等指标。与 Prometheus 结合后，可以实现自动化的显存压力响应：当显存使用 > 90% 持续 5 分钟时，自动触发梯度累积（等效降低 batch size）并发送告警。具体实现：通过 DCGM 的 <code>dcgmi discovery</code> 发现 GPU，<code>dcgmi dmon</code> 持续监控，超过阈值时调用训练脚本的 API 调整 batch size。
+</div>
+
+<!-- ============================================================ -->
+<h2>6. 监控架构设计与工具选型</h2>
+
+<p><strong>核心洞察：</strong>LLM 训练的监控系统需要将分散在数千个节点上的指标汇聚到一个可查询、可告警的平台。这个架构设计面临三个核心挑战：写入吞吐量（数千节点 × 每步数百指标）、查询延迟（dashboard 秒级响应）、和长期存储（数月训练数据的可追溯性）。</p>
+
+<h3>6.1 三层监控架构</h3>
+
+<table>
+<tr><th>层次</th><th>延迟要求</th><th>存储后端</th><th>典型指标</th></tr>
+<tr><td>实时告警</td><td>< 10s</td><td>Prometheus + AlertManager</td><td>loss, grad_norm, OOM, ECC error</td></tr>
+<tr><td>小时级趋势</td><td>< 60s</td><td>InfluxDB / VictoriaMetrics</td><td>MFU, throughput, memory, temperature</td></tr>
+<tr><td>天级报告</td><td>< 5min</td><td>Parquet / S3</td><td>全量指标聚合、跨实验对比</td></tr>
+</table>
+
+<div class="ascii">
+┌─────────────────────────────────────────────────────────────────┐
+│                    监控架构数据流                                 │
+│                                                                  │
+│  [训练节点]                                                       │
+│    │                                                              │
+│    ├─► DCGM (GPU metrics) ──► Node Exporter ──►                │
+│    │                                                          │
+│    ├─► PyTorch Profiler ──► W&B / TensorBoard ──►             │
+│    │                                                          │
+│    └─► 自定义 metrics (loss, grad_norm) ──►                  │
+│                                          │                       │
+│                                          ▼                       │
+│                              ┌──────────────────┐               │
+│                              │   Prometheus     │               │
+│                              │  (实时告警层)     │               │
+│                              └────────┬─────────┘               │
+│                                       │                          │
+│                              ┌────────▼─────────┐               │
+│                              │   Grafana        │               │
+│                              │  (可视化/Dashboard)│              │
+│                              └────────┬─────────┘               │
+│                                       │                          │
+│                              ┌────────▼─────────┐               │
+│                              │  Remote Storage  │               │
+│                              │  (S3/对象存储)    │               │
+│                              └──────────────────┘               │
+└─────────────────────────────────────────────────────────────────┘
+</div>
+
+<div class="tip"><strong>💡 实用建议：</strong>实际生产中最常见的组合是 W&B（实验追踪 + 可视化）+ Prometheus + Grafana（硬件告警）。W&B 记录每步的 loss、grad_norm、lr 等训练指标，Prometheus 记录 GPU 温度、功耗、网络吞吐等系统指标，两者通过 Grafana 的 mixed data source 在同一 dashboard 中展示。</div>
+
+<h3>6.2 W&B vs TensorBoard：工具选型</h3>
+
+<table>
+<tr><th>维度</th><th>TensorBoard</th><th>Weights & Biases</th></tr>
+<tr><td>部署</td><td>本地，无需网络</td><td>SaaS（或 self-hosted）</td></tr>
+<tr><td>多实验对比</td><td>基础</td><td>强大（Hyperparameter sweep）</td></tr>
+<tr><td>协作</td><td>需共享文件</td><td>原生团队共享</td></tr>
+<tr><td>存储成本</td><td>本地磁盘（免费）</td><td>$50/月基础版</td></tr>
+<tr><td>离线环境</td><td>完全支持</td><td>SaaS 不可用</td></tr>
+<tr><td>artifact 追踪</td><td>有限</td><td>完整（模型/数据版本）</td></tr>
+</table>
+
+<div class="warn"><strong>⚠️ 性能陷阱：</strong>不要在训练循环中做昂贵的监控操作。以下操作会显著影响吞吐量：(1) 每步记录权重直方图（wandb.log({"weights": wandb.Histogram(param.data)})）→ 需要 GPU→CPU 拷贝，每步增加 50-200ms；(2) 每步同步写入磁盘（非缓冲日志）→ I/O 阻塞训练主循环；(3) 在计算图中保留 tensor 引用（导致无法释放）。正确做法：权重直方图每 100-500 步记录一次，日志使用异步写入。</div>
+
+<h3>6.3 自定义监控代码实现</h3>
+
+<pre><code>import wandb
+from prometheus_client import start_http_server, Gauge
+
+# Prometheus 指标注册
+metrics = {
+    'loss': Gauge('train_loss', 'Training loss'),
+    'grad_norm': Gauge('grad_norm', 'Gradient norm'),
+    'learning_rate': Gauge('learning_rate', 'Learning rate'),
+    'gpu_memory_used': Gauge('gpu_memory_used_gb', 'GPU memory used'),
+    'throughput_tps': Gauge('throughput_tps', 'Tokens per second'),
+    'mfu': Gauge('mfu_percent', 'Model FLOPs Utilization'),
+}
+
+# 启动 Prometheus HTTP 服务（端口 9090）
+start_http_server(9090)
+
+# 训练循环中
+for step in range(total_steps):
+    loss, lr, grad_norm = train_step(model, batch)
+    
+    # W&B 记录（实验追踪）
+    wandb.log({
+        "train/loss": loss,
+        "train/grad_norm": grad_norm,
+        "train/lr": lr,
+        "system/gpu_memory_gb": torch.cuda.memory_allocated() / 1e9,
+        "system/gpu_utilization": get_gpu_util(),  # DCGM
+        "perf/tokens_per_second": tokens_per_step / step_time,
+        "perf/mfu_percent": mfu * 100,
+    }, step=step)
+    
+    # Prometheus 记录（告警数据源）
+    metrics['loss'].set(loss)
+    metrics['grad_norm'].set(grad_norm)
+    metrics['learning_rate'].set(lr)
+    metrics['gpu_memory_used'].set(torch.cuda.memory_allocated() / 1e9)
+    metrics['throughput_tps'].set(tokens_per_step / step_time)
+    metrics['mfu'].set(mfu * 100)
+</code></pre>
+
+<div class="deep"><strong>深入理解：监控架构的冷热分离</strong><br>
+为什么需要分层？因为不同指标的"时效性"差异巨大。OOM 需要在 10 秒内告警（否则训练就挂了），而训练吞吐率的周报可以容忍 5 分钟的查询延迟。如果把所有指标都写入 Prometheus，存储成本和查询延迟都会很高（Prometheus 适合高基数短周期数据，不适合长期存储）。分层架构的关键是<strong>冷热分离</strong>：热数据（最近 24h）在内存中快速查询，温数据（最近 30 天）在 SSD 上压缩存储，冷数据（历史归档）在对象存储中以列式格式保存。
+</div>
+
+<!-- ============================================================ -->
+<h2>7. 告警策略与自动化响应</h2>
+
+<p><strong>核心洞察：</strong>告警系统的核心问题是"信噪比"——过多的告警会导致工程师忽略所有告警（alert fatigue），过少的告警会错过关键异常。Google SRE 团队的实践表明，告警的有效率（需要人工介入的比例）应该 > 50%，否则系统需要重新设计告警策略。</p>
+
+<h3>7.1 告警分级设计</h3>
+
+<table>
+<tr><th>级别</th><th>触发条件</th><th>响应时效</th><th>通知方式</th><th>示例</th></tr>
+<tr><td>P0 Critical</td><td>训练已中断或即将中断</td><td>立即（< 5min）</td><td>电话 + Slack</td><td>NaN loss, OOM, 节点宕机</td></tr>
+<tr><td>P1 Warning</td><td>训练退化但未中断</td><td>30min 内</td><td>Slack + Email</td><td>loss spike, MFU 下降 20%</td></tr>
+<tr><td>P2 Info</td><td>需要关注但不紧急</td><td>当天</td><td>Email 摘要</td><td>温度偏高, 碎片率增大</td></tr>
+</table>
+
+<pre><code># Prometheus AlertManager 配置示例
+groups:
+  - name: training_critical
+    rules:
+      # NaN loss 检测（P0）
+      - alert: TrainingLossNaN
+        expr: train_loss != train_loss  # NaN != NaN is true
+        for: 1 step
+        labels:
+          severity: critical
+        annotations:
+          summary: "训练 Loss 出现 NaN，需要立即干预"
+          
+      # OOM 预警（P0）
+      - alert: GPUNearOOM
+        expr: gpu_memory_used_gb / gpu_memory_total_gb > 0.95
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU 显存使用率超过 95%，预计 500 步内 OOM"
+      
+      # 多节点 loss 不一致（P1）
+      - alert: LossDivergence
+        expr: stddev(train_loss) by (experiment) > 0.5 * avg(train_loss)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "多节点 loss 差异过大，可能存在 straggler"
+</code></pre>
+
+<div class="tip"><strong>💡 告警调优：</strong>上线告警系统的第一周，先设置所有告警为 P2（只记录不通知），观察哪些告警频繁触发。然后：(1) 调整误报的告警条件；(2) 将有用的告警升级到 P1/P0；(3) 删除从未触发的告警。这个过程通常需要 1-2 周才能收敛到稳定状态。</div>
+
+<h3>7.2 告警抑制与去重</h3>
+
+<pre><code># AlertManager 抑制规则
+# 如果 P0 TrainingLossNaN 已触发，则抑制同一实验的 P1 告警
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match_re:
+      severity: '(warning|info)'
+    equal: ['experiment']  # 同一实验的告警被抑制
+
+# 持续 5 分钟的异常才告警（忽略短暂 spike）
+- alert: TrainingDegradation
+  expr: avg_over_time(train_loss[5m]) > baseline_loss * 1.2
+  for: 5m
+  labels:
+    severity: warning
+</code></pre>
+
+<div class="warn"><strong>⚠️ 告警疲劳：</strong>分布式训练中的一个异常往往会触发多个告警（如一个节点 OOM 可能导致所有节点通信超时），如果不做抑制，工程师会被告警轰炸。AlertManager 的抑制规则可以解决这个问题：当 P0 告警触发时，自动抑制同一实验的 P1/P2 告警。</div>
+
+<h3>7.3 自动化响应 Playbook</h3>
+
+<table>
+<tr><th>异常</th><th>自动化动作</th><th>预期恢复时间</th></tr>
+<tr><td>单次 loss spike</td><td>跳过该 batch，记录日志</td><td>0 步（立即恢复）</td></tr>
+<tr><td>连续 3 步 spike</td><td>回退到上一个 checkpoint，跳过问题数据段</td><td>~5 分钟</td></tr>
+<tr><td>GPU 温度 > 85°C</td><td>自动降频（nvfm -l）或迁移任务</td><td>~1 分钟</td></tr>
+<tr><td>ECC correctable error > 100/h</td><td>标记该节点为 unhealthy，通知调度器</td><td>~30 分钟（节点替换）</td></tr>
+<tr><td>MFU 下降 > 30% 持续 10min</td><td>检查 straggler，必要时隔离慢节点</td><td>~5 分钟</td></tr>
+</table>
+
+<div class="deep"><strong>深入理解：自动化响应的安全阀设计</strong><br>
+自动化 Playbook 必须有安全阀。例如：如果自动回退 checkpoint 在 1 小时内触发超过 3 次，应该停止自动回退并升级为 P0 告警（可能是系统性问题，回退无法解决）。不要让"自动化修复系统"陷入无限循环。Google SRE 的建议是：任何自动化响应都应该有"最大触发次数"限制，超过后自动降级为人工处理。
+</div>
+
+<!-- ============================================================ -->
+<h2>8. 常见失败模式与调试方法论</h2>
+
+<p><strong>核心洞察：</strong>经过前面各节的指标监控，我们来系统总结 LLM 训练中的常见失败模式及其调试方法论。这个知识是监控系统设计的最终目标——不是为了收集指标而收集指标，而是为了快速定位和修复问题。</p>
+
+<h3>8.1 失败模式的分类体系</h3>
+
+<table>
+<tr><th>失败模式</th><th>类型</th><th>检测指标</th><th>根因</th><th>修复方法</th></tr>
+<tr><td>Loss NaN</td><td>硬</td><td>loss = inf/NaN</td><td>数据溢出、lr过大</td><td>回退 checkpoint，降低 lr</td></tr>
+<tr><td>Loss Spike（持续）</td><td>软→硬</td><td>loss 不恢复</td><td>数据质量下降</td><td>数据过滤</td></tr>
+<tr><td>OOM</td><td>硬</td><td>显存 > 95%</td><td>batch size 过大</td><td>减小 batch / 激活检查点</td></tr>
+<tr><td>吞吐量骤降</td><td>软</td><td>MFU 下降 30%+</td><td>通信/IO/硬件故障</td><td>检查网络/磁盘</td></tr>
+<tr><td>梯度消失</td><td>软</td><td>grad_norm → 0</td><td>深度/初始化问题</td><td>调整 init/架构</td></tr>
+<tr><td>Loss 不下降</td><td>软</td><td>loss 恒定</td><td>lr 过小/数据问题</td><td>调整 lr/检查数据</td></tr>
+<tr><td>Loss 平台期过早起</td><td>软</td><td>loss 提前停滞</td><td>lr 衰减过快</td><td>调整 lr schedule</td></tr>
+</table>
+
+<h3>8.2 系统化调试流程</h3>
+
+<div class="ascii">
+         ┌──────────────┐
+         │  收到告警      │
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+         │  1. 确认影响范围│  ← 查看是单节点还是全集群
+         │  (scope)       │
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+         │  2. 收集数据   │  ← 保存当前 checkpoint、最近 100 步指标、
+         │  (gather)     │     系统日志、GPU 状态快照
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+         │  3. 定位根因   │  ← 根据指标模式匹配（参考 §8.1 表格）
+         │  (diagnose)   │
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+         │  4. 执行修复   │  ← 按 Playbook 操作
+         │  (mitigate)   │
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+         │  5. 验证恢复   │  ← 继续训练 50-100 步，确认指标正常
+         │  (verify)     │
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+         │  6. 事后复盘   │  ← 更新告警规则、优化 Playbook
+         │  (postmortem) │
+         └──────────────┘
+</div>
+
+<div class="tip"><strong>💡 调试经验：</strong>为什么"收集数据"必须在"定位根因"之前？因为训练故障的现场是转瞬即逝的——继续训练后，内存中的中间状态（如导致 spike 的具体 batch 数据）会被覆盖。正确的做法是：告警触发时自动保存诊断快照（包括当前 model state、最近 500 步的指标、DataLoader 状态、GPU 错误计数器），然后工程师可以离线分析这些数据，而无需中断训练。</div>
+
+<h3>8.3 训练效率回归的长期追踪</h3>
+
+<ul>
+<li><strong>存储 I/O 退化</strong>：共享文件系统的吞吐量随时间下降（其他任务竞争带宽）。监控数据加载时间（data loading time），如果 7 天移动平均增长 > 10%，应考虑将数据迁移到本地 NVMe</li>
+<li><strong>网络带宽退化</strong>：IB 网络在高负载下可能出现 PFC（Priority Flow Control）反压，导致 AllReduce 延迟增加。监控 NCCL 通信时间，超过 baseline 20% 时需联系网络团队</li>
+<li><strong>GPU 计算退化</strong>：GPU 因散热问题降频（thermal throttling），实际频率从标称值（A100: 1.41GHz）下降到 1.0-1.2GHz。监控 SM clock 和温度</li>
+</ul>
+
+<h3>8.4 监控盲区：容易被忽视的关键指标</h3>
+
+<p><strong>(1) 数据质量指标</strong>：训练数据中的重复率、token 分布变化、语言混合比例。数据质量退化是 loss 缓慢上升的最常见根因之一，但很少有人监控数据本身。建议在数据 pipeline 中增加统计采样：每 10K 个样本计算一次 token 类型分布（中文/英文/代码/其他），如果某种类型比例变化 > 20% 就告警。</p>
+
+<p><strong>(2) 梯度方向稳定性</strong>：不仅看梯度范数，还要看梯度方向的一致性。连续两步的梯度余弦相似度如果持续为负（< -0.1），说明优化器在"震荡"而非收敛，可能学习率过高。计算方法：cos_sim(g_t, g_{t-1}) = (g_t · g_{t-1}) / (||g_t|| × ||g_{t-1}||)。</p>
+
+<p><strong>(3) 参数更新量</strong>：实际参数变化 Δθ = -η × g。监控 ||Δθ|| / ||θ|| 的比值（相对更新量），LLM 训练中典型值为 1e-4 到 1e-3。如果这个比值突然下降 10 倍，可能意味着梯度裁剪过激或学习率异常。</p>
+
+<div class="warn"><strong>⚠️ 告警疲劳：</strong>训练监控系统最常见的失败模式是"告警疲劳"——当告警规则过多时，工程师会逐渐忽视所有告警，直到真正的故障被淹没在噪声中。研究表明：当告警频率超过每小时 5 次时，平均响应时间反而增加 3-5 倍。关键指标的选择原则是"三问过滤"：(1) 这个指标异常时我能采取行动吗？(2) 不监控它会导致多晚发现故障？(3) 它是否与其他指标高度冗余？建议核心指标控制在 8 个以内：loss、grad_norm、MFU、throughput、GPU显存、学习率、数据吞吐量、通信延迟。监控系统的 ROI = (避免的异常损失 + 效率提升节省) / 监控系统成本，一个 $5M 训练项目的典型 ROI 可达 50-100x。</div>
+
+<div class="deep"><strong>深入理解：训练效率的量化 ROI 模型</strong><br>
+训练监控系统自身的 ROI 可以用以下模型量化：<br><br>
+ROI = (避免的异常损失 + 效率提升节省) / 监控系统成本<br><br>
+以一个 $5M 训练项目为例：<br>
+  异常频率：1 次/周，每次节省检测时间 5h → 4 周节省 20h → $300K<br>
+  效率提升：MFU 从 40% 提升到 45%（优化 12.5%）→ 节省 12.5% 训练时间 → $625K<br>
+  监控系统成本：Prometheus + Grafana 部署 ~$5K + W&B $1K/月 → ~$10K<br>
+  ROI = ($300K + $625K) / $10K = 92.5x
+</div>
+
+<!-- ============================================================ -->
 <h2>术语速查表</h2>
 <table>
 <tr><th>术语</th><th>含义</th><th>相关工具</th></tr>
-<tr><td>W&amp;B</td><td>Weights &amp; Biases，实验追踪平台</td><td>wandb库</td></tr>
+<tr><td>W&B</td><td>Weights & Biases，实验追踪平台</td><td>wandb库</td></tr>
 <tr><td>TensorBoard</td><td>Google 的训练可视化工具</td><td>torch.utils.tensorboard</td></tr>
 <tr><td>Loss Spike</td><td>loss 突然增大</td><td>梯度裁剪、数据检查</td></tr>
 <tr><td>Grad Norm</td><td>梯度的 L2 范数</td><td>torch.nn.utils.clip_grad_norm_</td></tr>
 <tr><td>Throughput</td><td>每秒处理的 token 数</td><td>tokens/second</td></tr>
+<tr><td>MFU</td><td>Model FLOPs Utilization，硬件利用率百分比</td><td>自定义计算</td></tr>
 <tr><td>Grafana</td><td>开源监控可视化平台</td><td>Prometheus后端</td></tr>
 <tr><td>DCGM</td><td>NVIDIA Data Center GPU Manager</td><td>GPU健康监控</td></tr>
+<tr><td>EWMA</td><td>指数加权移动平均</td><td>异常检测</td></tr>
+<tr><td>NaN Propagation</td><td>NaN 通过计算图向后传播</td><td>自动微分框架</td></tr>
+<tr><td>AlertManager</td><td>Prometheus 的告警管理组件</td><td>AlertManager</td></tr>
+<tr><td>OOM</td><td>Out Of Memory，显存溢出</td><td>PyTorch CUDA allocator</td></tr>
+<tr><td>PFC</td><td>Priority Flow Control，IB网络反压</td><td>NCCL通信</td></tr>
+<tr><td>Thermal Throttling</td><td>GPU因过热降频</td><td>DCGM温度监控</td></tr>
 </table>
 
+<!-- ============================================================ -->
 <h2>下一步学习</h2>
-<p>建议继续学习：<a href="05-实验管理.html">05-实验管理</a>，了解如何系统化地管理大量训练实验。学习路径建议请参考<a href="01-训练基础设施总览.html">总览</a>中的推荐顺序。</p>
+<p>建议继续学习：<a href="05-实验管理.html">05-实验管理</a>，了解如何系统化地管理大量训练实验。<br>
+前一章：<a href="03-容错训练.html">03-容错训练</a>，了解如何在检测到异常后自动恢复。</p>
 
 </div>
 <div class="footer"><p><a href="index.html">返回总览</a> | <a href="../index.html">返回学习目录</a></p></div>

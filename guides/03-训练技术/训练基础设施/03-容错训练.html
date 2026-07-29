@@ -40,6 +40,7 @@ a { color: #58a6ff; }
 .badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 0.85em; font-weight: 600; }
 .badge-blue { background: #1f6feb33; color: #58a6ff; }
 .badge-green { background: #23863633; color: #3fb950; }
+.formula { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 16px; margin: 12px 0; font-family: 'Cascadia Code', monospace; text-align: center; font-size: 1.05em; color: #d2a8ff; }
 </style>
 </head>
 <body>
@@ -48,51 +49,537 @@ a { color: #58a6ff; }
 
 <h1>🛡️ 容错训练</h1>
 
-<h2>1. 大规模训练的故障率</h2>
-<p>在万卡集群上训练 LLM，故障是常态而非异常。Meta 训练 Llama 3 时使用了 16,000 个 GPU，训练期间经历了数百次硬件故障。理解故障率的数学模型是设计容错机制的前提。本章将系统介绍故障检测、恢复策略、弹性训练以及Straggler处理等关键技术。</p>
+<!-- ============================================================ -->
+<h2>1. 大规模训练的故障率模型</h2>
+
+<p><strong>核心洞察：</strong>在万卡集群上训练 LLM，故障是常态而非异常。Meta 训练 Llama 3 时使用了 16,000 个 GPU，训练期间经历了数百次硬件故障。理解故障率的数学模型是设计容错机制的前提——只有量化了故障概率，才能计算最优检查点频率、评估不同恢复策略的效率。没有这个数学基础，容错设计就是在"凭感觉"。</p>
 
 <div class="ascii">
-故障率与集群规模的关系:
+故障率与集群规模的关系 (假设单 GPU MTBF = 10,000 小时):
 
-集群规模      平均故障间隔      每年故障次数
-──────────────────────────────────────────
-100 GPU       ~1 周             ~52 次
-1,000 GPU     ~16 小时          ~550 次
-10,000 GPU    ~1.5 小时         ~5,800 次
-16,000 GPU    ~1 小时           ~8,700 次
+集群规模      单GPU MTBF     集群MTBF       每年故障次数
+──────────────────────────────────────────────────────────
+100 GPU       10,000 h       ~100 h         ~87
+1,000 GPU     10,000 h       ~10 h          ~876
+10,000 GPU    10,000 h       ~1 h           ~8,760
+16,000 GPU    10,000 h       ~37 min        ~14,016
 
-关键洞察: GPU 数量翻倍，故障率近似翻倍
-结论: 万卡集群每小时都可能发生故障，容错是必需品
+关键洞察: MTBF_cluster = MTBF_single / N，N个组件串联系统
+结论: 万卡集群每37分钟就可能发生一次故障，容错是必需品
 </div>
 
-<div class="tip"><strong>💡 实用技巧：</strong>一个反直觉的事实：故障率与 GPU 数量近似线性关系，而非指数关系。这意味着即使集群规模翻倍，只要恢复机制完善，训练效率几乎不受影响。关键是把恢复时间做到足够短。</div>
-<div class="warn"><strong>⚠️ 注意事项：</strong>万卡集群的实际故障分布并不均匀——网络故障和 GPU 故障通常集中在特定机架或交换机下。建议在故障恢复时主动避开故障区域的节点，而不是随机重分配。</div>
-<div class="deep"><strong>容错训练的核心概念与技术分析：</strong>
-容错训练的核心技术是异步检查点（Async Checkpointing）。传统同步检查点需要暂停训练、将所有参数写入存储后再恢复，对于百亿级模型这个过程可能耗时数分钟。异步检查点利用后台线程将参数复制到 CPU 内存或 NVMe，然后异步写入分布式存储，训练不中断。NCCL 的 Checkpoint 机制和 PyTorch 的 torch.distributed.checkpoint 支持分布式环境下的并行保存。另一个关键技术是弹性训练（Elastic Training）：当部分节点故障时，自动调整数据并行度和通信拓扑，而非等待节点恢复。这需要框架支持动态 worker 组管理，如 TorchElastic。
-</div>
-<div class="tip"><strong>相关章节：</strong>
-大规模训练的故障率与以下内容密切相关：<a href="01-训练基础设施总览.html">01-训练基础设施总览</a> | <a href="02-Checkpoint管理.html">02-Checkpoint管理</a> | <a href="04-训练日志与监控.html">04-训练日志与监控</a>。建议结合学习。
-</div>
-<div class="exercise">
-<strong>练习 1</strong>：编写一个 GPU 健康检查脚本，检测 ECC 错误、温度异常和 XID 错误。<br><br>
-<strong>练习 2</strong>：设计一个容错训练方案：如何在 8 节点集群上实现自动故障检测和恢复？<br><br>
-<strong>练习 3</strong>：实现一个简单的Straggler检测器，监控各节点的step时间并在检测到慢节点时发出告警。
+<h3>1.1 指数故障模型与可靠性推导</h3>
+
+<p>GPU 故障通常建模为泊松过程：假设单个 GPU 的故障率为 λ (单位时间内的期望故障数)，则 N 个 GPU 组成集群的等效故障率为 Λ = Nλ。</p>
+
+<div class="formula">
+R(t) = e^(-Λt) = e^(-Nλt)
+
+其中:
+  R(t) = 系统在时间 t 内无故障的概率
+  N    = GPU 数量
+  λ    = 单 GPU 故障率 (如 1/10000 h⁻¹)
+  Λ    = 集群总故障率
 </div>
 
+<p>由此推导出集群的平均故障间隔时间 MTBF_cluster = 1/Λ = 1/(Nλ)。当 N=16000，λ=10⁻⁴/h 时，MTBF ≈ 62.5 小时。但实际中，<strong>网络故障、存储故障、软件崩溃</strong>使有效 λ 远高于纯硬件故障率，实测 MTBF 通常只有 30-120 分钟。</p>
+
+<h3>1.2 检查点频率的最优化——Young-Daly 公式</h3>
+
+<div class="formula">
+Young-Daly 最优检查点间隔:
+
+  T_opt = √(2 × δ × MTBF)
+
+其中:
+  T_opt = 最优检查点间隔 (小时)
+  δ     = 保存一个检查点的时间 (checkpointing overhead)
+  MTBF  = 集群平均故障间隔时间
+
+有效训练效率:
+  η = T_opt / (T_opt + δ + MTBF/2 × δ/T_opt)
+  → 简化近似: η ≈ 1 - 2√(δ / (2×MTBF))  (当 δ << MTBF)
+</div>
+
+<div class="ascii">
+实际计算示例：假设 16K GPU 集群 MTBF = 1 小时，δ = 3 分钟：
+
+T_opt = √(2 × 180s × 3600s) = √(1,296,000) ≈ 1138 秒 ≈ 19 分钟
+
+训练效率:
+  每 19 分钟保存一次，保存耗时 3 分钟
+  故障后平均回退 MTBF/2 = 30 分钟训练量
+  
+  效率 η = T_opt / (T_opt + δ + MTBF/2)
+         = 1138 / (1138 + 180 + 1800) = 1138/3118 ≈ 36.5%
+         
+  现代系统使用异步增量检查点（δ ≈ 30s）：
+  T_opt = √(2 × 30 × 3600) ≈ 465 秒 ≈ 7.75 分钟
+  效率 η ≈ 1 - 2√(30/(2×3600)) ≈ 93.5%
+</div>
+
+<div class="tip"><strong>💡 实用技巧：</strong>故障率与 GPU 数量近似线性关系，而非指数关系。这意味着即使集群规模翻倍，只要恢复机制完善，训练效率几乎不受影响。关键是把恢复时间做到足够短。恢复时间从 10 分钟降到 1 分钟，16K GPU 集群的训练效率从 ~80% 提升到 ~95%。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>万卡集群的实际故障分布并不均匀——网络故障和 GPU 故障通常集中在特定机架或交换机下。Meta 的经验是：同一机架在 24 小时内出现多次故障的概率是随机预期的 3-5 倍，说明存在"故障热点"（如劣质电源批次、散热不良区域）。建议在故障恢复时主动避开故障区域的节点。</div>
+
+<!-- ============================================================ -->
+<h2>2. 故障检测机制</h2>
+
+<p><strong>核心洞察：</strong>故障检测是容错训练的第一道防线。检测延迟直接决定了故障造成的计算浪费：检测耗时 10 分钟意味着 10 分钟的训练进度全部丢失。现代训练系统采用分层检测策略——从毫秒级的心跳到分钟级的应用健康检查，不同层级覆盖不同的故障模式。</p>
+
+<h3>2.1 多层级检测架构</h3>
+
+<div class="ascii">
+故障检测层级:
+
+层级        检测方式              延迟        覆盖故障
+────────────────────────────────────────────────────────
+L0 硬件     ECC/热节流           毫秒         显存位翻转、过热
+L1 驱动     XID 事件             秒级         驱动崩溃、GPU挂起
+L2 通信     NCCL Watchdog        秒~分钟       网络抖动、死锁
+L3 进程     Heartbeat             秒~分钟       进程OOM、死循环
+L4 应用     Loss/Metric监控      分钟级        梯度爆炸、数据损坏
+L5 人工     运维巡检              小时级        性能劣化趋势
+</div>
+
+<h3>2.2 心跳协议与故障判定</h3>
+
+<div class="formula">
+心跳检测的可靠性分析:
+
+  设单跳心跳丢失概率为 p (网络丢包率),
+  N_miss = 允许连续丢失的心跳数
+  
+  P(误判) = p^(N_miss+1)    (正常节点被误判为故障)
+  P(漏判) ≈ 0               (故障节点最终会被检测到)
+  
+  检测延迟:
+    T_detect = T_heartbeat × (N_miss + 1)
+    
+  典型配置:
+    T_heartbeat = 10s, N_miss = 2
+    T_detect = 30s, P(误判) = (0.01)³ = 10⁻⁶
+</div>
+
+<pre><code><span class="comment"># NCCL 故障检测相关环境变量</span>
+<span class="cmd">export</span> NCCL_TIMEOUT=600           <span class="comment"># 通信超时(秒),默认=1800s</span>
+<span class="cmd">export</span> NCCL_DEBUG=INFO            <span class="comment"># 开启调试日志</span>
+<span class="cmd">export</span> NCCL_IB_TIMEOUT=23          <span class="comment"># InfiniBand超时(数值越大越容忍延迟)</span>
+</code></pre>
+
+<h3>2.3 应用层健康检查——Loss 异常检测</h3>
+
+<div class="formula">
+EWMA Loss 异常检测:
+
+  EWMA_t = α × loss_t + (1-α) × EWMA_{t-1}
+  
+  异常条件 (满足任一):
+    1. loss_t > EWMA_t + k × σ_t        (Loss突增)
+    2. |loss_t - loss_{t-1}| > threshold (Loss跳变)
+    3. loss_t > 3 × loss_0              (Loss未下降)
+    4. isnan(loss_t) or isinf(loss_t)   (数值溢出)
+    
+  典型参数: α=0.01 (约100步的平滑窗口), k=3 (3σ阈值)
+</div>
+
+<div class="warn"><strong>⚠️ 常见陷阱：</strong>Loss 检测的滞后性是最大的挑战。当 Loss 已经明显异常时，通常意味着模型已经被"毒化"了数十到数百步。如果检查点间隔是 15 分钟，你可能需要回退数千步才能找到"干净"的恢复点。这也是为什么有些团队实现"影子检查点"（shadow checkpoint）——每 1 分钟在内存中保存一个轻量快照，只在检测到异常时才持久化。</div>
+
+<!-- ============================================================ -->
+<h2>3. Checkpoint 与恢复策略</h2>
+
+<p><strong>核心洞察：</strong>Checkpoint 是容错训练的核心机制——它定期保存训练状态，使得故障后可以从最近的保存点恢复而非从头开始。Checkpoint 设计的核心权衡是：保存太频繁则浪费训练时间，保存太少则故障后损失大量计算。Young-Daly 公式给出了理论最优值，但实际中还需要考虑存储成本和恢复速度。</p>
+
+<h3>3.1 Checkpoint 大小分析</h3>
+
+<div class="ascii">
+Checkpoint 大小计算 (70B 模型, AdamW, BF16):
+
+模型参数:    70B × 2 bytes (BF16) = 140 GB
+优化器状态:  70B × 4 bytes (FP32 master) = 280 GB
+             + 70B × 4 bytes (m) = 280 GB
+             + 70B × 4 bytes (v) = 280 GB
+梯度:        70B × 2 bytes (BF16) = 140 GB
+────────────────────────────────────────────
+总计:        ~1,120 GB = 1.12 TB (单个完整checkpoint)
+
+使用 ZeRO-3 分片 (64个GPU):
+  每个GPU存储: 1.12 TB / 64 = 17.5 GB
+</div>
+
+<h3>3.2 同步 vs 异步检查点</h3>
+
+<div class="ascii">
+同步检查点:
+  GPU ──[训练N步]──[暂停]──[保存M秒]──[恢复]──[训练N步]──
+                      训练效率 = N/(N+M)
+
+异步检查点 (双缓冲):
+  GPU ──[训练]──[训练]──[训练]──[训练]──[训练]──
+            ↓        ↓
+  Copy  [复制到CPU] [复制到CPU]
+            ↓              ↓
+  Flush    [异步写存储]  [异步写存储]
+                      训练效率 ≈ 100% (复制开销 ~2%)
+</div>
+
+<pre><code><span class="keyword">import</span> torch.distributed.checkpoint <span class="keyword">as</span> dcp
+
+<span class="comment"># 定义 checkpoint 内容</span>
+state_dict = {
+    <span class="string">"model"</span>: model.state_dict(),
+    <span class="string">"optimizer"</span>: optimizer.state_dict(),
+    <span class="string">"step"</span>: global_step,
+}
+
+<span class="comment"># 异步保存 (非阻塞)</span>
+<span class="keyword">with</span> FsdpCheckpointManager(<span class="string">"/checkpoint/path"</span>) <span class="keyword">as</span> mgr:
+    mgr.save_checkpoint(state_dict, checkpoint_id=step)
+    <span class="comment"># 训练继续执行，写入在后台进行</span>
+
+<span class="comment"># 检查点恢复</span>
+dcp.load(state_dict, checkpoint_id=<span class="string">"/checkpoint/path/step_10000"</span>)
+</code></pre>
+
+<h3>3.3 增量检查点与压缩</h3>
+
+<div class="formula">
+增量检查点大小:
+
+  ΔW = W_t - W_{t-1}
+  
+  稀疏化: 只保存 |ΔW| > ε 的元素
+  量化:   将 ΔW 量化为 INT8 (降低4x)
+  
+  典型压缩率:
+    全量:  1.12 TB
+    增量:  ~50-100 GB (稀疏度 5-10%)
+    压缩后: ~15-30 GB (INT8 量化)
+    
+  保存时间 (10GB/s 存储带宽):
+    全量:  ~112 秒
+    增量:  ~15-30 秒  → 符合 "δ < 60s" 的最优区间
+</div>
+
+<div class="tip"><strong>💡 Meta 的 Llama 3 实际参数：</strong>使用增量检查点，每 15 分钟保存一次到 Distributed Checkpoint (DCP)，检查点间隔内如果检测到 Loss 异常，从内存中的影子检查点恢复（延迟 <5 秒）。全集群 16K GPU 的 checkpoint 保存耗时约 45-90 秒（增量模式），训练效率维持在 92-95%。</div>
+
+<!-- ============================================================ -->
+<h2>4. 弹性训练（Elastic Training）</h2>
+
+<p><strong>核心洞察：</strong>传统数据并行训练要求所有 worker 数量固定——任何一个 worker 故障都会导致整个训练作业失败。弹性训练打破这个限制，允许在运行时动态增减 worker，使训练作业能够容忍节点故障而不需要完全重启。这是万卡集群的关键能力。</p>
+
+<h3>4.1 弹性训练的数学基础</h3>
+
+<div class="formula">
+弹性训练的动态调整策略:
+
+  策略A - 保持全局batch size不变:
+    B' = (N × B) / N'  (增大单worker batch)
+    优点: 训练动力学不变
+    缺点: 显存可能不够 (B' > max_batch_per_gpu)
+
+  策略B - 保持单worker batch size不变:
+    B' = B
+    全局batch size = N' × B < N × B
+    学习率需按 sqrt scaling: η' = η × √(N'/N)
+    优点: 不需要重新分配显存
+    缺点: 小batch可能影响训练稳定性
+
+  PyTorch 默认使用策略B + sqrt LR scaling
+  推荐配置: min_workers = N/2 (保证至少一半worker存活)
+</div>
+
+<h3>4.2 TorchElastic 实现详解</h3>
+
+<pre><code><span class="comment"># torchrun 启动弹性训练 (自动处理worker增减)</span>
+torchrun \
+    --nnodes=16:32 \        <span class="comment"># 允许16-32个节点弹性伸缩</span>
+    --nproc_per_node=8 \     <span class="comment"># 每节点8个GPU</span>
+    --rdzv_id=100 \          <span class="comment"># rendezvous ID</span>
+    --rdzv_backend=etcd \    <span class="comment"># 协调服务</span>
+    --rdzv_endpoint=etcd:2379 \
+    --max_restarts=3 \       <span class="comment"># 最大重启次数</span>
+    train.py
+</code></pre>
+
+<div class="ascii">
+弹性训练恢复流程 (一个worker故障时):
+
+1. etcd 检测到 worker-7 心跳超时
+2. 向存活的 worker {0..6,8..15} 发送 MEMBERSHIP_CHANGE 事件
+3. 所有 worker 暂停训练，进入 BARRIER
+4. 重建通信组: ProcessGroup 从 16 → 15 成员
+5. 重新分配数据: DataLoader 的 DistributedSampler 重新分片
+6. 调整超参数: lr *= sqrt(16/15) ≈ 1.033 (轻微提升)
+7. 从最近 checkpoint 恢复
+8. 恢复训练
+
+总耗时: 通常 30-120 秒 (取决于 checkpoint 大小和数量)
+</div>
+
+<h3>4.3 弹性训练 vs 容错训练的权衡</h3>
+
+<table>
+<tr><th>维度</th><th>Checkpoint+Restart (容错)</th><th>Elastic Training (弹性)</th></tr>
+<tr><td>恢复时间</td><td>5-30 分钟（需重启所有进程）</td><td>30-120 秒（只重建通信组）</td></tr>
+<tr><td>数据丢失</td><td>回到上一个 checkpoint</td><td>只丢失当前 step 的梯度</td></tr>
+<tr><td>实现复杂度</td><td>低（框架无关）</td><td>高（需要动态 ProcessGroup）</td></tr>
+<tr><td>最佳场景</td><td>故障间隔 > 30 分钟</td><td>故障间隔 < 30 分钟</td></tr>
+</table>
+
+<div class="warn"><strong>⚠️ 弹性训练的陷阱：</strong>动态增减 worker 会导致数据分配不均衡。假设原始 16 个 worker 各处理 1000 个样本，worker-7 故障后 15 个 worker 各需处理 1067 个样本。如果某些 worker 分配到了特别"难"的样本（长序列、高频 token），会导致这些 worker 成为 Straggler，反而降低整体效率。</div>
+
+<!-- ============================================================ -->
+<h2>5. Straggler 检测与处理</h2>
+
+<p><strong>核心洞察：</strong>Straggler（掉队者）是指比其他 worker 慢的节点——它不是完全故障，而是由于硬件差异、网络拥塞、I/O 竞争等原因导致单步耗时显著增加。在数据并行训练中，AllReduce 是同步操作，所有 worker 必须等待最慢的那个完成。一个 Straggler 可以将整个集群的效率拉低 20-40%。</p>
+
+<h3>5.1 Straggler 的形式化定义与检测</h3>
+
+<div class="formula">
+Straggler 判定条件:
+
+  设 μ(t) = median(T_1(t), ..., T_N(t))  ← 中位数 (对异常值鲁棒)
+  设 σ(t) = MAD(T_1(t), ..., T_N(t))     ← 中位数绝对偏差
+  
+  worker i 是 Straggler 当且仅当:
+    T_i(t) > μ(t) + k × σ(t) / 0.6745
+  
+  典型阈值: k = 2 (约 95% 置信度)
+  
+  示例: 
+    μ = 2.0s, σ = 0.15s, k = 2
+    阈值 = 2.0 + 2 × 0.15 / 0.6745 ≈ 2.45s
+    若某 worker 耗时 2.6s → 标记为 Straggler
+</div>
+
+<pre><code><span class="keyword">import</span> numpy <span class="keyword">as</span> np
+<span class="keyword">from</span> collections <span class="keyword">import</span> deque
+
+<span class="keyword">class</span> <span class="cmd">StragglerDetector</span>:
+    <span class="keyword">def</span> <span class="cmd">__init__</span>(self, window_size=100, threshold_k=2.0):
+        self.step_times = {i: deque(maxlen=window_size) <span class="keyword">for</span> i <span class="keyword">in</span> range(N)}
+        self.k = threshold_k
+    
+    <span class="keyword">def</span> <span class="cmd">detect</span>(self):
+        latest = [times[-1] <span class="keyword">for</span> times <span class="keyword">in</span> self.step_times.values() <span class="keyword">if</span> len(times) > 0]
+        mu = np.median(latest)
+        mad = np.median(np.abs(latest - mu))
+        sigma = mad / 0.6745  <span class="comment"># 转换为标准差尺度</span>
+        threshold = mu + self.k * sigma
+        
+        stragglers = []
+        <span class="keyword">for</span> rank, times <span class="keyword">in</span> self.step_times.items():
+            <span class="keyword">if</span> len(times) > 0 <span class="keyword">and</span> times[-1] > threshold:
+                stragglers.append((rank, times[-1], threshold))
+        <span class="keyword">return</span> stragglers
+</code></pre>
+
+<h3>5.2 Straggler 的根因分析</h3>
+
+<table>
+<tr><th>类别</th><th>根因</th><th>特征</th><th>占比 (实测)</th></tr>
+<tr><td>硬件</td><td>GPU 降频（温度 >85°C 触发 thermal throttle）</td><td>间歇性，与环境温度正相关</td><td>~30%</td></tr>
+<tr><td>硬件</td><td>NVLink/IB 链路降级（从 200Gbps 降到 100Gbps）</td><td>持续慢，与通信量正相关</td><td>~20%</td></tr>
+<tr><td>软件</td><td>OS 后台任务（监控 agent、安全扫描）</td><td>周期性（cron job 触发），每次几秒</td><td>~15%</td></tr>
+<tr><td>数据</td><td>长序列样本（8K token 样本 vs 2K token 平均）</td><td>偶发，与数据分布相关</td><td>~25%</td></tr>
+</table>
+
+<h3>5.3 处理策略：预防 vs 补救</h3>
+
+<div class="deep"><strong>Straggler 工程的经验数据：</strong>
+在 8K GPU 集群上，不做任何 Straggler 处理时，平均每步的"等待时间"（AllReduce 前等待最慢 worker 的时间）占总 step 时间的 15-25%。使用节点预筛选后降到 5-10%。加上动态 batching 和通信-计算重叠后降到 2-5%。最终 Straggler 处理的开销（burn-in 测试 + 检测器运行时开销）不到总训练时间的 1%。投入产出比极高。
+</div>
+
+<!-- ============================================================ -->
+<h2>6. 完整容错训练系统设计</h2>
+
+<p><strong>核心洞察：</strong>一个生产级容错训练系统需要将故障检测、决策、恢复三个步骤解耦为独立微服务。Google 的 TPU Pod 容错经验表明，这是最关键的架构决策——任何一个服务故障不会阻塞其他服务。</p>
+
+<h3>6.1 系统架构总览</h3>
+
+<div class="ascii">
+容错训练系统架构:
+
+┌─────────────────────────────────────────────────────┐
+│                    Orchestrator                      │
+│  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
+│  │ Health   │  │ Checkpt  │  │ Elastic          │  │
+│  │ Monitor  │  │ Manager  │  │ Controller       │  │
+│  └────┬─────┘  └────┬─────┘  └────┬─────────────┘  │
+│       │              │              │                 │
+│  ┌────┴──────────────┴──────────────┴─────────────┐  │
+│  │            Decision Engine                      │  │
+│  │  if hardware_fault → replace_node               │  │
+│  │  if network_fault → reroute_communication       │  │
+│  │  if loss_anomaly  → rollback_checkpoint         │  │
+│  │  if straggler     → speculative_execution       │  │
+│  └────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────┘
+         │              │              │
+    ┌────┴────┐   ┌────┴────┐   ┌────┴────┐
+    │ Node 0  │   │ Node 1  │   │ Node N  │
+    │ GPU×8   │   │ GPU×8   │   │ GPU×8   │
+    │ NVMe    │   │ NVMe    │   │ NVMe    │
+    └─────────┘   └─────────┘   └─────────┘
+</div>
+
+<h3>6.2 故障恢复的决策树</h3>
+
+<div class="ascii">
+故障恢复决策树:
+
+检测到异常
+    │
+    ├─ Loss NaN/Inf?
+    │   └─ YES → 立即停止 → 回退到上一个健康 checkpoint → 降低 lr 重试
+    │
+    ├─ 单 GPU XID 错误?
+    │   └─ YES → 标记该 GPU 不健康 → 从集群中移除该节点 → 弹性缩容
+    │
+    ├─ NCCL Timeout?
+    │   ├─ 首次 → 重试通信 (等待 30s)
+    │   ├─ 第二次 → 重启 NCCL 通信组
+    │   └─ 第三次 → 标记网络故障 → 回退 checkpoint → 更换节点
+    │
+    ├─ 节点无心跳?
+    │   ├─ <5min → 等待恢复 (可能是 OOM kill 后重启)
+    │   ├─ 5-30min → 弹性缩容 (减少 worker 数)
+    │   └─ >30min → 替换节点 + 从 checkpoint 恢复
+    │
+    └─ Straggler?
+        ├─ 偶发 (1-2步) → 忽略
+        ├─ 持续 (>10步) → 标记为慢节点 → 预防性替换
+        └─ 系统性 (多节点) → 检查网络/存储 → 可能需暂停训练
+</div>
+
+<h3>6.3 关键性能指标（KPI）</h3>
+
+<table>
+<tr><th>指标</th><th>定义</th><th>目标值 (万卡集群)</th></tr>
+<tr><td>MTTR (Mean Time To Recover)</td><td>从故障到恢复训练的平均时间</td><td>< 5 分钟</td></tr>
+<tr><td>Training Efficiency</td><td>有效训练时间 / 总 wall-clock 时间</td><td>> 90%</td></tr>
+<tr><td>Checkpoint Overhead</td><td>保存 checkpoint 占训练时间的比例</td><td>< 5%</td></tr>
+<tr><td>False Positive Rate</td><td>误判为故障的正常节点比例</td><td>< 0.1%</td></tr>
+<tr><td>Wasted Compute</td><td>故障导致的浪费计算量 / 总计算量</td><td>< 10%</td></tr>
+<tr><td>Recovery Success Rate</td><td>自动恢复成功 / 总故障次数</td><td>> 95%</td></tr>
+</table>
+
+<div class="tip"><strong>💡 生产环境最佳实践：</strong>Google 的 TPU Pod 容错经验表明，将故障检测、决策、恢复三个步骤解耦为独立微服务是最关键的架构决策。检测服务负责快速发现异常（<30秒），决策引擎负责选择恢复策略（避免"恐慌性重启"），恢复执行器负责实际执行。三者通过消息队列异步通信。</div>
+
+<!-- ============================================================ -->
+<h2>7. 失败模式与调试方法论</h2>
+
+<p><strong>核心洞察：</strong>容错系统的最终目标不是"避免故障"，而是"快速检测和恢复"。理解常见失败模式的特征、根因和解决方案，是设计高效容错系统的前提。本节系统总结 LLM 训练中的常见失败模式及其调试方法论。</p>
+
+<h3>7.1 失败模式的分类体系</h3>
+
+<table>
+<tr><th>失败模式</th><th>类型</th><th>检测指标</th><th>根因</th><th>修复方法</th></tr>
+<tr><td>Loss NaN</td><td>硬</td><td>loss = inf/NaN</td><td>数据溢出、lr过大</td><td>回退 checkpoint，降低 lr</td></tr>
+<tr><td>Loss Spike（持续）</td><td>软→硬</td><td>loss 不恢复</td><td>数据质量下降</td><td>数据过滤</td></tr>
+<tr><td>OOM</td><td>硬</td><td>显存 > 95%</td><td>batch size 过大</td><td>减小 batch / 激活检查点</td></tr>
+<tr><td>吞吐量骤降</td><td>软</td><td>MFU 下降 30%+</td><td>通信/IO/硬件故障</td><td>检查网络/磁盘</td></tr>
+<tr><td>梯度消失</td><td>软</td><td>grad_norm → 0</td><td>深度/初始化问题</td><td>调整 init/架构</td></tr>
+<tr><td>Loss 不下降</td><td>软</td><td>loss 恒定</td><td>lr 过小/数据问题</td><td>调整 lr/检查数据</td></tr>
+<tr><td>NCCL 通信超时</td><td>硬</td><td>进程 hang</td><td>网络抖动/死锁</td><td>重启通信组/更换节点</td></tr>
+<tr><td>ECC 错误累积</td><td>软</td><td>ECC 计数增加</td><td>HBM 芯片退化</td><td>标记节点/预防性替换</td></tr>
+</table>
+
+<h3>7.2 系统化调试流程</h3>
+
+<div class="ascii">
+         ┌──────────────┐
+         │  收到告警      │
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+         │  1. 确认影响范围│  ← 查看是单节点还是全集群
+         │  (scope)       │
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+         │  2. 收集数据   │  ← 保存当前 checkpoint、最近 100 步指标、
+         │  (gather)     │     系统日志、GPU 状态快照
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+         │  3. 定位根因   │  ← 根据指标模式匹配（参考 §7.1 表格）
+         │  (diagnose)   │
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+         │  4. 执行修复   │  ← 按 Playbook 操作
+         │  (mitigate)   │
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+         │  5. 验证恢复   │  ← 继续训练 50-100 步，确认指标正常
+         │  (verify)     │
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+         │  6. 事后复盘   │  ← 更新告警规则、优化 Playbook
+         │  (postmortem) │
+         └──────────────┘
+</div>
+
+<h3>7.3 自动化响应 Playbook</h3>
+
+<table>
+<tr><th>异常</th><th>自动化动作</th><th>预期恢复时间</th><th>安全阀</th></tr>
+<tr><td>单次 loss spike</td><td>跳过该 batch，记录日志</td><td>0 步（立即恢复）</td><td>1h 内 >3 次→升级告警</td></tr>
+<tr><td>连续 3 步 spike</td><td>回退到上一个 checkpoint，跳过问题数据段</td><td>~5 分钟</td><td>1h 内 >2 次→停止自动回退</td></tr>
+<tr><td>GPU 温度 > 85°C</td><td>自动降频或迁移任务</td><td>~1 分钟</td><td>温度 >95°C→立即停机</td></tr>
+<tr><td>ECC correctable error > 100/h</td><td>标记该节点为 unhealthy，通知调度器</td><td>~30 分钟（节点替换）</td><td>不可纠正错误→立即隔离</td></tr>
+<tr><td>NCCL Timeout</td><td>重试通信→重启通信组→回退 checkpoint</td><td>30s→2min→10min</td><td>3 次失败→人工介入</td></tr>
+</table>
+
+<div class="warn"><strong>⚠️ 自动化响应的边界：</strong>自动化 Playbook 必须有安全阀。例如：如果自动回退 checkpoint 在 1 小时内触发超过 3 次，应该停止自动回退并升级为 P0 告警（可能是系统性问题，回退无法解决）。不要让"自动化修复系统"陷入无限循环。</div>
+
+<h3>7.4 训练效率的长期退化监控</h3>
+
+<p>除了突发故障，训练系统的"渐进式退化"也需要监控。这包括：</p>
+
+<ul>
+<li><strong>存储 I/O 退化</strong>：共享文件系统的吞吐量随时间下降（其他任务竞争带宽）。监控数据加载时间，如果 7 天移动平均增长 > 10%，应考虑将数据迁移到本地 NVMe。</li>
+<li><strong>网络带宽退化</strong>：IB 网络在高负载下可能出现 PFC（Priority Flow Control）反压，导致 AllReduce 延迟增加。监控 NCCL 通信时间，超过 baseline 20% 时需联系网络团队。</li>
+<li><strong>GPU 计算退化</strong>：GPU 因散热问题降频（thermal throttling），实际频率从标称值（A100: 1.41GHz）下降到 1.0-1.2GHz。监控 SM clock 和温度。</li>
+</ul>
+
+<div class="deep"><strong>深入理解：训练效率的量化 ROI 模型</strong><br>
+容错系统的 ROI 可以精确计算：<br><br>
+ROI = (避免的故障损失 + 效率提升节省) / 容错系统成本<br><br>
+以一个 $5M 训练项目为例：<br>
+  避免的故障损失：MTBF 从 2h 提升到 4h（更好的预防），每次故障节省 1h 检测时间 × $15K/h × 2次/周 × 4周 = $120K<br>
+  效率提升：Training Efficiency 从 85% 提升到 93%（更好的恢复），节省 8% 训练时间 = $400K<br>
+  容错系统成本：开发 + 部署 + 运维 ≈ $50K<br>
+  ROI = ($120K + $400K) / $50K = 10.4x<br>
+即每投入 $1 在容错系统上，获得 $10.4 的回报。
+</div>
+
+<!-- ============================================================ -->
 <h2>术语速查表</h2>
 <table>
 <tr><th>术语</th><th>含义</th><th>相关技术</th></tr>
-<tr><td>Fault Tolerance</td><td>容错能力</td><td>Checkpoint, 重启</td></tr>
-<tr><td>Straggler</td><td>比其他节点慢的节点</td><td>健康检查, 预防性替换</td></tr>
-<tr><td>TorchElastic</td><td>PyTorch 的弹性训练框架</td><td>K8s Operator</td></tr>
-<tr><td>ECC</td><td>Error-Correcting Code，纠错码</td><td>nvidia-smi</td></tr>
-<tr><td>XID 错误</td><td>NVIDIA GPU 的硬件级错误</td><td>dmesg</td></tr>
-<tr><td>NCCL Watchdog</td><td>NCCL 的通信超时检测机制</td><td>NCCL_DEBUG</td></tr>
-<tr><td>Elastic Training</td><td>支持动态增减节点的训练</td><td>TorchElastic</td></tr>
+<tr><td>Fault Tolerance</td><td>容错能力——系统在部分故障时继续运行</td><td>Checkpoint, Restart, ECC</td></tr>
+<tr><td>MTBF</td><td>Mean Time Between Failures，平均故障间隔</td><td>可靠性工程核心指标</td></tr>
+<tr><td>MTTR</td><td>Mean Time To Recover，平均恢复时间</td><td>容错系统核心指标</td></tr>
+<tr><td>Straggler</td><td>比其他节点慢的节点（非完全故障）</td><td>Speculative Execution, 预筛选</td></tr>
+<tr><td>TorchElastic</td><td>PyTorch 的弹性训练框架</td><td>etcd, 动态 ProcessGroup</td></tr>
+<tr><td>ECC</td><td>Error-Correcting Code，纠错码</td><td>HBM 显存硬件级保护</td></tr>
+<tr><td>XID 错误</td><td>NVIDIA GPU 的硬件级错误码（80+种）</td><td>dmesg, nvidia-smi</td></tr>
+<tr><td>NCCL Watchdog</td><td>NCCL 的通信超时检测机制</td><td>NCCL_TIMEOUT 环境变量</td></tr>
+<tr><td>Elastic Training</td><td>支持动态增减节点的训练模式</td><td>动态 batch, sqrt LR scaling</td></tr>
+<tr><td>Async Checkpoint</td><td>异步保存训练状态（不阻塞训练）</td><td>双缓冲, torch.distributed.checkpoint</td></tr>
+<tr><td>Delta Checkpoint</td><td>只保存参数变化量的增量检查点</td><td>稀疏化, INT8 量化</td></tr>
+<tr><td>Young-Daly Formula</td><td>最优检查点间隔的计算公式</td><td>T_opt = √(2δ × MTBF)</td></tr>
 </table>
 
+<!-- ============================================================ -->
 <h2>下一步学习</h2>
-<p>建议继续学习：<a href="04-训练日志与监控.html">04-训练日志与监控</a>，了解如何通过监控系统提前发现和预防故障。学习路径建议请参考<a href="01-训练基础设施总览.html">总览</a>中的推荐顺序。</p>
+<p>建议继续学习：<a href="04-训练日志与监控.html">04-训练日志与监控</a>，了解如何通过监控系统提前发现和预防故障。<br>
+前一章：<a href="02-Checkpoint管理.html">02-Checkpoint管理</a>，了解 checkpoint 的存储和版本管理。</p>
 
 </div>
 <div class="footer"><p><a href="index.html">返回总览</a> | <a href="../index.html">返回学习目录</a></p></div>

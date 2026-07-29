@@ -69,7 +69,7 @@ td{padding:10px 12px;border:1px solid #21262d;font-size:0.9em}tr:nth-child(even)
   to { opacity: 1; transform: translateY(0); }
 }
 
-</style>
+@media screen and (max-width: 768px){.container{padding:16px;max-width:100%}body{font-size:14px;line-height:1.6}h1{font-size:1.5rem}h2{font-size:1.2rem}pre{font-size:0.75rem;overflow-x:auto}table{font-size:0.8rem}.nav{flex-direction:column;gap:8px}.nav a{padding:8px}}</style>
 </head>
 <body>
 <div class="nav"><span></span><span>前置知识 · 读懂τ定律之前你需要知道的一切</span><a href="01-论文背景与动机.html">01 - 背景与动机 →</a></div>
@@ -607,6 +607,68 @@ td{padding:10px 12px;border:1px solid #21262d;font-size:0.9em}tr:nth-child(even)
 <tr><td>成本</td><td>高</td><td>较低</td></tr>
 </table>
 
+<h3>6.3 内存带宽与延迟的形式化模型</h3>
+<p>内存系统的性能由<strong>带宽</strong>和<strong>延迟</strong>两个维度决定。理解这些公式是理解Roofline模型和AI芯片瓶颈的关键。</p>
+
+<div class="formula">
+内存带宽 = 总线位宽 × 内存频率 × 倍增系数
+</div>
+
+<p>例如HBM3E：1024-bit位宽 × 3.6 GHz × 2(DDR) = <strong>4.8 TB/s</strong></p>
+
+<div class="formula">
+内存延迟 = tCL + tRCD + tRP + tRAS (DRAM时序参数简化)
+</div>
+
+<p>典型值：DRAM读延迟 ~100ns = 100,000个时钟周期(在1GHz主频下)。这就是为什么缓存未命中代价极高。</p>
+
+<div class="formula">
+算术强度(Arithmetic AI) = 浮点运算次数(FLOPs) / 内存传输字节数(Bytes)
+</div>
+
+<p>举例：矩阵乘法 C = A×B，维度均为 N×N：</p>
+<div class="ascii">
+// 矩阵乘法运算量与数据量分析
+// FLOPs = 2N³ (N³次乘法 + N³次加法)
+// Bytes = 3 × N² × sizeof(FP16) = 6N² (读取A、B + 写入C)
+// 算术强度 = 2N³ / 6N² = N/3
+
+// 当 N=4096 时：
+//   FLOPs = 2 × 4096³ = 140.7 TFLOPs
+//   Bytes = 6 × 4096² = 100.7 MB
+//   算术强度 = 4096/3 ≈ 1365 FLOPs/Byte → 计算受限
+
+// 当 N=32 (小batch推理)时：
+//   算术强度 = 32/3 ≈ 10.7 FLOPs/Byte → 带宽受限！
+</div>
+
+<div class="formula">
+Roofline模型：实际性能 = min(峰值算力, 内存带宽 × 算术强度)
+</div>
+
+<div class="ascii">
+// Roofline模型代码化表达
+float actual_performance(float peak_flops, float bandwidth, float arithmetic_intensity) {
+    float roofline_limit = bandwidth * arithmetic_intensity;  // 带宽限制线
+    return fminf(peak_flops, roofline_limit);                 // 取两者最小值
+}
+
+// H100 SXM5 示例:
+//   峰值FP16算力 = 989 TFLOPS (Tensor Core)
+//   内存带宽     = 3.35 TB/s
+//   拐点算力强度 = 989e12 / 3.35e12 = 295 FLOPs/Byte
+//
+//   当 AI < 295:  带宽受限 → 提升带宽收益更大
+//   当 AI > 295:  计算受限 → 提升算力收益更大
+//
+// AI大模型推理(batch=1): AI ≈ 10-50 → 严重带宽受限
+// AI大模型训练(batch=1024): AI > 1000 → 计算受限
+</div>
+
+<div class="tip">
+<strong>💡 工程直觉：</strong>为什么大模型推理时GPU利用率经常只有20-40%？因为推理时batch size小，算术强度低(通常10-50 FLOPs/Byte)，GPU处于Roofline的带宽受限区。算力再强也没用——数据搬不过来，计算单元只能空等。这就是τ定律强调"缩短数据移动距离"的根本原因。
+</div>
+
 <div class="tip">
 <strong>💡 与τ定律的关系：</strong>论文提到麒麟2026的SRAM频率提升了40%。SRAM是缓存的核心——SRAM越快，CPU等数据的时间就越短，τ_chip就越小。同时，SRAM也是逻辑折叠的重点优化对象，因为它占据了芯片面积的很大比例。
 </div>
@@ -923,6 +985,149 @@ td{padding:10px 12px;border:1px solid #21262d;font-size:0.9em}tr:nth-child(even)
 </svg>
 </div>
 
+<div class="warn">
+<strong>⚠️ 失败模式一：内存带宽瓶颈</strong><br>
+当AI工作负载的算术强度(AI)远低于芯片的拐点算力强度时，计算单元因等待数据而大量空转。具体表现为：<br>
+• GPU利用率仅20-40%，但内存带宽接近100%<br>
+• 增大batch size可提升算术强度，但推理场景batch通常=1<br>
+• <strong>正确做法</strong>：使用HBM替代GDDR(带宽提升3-5倍)、采用权重压缩减少数据量、使用Shared Memory做数据复用(减少全局内存访问)、或增加计算操作的重用率(如Flash Attention的tiling策略)
+</div>
+
+<h2>GPU架构概述：NVIDIA的并行计算引擎</h2>
+
+<p>现代AI计算几乎完全依赖GPU(图形处理器)。与CPU不同，GPU是<strong>大规模并行处理器</strong>——它用数千个简单核心同时执行相同指令，而非用几个复杂核心串行处理。</p>
+
+<h3>SM (Streaming Multiprocessor) 结构</h3>
+<p>GPU的基本构建块是<strong>SM (流式多处理器)</strong>。以NVIDIA Hopper H100为例，一颗GPU包含132个SM。每个SM内部是一个完整的计算-存储层次。</p>
+
+<div class="ascii">
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                    NVIDIA Hopper H100 GPU 架构总览                              │
+│                    132 SMs │ 6912 CUDA Cores │ 528 Tensor Cores              │
+├────────────────────────────────────────────────────────────────────────────────┤
+│                                                                                │
+│  ┌──────────────────────────────┐  ┌──────────────────────────────┐           │
+│  │         SM 0                 │  │         SM 1                 │  ...x132  │
+│  │                              │  │                              │           │
+│  │  ┌────────────────────────┐  │  │  ┌────────────────────────┐  │           │
+│  │  │    CUDA Cores × 128    │  │  │  │    CUDA Cores × 128    │  │           │
+│  │  │  ┌──────┐ ┌──────┐    │  │  │  │  ┌──────┐ ┌──────┐    │  │           │
+│  │  │  │FP32  │ │FP32  │    │  │  │  │  │FP32  │ │FP32  │    │  │           │
+│  │  │  │Unit  │ │Unit  │ ×64│  │  │  │  │Unit  │ │Unit  │ ×64│  │           │
+│  │  │  └──────┘ └──────┘    │  │  │  │  └──────┘ └──────┘    │  │           │
+│  │  │  ┌──────┐ ┌──────┐    │  │  │  │  ┌──────┐ ┌──────┐    │  │           │
+│  │  │  │INT32 │ │INT32 │    │  │  │  │  │INT32 │ │INT32 │    │  │           │
+│  │  │  │Unit  │ │Unit  │ ×64│  │  │  │  │Unit  │ │Unit  │ ×64│  │           │
+│  │  │  └──────┘ └──────┘    │  │  │  │  └──────┘ └──────┘    │  │           │
+│  │  │  FP32: 64 FMA/clk     │  │  │  │  FP32: 64 FMA/clk     │  │           │
+│  │  └────────────────────────┘  │  │  └────────────────────────┘  │           │
+│  │                              │  │                              │           │
+│  │  ┌────────────────────────┐  │  │  ┌────────────────────────┐  │           │
+│  │  │  Tensor Cores × 4      │  │  │  │  Tensor Cores × 4      │  │           │
+│  │  │  (第四代 Tensor Core)   │  │  │  │  (第四代 Tensor Core)   │  │           │
+│  │  │  FP16: 256 ops/clk     │  │  │  │  FP16: 256 ops/clk     │  │           │
+│  │  │  BF16/FP8/TF32/FP64    │  │  │  │  BF16/FP8/TF32/FP64    │  │           │
+│  │  │  支持稀疏加速(2×)       │  │  │  │  支持稀疏加速(2×)       │  │           │
+│  │  └────────────────────────┘  │  │  └────────────────────────┘  │           │
+│  │                              │  │                              │           │
+│  │  ┌────────────────────────┐  │  │  ┌────────────────────────┐  │           │
+│  │  │  Shared Memory (L1)    │  │  │  │  Shared Memory (L1)    │  │           │
+│  │  │  228 KB / SM           │  │  │  │  228 KB / SM           │  │           │
+│  │  │  ~33 TB/s 内部带宽      │  │  │  │  ~33 TB/s 内部带宽      │  │           │
+│  │  │  __shared__ float s[]  │  │  │  │  __shared__ float s[]  │  │           │
+│  │  └────────────────────────┘  │  │  └────────────────────────┘  │           │
+│  │                              │  │                              │           │
+│  │  ┌────────────────────────┐  │  │  ┌────────────────────────┐  │           │
+│  │  │  Register File         │  │  │  │  Register File         │  │           │
+│  │  │  256 KB / SM           │  │  │  │  256 KB / SM           │  │           │
+│  │  │  65536个 32-bit寄存器   │  │  │  │  65536个 32-bit寄存器   │  │           │
+│  │  │  ~25 TB/s 读取带宽      │  │  │  │  ~25 TB/s 读取带宽      │  │           │
+│  │  │  线程私有 · 零延迟访问   │  │  │  │  线程私有 · 零延迟访问   │  │           │
+│  │  └────────────────────────┘  │  │  └────────────────────────┘  │           │
+│  │                              │  │                              │           │
+│  │  Warp Scheduler × 4         │  │  │  Warp Scheduler × 4         │           │
+│  │  (每个Warp = 32线程)         │  │  │  (每个Warp = 32线程)         │           │
+│  └──────────────────────────────┘  └──────────────────────────────┘           │
+│                                                                                │
+│  ┌────────────────────────────────────────────────────────────────────────┐   │
+│  │  L2 Cache: 50MB  │  NVLink-C2C: 900 GB/s  │  第三代RT Core (光追)     │   │
+│  └────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                │
+│  ┌────────────────────────────────────────────────────────────────────────┐   │
+│  │  HBM3: 80GB  │  3.35 TB/s 带宽  │  1024-bit 总线  │  6个HBM堆叠        │   │
+│  └────────────────────────────────────────────────────────────────────────┘   │
+│                                                                                │
+│  层次关系(由快到慢): 寄存器 → Shared Memory → L2 Cache → HBM                  │
+│  带宽比例(近似):    25 TB/s : 33 TB/s : 10 TB/s : 3.35 TB/s                   │
+└────────────────────────────────────────────────────────────────────────────────┘
+</div>
+
+<div class="tip">
+<strong>💡 GPU编程映射：</strong>写CUDA代码时，你实际上是在操作这个层次结构。线程(Thread)用寄存器，线程块(Block)共享Shared Memory，所有线程共享全局内存(HBM)。理解这个映射是写出高性能kernel的基础——90%的优化都围绕"减少全局内存访问"展开。
+</div>
+
+<div class="deep">
+<strong>📜 AI芯片竞品深度对比 (2024-2025)</strong><br><br>
+<table>
+<tr><th>参数</th><th>NVIDIA H100 SXM5</th><th>NVIDIA B200</th><th>AMD MI300X</th><th>Google TPU v5p</th><th>Intel Gaudi3</th></tr>
+<tr><td>架构</td><td>Hopper</td><td>Blackwell</td><td>CDNA3</td><td>TPU v5p</td><td>Gaudi3</td></tr>
+<tr><td>工艺</td><td>TSMC 4N</td><td>TSMC 4NP</td><td>TSMC 5nm+6nm</td><td>TSMC 5nm</td><td>TSMC 5nm</td></tr>
+<tr><td>FP16算力 (TFLOPS)</td><td>989 (1979*)</td><td>~2250 (4500*)</td><td>1307 (2614*)</td><td>~459</td><td>~1835</td></tr>
+<tr><td>FP8算力 (TFLOPS)</td><td>1979 (3958*)</td><td>~4500 (9000*)</td><td>2614 (5228*)</td><td>~918</td><td>~3670</td></tr>
+<tr><td>训练吞吐量(LLaMA-2 70B)</td><td>1.0× (基准)</td><td>~3.8×</td><td>~2.2×</td><td>~1.5×</td><td>~1.3×</td></tr>
+<tr><td>推理吞吐量(llama3.1-8B, tokens/s)</td><td>~3500</td><td>~9000</td><td>~6500</td><td>~4200</td><td>~5500</td></tr>
+<tr><td>显存带宽</td><td>3.35 TB/s</td><td>8 TB/s</td><td>5.3 TB/s</td><td>2.75 TB/s</td><td>3.7 TB/s</td></tr>
+<tr><td>显存容量</td><td>80GB HBM3</td><td>192GB HBM3e</td><td>192GB HBM3</td><td>96GB HBM</td><td>128GB HBM2e</td></tr>
+<tr><td>显存总线位宽</td><td>5120-bit</td><td>8192-bit</td><td>8192-bit</td><td>4096-bit</td><td>6144-bit</td></tr>
+互连带宽</td><td>900 GB/s (NVLink)</td><td>1800 GB/s (NVLink)</td><td>896 GB/s (xGMI)</td><td>3200 Gb/s ICI</td><td>2400 Gb/s (RoCE)</td></tr>
+<tr><td>功耗 (TDP)</td><td>700W</td><td>1000W</td><td>750W</td><td>~600W</td><td>900W</td></tr>
+<tr><td>软件生态</td><td>CUDA (垄断)</td><td>CUDA</td><td>ROCm (追赶中)</td><td>JAX/XLA</td><td>SynapseAI</td></tr>
+<tr><td>AI训练优势</td><td>全栈生态、NVLink扩展</td><td>FP8原生支持、超大显存</td><td>显存大、性价比好</td><td>Google内部大规模部署</td><td>BF16优化、推理性价比</td></tr>
+<tr><td>AI推理优势</td><td>TensorRT-LLM、MIG</td><td>192GB单卡可跑70B</td><td>长上下文(大显存)</td><td>Prefill优势、TPU Pod</td><td>低延迟、高吞吐</td></tr>
+</table>
+<p style="color:#8b949e;font-size:0.85em;margin-top:8px;">* 含结构化稀疏加速(2×)  │  训练吞吐量以LLaMA-2 70B为基准(H100=1.0×)  │  推理吞吐量为单卡FP16, batch=32, input=1024 tokens</p>
+<p style="color:#d29922;font-size:0.85em;margin-top:4px;"><strong>关键洞察：</strong>NVIDIA的护城河不是单卡性能(AMD MI300X显存更大)，而是CUDA生态+NVLink扩展性。Google TPU v5p在Google内部大规模训练中表现优异，但外部用户无法直接使用。Intel Gaudi3以BF16精度见长，推理性价比突出。τ定律要解决的核心问题是：在所有这些芯片上，数据移动的τ都是瓶颈。</p>
+</div>
+
+<h2>芯片发展趋势：从H100到下一代</h2>
+
+<p>AI芯片的迭代速度已超越摩尔定律。以下是NVIDIA主流AI芯片的性能参数对比：</p>
+
+<table>
+<tr><th>芯片</th><th>架构</th><th>发布年份</th><th>FP16 TFLOPS</th><th>显存带宽</th><th>显存容量</th><th>功耗</th><th>互联带宽</th></tr>
+<tr><td><strong>A100</strong></td><td>Ampere</td><td>2020</td><td>312 (624*)</td><td>2.0 TB/s</td><td>80GB HBM2e</td><td>400W</td><td>600 GB/s (NVLink)</td></tr>
+<tr><td><strong>H100 SXM5</strong></td><td>Hopper</td><td>2022</td><td>989 (1979*)</td><td>3.35 TB/s</td><td>80GB HBM3</td><td>700W</td><td>900 GB/s (NVLink)</td></tr>
+<tr><td><strong>H200 SXM5</strong></td><td>Hopper+</td><td>2024</td><td>989 (1979*)</td><td>4.8 TB/s</td><td>141GB HBM3e</td><td>700W</td><td>900 GB/s (NVLink)</td></tr>
+<tr><td><strong>B200</strong></td><td>Blackwell</td><td>2024</td><td>~2250 (4500*)</td><td>8 TB/s</td><td>192GB HBM3e</td><td>1000W</td><td>1800 GB/s (NVLink)</td></tr>
+<tr><td><strong>B300</strong></td><td>Blackwell+</td><td>2025</td><td>~3450 (6900*)</td><td>12 TB/s</td><td>288GB HBM4</td><td>1200W</td><td>1800 GB/s (NVLink)</td></tr>
+<tr><td><strong>Rubin R100</strong></td><td>Rubin</td><td>2026 (预计)</td><td>~5000</td><td>16 TB/s</td><td>288GB HBM4</td><td>1500W</td><td>3600 GB/s (NVLink)</td></tr>
+</table>
+
+<table>
+<tr><th>代际对比</th><th>算力增长</th><th>带宽增长</th><th>功耗增长</th><th>算力/功耗比</th></tr>
+<tr><td>A100 → H100</td><td>3.2×</td><td>1.7×</td><td>1.75×</td><td>1.8×</td></tr>
+<tr><td>H100 → B200</td><td>2.3×</td><td>2.4×</td><td>1.43×</td><td>1.6×</td></tr>
+<tr><td>B200 → B300</td><td>1.5×</td><td>1.5×</td><td>1.2×</td><td>1.3×</td></tr>
+<tr><td>H100 → B300 (跨代)</td><td>3.5×</td><td>3.6×</td><td>1.7×</td><td>2.0×</td></tr>
+</table>
+
+<div class="formula">
+算力增长趋势：每代 ~1.5-2.3× │ 带宽增长：每代 ~1.5-2.4× │ 功耗墙：已触及 1000W/卡 物理极限
+</div>
+
+<div class="tip">
+<strong>💡 趋势洞察：</strong>从A100到B300的5年间，单卡算力增长约11倍(312→3450 TFLOPS)，但功耗仅增长3倍(400W→1200W)。这说明架构优化(如Tensor Core演进、数据类型从FP16→FP8)比单纯堆晶体管更有效。但1000W已是风冷极限——B200/B300开始转向液冷，1500W以上的Rubin需要整机柜液冷方案。
+</div>
+
+<div class="warn">
+<strong>⚠️ 失败模式二：功耗墙降频</strong><br>
+当GPU实际功耗超过TDP限制时，会触发<strong>热保护降频(Thermal Throttling)</strong>——GPU自动降低运行频率以减少发热。具体表现：<br>
+• 标称Boost频率1.83GHz → 实际运行1.5-1.6GHz (降频15-20%)<br>
+• FP16算力从989 TFLOPS → 实际仅750-850 TFLOPS<br>
+• 数据中心中，H100实际平均功耗仅600-650W (低于标称700W)<br>
+• <strong>正确做法</strong>：确保散热方案足够(液冷优于风冷)、监控nvidia-smi中的Power Draw和Clock频率、使用<code>nvidia-smi -pl</code>手动设置功耗上限(牺牲峰值性能换取稳定性)、在多卡场景中留出散热间距
+</div>
+
 <h2>十一、芯片设计流程概览</h2>
 
 <p>理解芯片从"想法"到"实物"的完整流程，有助于理解τ定律中"EDA工具需要重建"这个开放问题。</p>
@@ -1005,233 +1210,9 @@ td{padding:10px 12px;border:1px solid #21262d;font-size:0.9em}tr:nth-child(even)
 <tr><td>统一总线</td><td>Unified Bus</td><td>全域对等内存语义协议</td><td>AI系统</td></tr>
 </table>
 
-<div class="tip"><strong>向前串联：</strong>
-一、从沙子到芯片：一块芯片是怎么造出来的？的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
-建议结合实际框架动手验证本章所学内容。
-</div>
-<pre><code class="language-python"># 一、从沙子到芯片：一块芯片是怎么造出来的？ 性能基准测试
-import torch
-import time
-
-def benchmark(model, input_data, warmup=10, iters=100):
-    for _ in range(warmup):
-        model(input_data)
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    for _ in range(iters):
-        model(input_data)
-    torch.cuda.synchronize()
-    elapsed = (time.perf_counter() - start) / iters
-    print(f"Latency: {elapsed*1000:.2f}ms")
-    return elapsed
-</code></pre>
-<div class="ascii">
-一、从沙子到芯片：一块芯片是怎么造出来的？ 系统架构
-┌──────────┐    ┌──────────────┐    ┌──────────┐
-│  Input   │───→│  Processing  │───→│  Output  │
-│  Layer   │    │    Engine    │    │  Layer   │
-└──────────┘    └──────────────┘    └──────────┘
-     │                │                    │
-     ▼                ▼                    ▼
-  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
-</div>
-<div class="tip"><strong>相关章节：</strong>
-一、从沙子到芯片：一块芯片是怎么造出来的？与本系列其他章节密切相关，建议结合学习形成完整知识体系。
-</div>
-<div class="tip"><strong>相关章节：</strong>
-一、从沙子到芯片：一块芯片是怎么造出来的？与以下内容密切相关：<a href="01-论文背景与动机.html">01-论文背景与动机</a> | <a href="02-τ定律核心理论.html">02-τ定律核心理论</a> | <a href="03-逻辑折叠技术.html">03-逻辑折叠技术</a>。建议结合学习。
-</div>
-<div class="ascii">
-一、从沙子到芯片：一块芯片是怎么造出来的？ 性能分析 (屋顶模型)
-  计算吞吐  │         ╱ 计算受限区
-  (TFLOPS)  │       ╱
-            │     ╱   ← 实际工作点
-            │   ╱
-            │ ╱ 带宽受限区
-            │╱
-            └──────────────── 带宽利用率
-  转折点 = 峰值算力 / 峰值带宽
-</div>
-<pre><code class="language-python"># 一、从沙子到芯片：一块芯片是怎么造出来的？ - 性能基准测试
-import torch, time
-def benchmark(model, x, n=100):
-    for _ in range(10): model(x)
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(n): model(x)
-    torch.cuda.synchronize()
-    print(f"Latency: {(time.perf_counter()-t0)/n*1000:.2f}ms")
-</code></pre>
-<div class="exercise">
-<strong>🧪 自测：你准备好了吗？</strong>
-<p>如果你能回答以下问题，说明你已经具备读懂τ定律论文的基础知识：</p>
-
-<div class="deep">
-<strong>📜 芯片产业的"垂直分工"与"垂直整合"之争：</strong>理解芯片产业的组织模式，有助于理解τ定律为什么强调"全栈优化"。芯片产业历史上经历了两次大的组织模式转变：(1) 1980年代之前，Intel等公司同时做设计和制造（IDM模式，垂直整合）；(2) 1987年台积电成立后，设计（Fabless）和制造（Foundry）分离成为主流（垂直分工）；(3) 2020年代，随着系统级优化越来越重要，Apple、华为等公司又开始追求从芯片设计到封装到系统的垂直整合。τ定律的"全栈协同优化"理念，本质上是对第三种模式的理论支撑——当单一维度（制程）的优化空间收窄时，跨层级的协同优化就成为主要的性能提升来源。这需要企业同时掌握芯片设计、封装技术和系统集成能力，而这正是垂直整合型企业的优势所在。
-</div>
-
-<pre style="background:#161b22;border:1px solid #30363d;border-radius:4px;padding:16px;font-family:'Fira Code',monospace;font-size:0.85em;line-height:1.5;overflow-x:auto;color:#c9d1d9;margin:12px 0;">
-<code># τ定律关键参数速查表
-# τ = 系统响应时间的特征量
-# α = 每年τ缩减倍率 (scaling factor)
-# Δτ_net = Δτ_收益 - Δτ_损耗 (逻辑折叠判据)
-
-# τ的层级分解:
-τ_system  = τ_transistor + τ_circuit + τ_chip + τ_system
-#  晶体管级    电路级       芯片级     系统级
-#  ~ps级       ~ns级        ~μs级      ~ms级
-
-# 各层级典型τ值:
-# τ_transistor: ~1ps (晶体管开关速度)
-# τ_circuit:    ~0.1-1ns (关键路径延迟)
-# τ_chip:       ~10-100μs (片上互连+缓存访问)
-# τ_system:     ~1-10ms (芯片间通信+内存访问)</code>
-</pre>
-
-<ol>
-<li>晶体管的基本功能是什么？它有哪三个关键电极？</li>
-<li>"7nm工艺"中的7nm指的是真实物理尺寸吗？</li>
-<li>RC延迟与走线长度是什么关系？</li>
-<li>为什么芯片越大，I/O带宽相对越不足？（N² vs N）</li>
-<li>HBM为什么比DDR快？它解决了什么问题？</li>
-<li>混合键合和传统焊球连接的主要区别是什么？</li>
-<li>SRAM和DRAM各用在哪里？为什么CPU需要多级缓存？</li>
-<li>EUV光刻机为什么重要？华为为什么需要τ定律？</li>
-</ol>
-<p><strong>答案提示：</strong>① 电子开关；栅极/源极/漏极 ② 不是，是营销代号 ③ 延迟∝长度 ④ 计算∝N²，I/O∝N ⑤ 3D堆叠缩短距离提升带宽，解决存储墙 ⑥ 间距小1000×，无需焊料 ⑦ SRAM用于缓存快但贵，DRAM用于主存慢但密 ⑧ 13.5nm波长可刻更细线；EUV受管制需另寻路径</p>
-</div>
-
-<h2>📚 延伸学习资源</h2>
-<table>
-<tr><th>资源</th><th>类型</th><th>推荐理由</th></tr>
-<tr><td>《芯片战争》Chris Miller</td><td>书籍</td><td>半导体产业史入门，无技术门槛</td></tr>
-<tr><td>《计算机组成与设计》Patterson & Hennessy</td><td>教材</td><td>芯片架构经典教材，有中文版</td></tr>
-<tr><td>ASML官网技术博客</td><td>博客</td><td>光刻技术科普，图文并茂</td></tr>
-<tr><td>SemiEngineering.com</td><td>行业媒体</td><td>先进封装、HBM技术深度报道</td></tr>
-<tr><td>B站搜索"芯片制造流程"</td><td>视频</td><td>中文视频教程，直观理解制造过程</td></tr>
-<tr><td>IEEE Spectrum</td><td>期刊</td><td>半导体技术前沿综述</td></tr>
-</table>
-
-<div class="tip">
-<strong>💡 学习建议：</strong>不需要把本章所有内容都背下来。建议先通读一遍建立整体框架，然后在后续学习τ定律的具体章节时，遇到不理解的概念再回来查阅。本章就像一本"字典"——随时翻阅即可。
-</div>
-
-<div class="next-prev">
-<span></span>
-<a href="01-论文背景与动机.html">01 - 论文背景与动机 →</a>
-</div>
-
-<div class="tip" style="margin-top:16px;">
-<strong>💡 下一步学习：</strong>恭喜你完成了芯片基础知识的入门学习！现在你已经具备了理解τ定律论文所需的全部前置知识。点击上方链接进入第一模块"论文背景与动机"，开始正式的τ定律学习之旅。
-</div>
-
-<h2>📝 练习与思考</h2>
-
-<div class="box exercise"><div class="label">🎯 思考题</div>
-<ol>
-<li>MOSFET晶体管与机械水龙头在控制原理上有何类比关系？沟道长度如何决定开关速度？</li>
-<li>RC延迟中，线宽缩小对R和C各有什么影响？3nm节点的互连延迟趋势如何？</li>
-<li>EUV(13.5nm)与DUV(193nm)在分辨率公式中有何区别？为什么EUV是7nm以下必需？</li>
-</ol>
-</div>
-
-<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
-<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
-<div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
-<ol>
-<li><strong>核心原理</strong>: MOSFET通过栅极电压控制沟道光/关断，类比水龙头把手控制水流。载流子渡越时间t=L/v=L/(μE)，L线性减小时速度线性提升；栅极主要提供控制功能而非传输。<br><strong>关键要点</strong>: ①渡越时间正比于沟道长度 ②速度饱和限制 ③栅极提供控制<br><strong>实际案例</strong>: 14nm沟道~20nm,渡越~0.5ps;3nm沟道~12nm,渡越~0.3ps</li>
-<li><strong>核心原理</strong>: 理想情况线长减半,R各减半,C也各减半,RC延迟变为1/4。但3nm中电子表面散射使铜电阻率从2.2升至3.5μΩ·cm,BEOL延迟占比已达70%+。<br><strong>关键要点</strong>: ①电阻率因尺寸效应上升 ②互连延迟占主导 ③低k介质是缓解方向<br><strong>实际案例</strong>: 7nm节点时钟路径互连延迟占60%</li>
-<li><strong>核心原理</strong>: Rayleigh公式CD=k1*λ/NA。EUV波长仅DUV的1/14.3,同NA下线宽分辨能力提升14倍。7nm最小间距~24nm,远超DUV极限(~38nm)。<br><strong>关键要点</strong>: ①波长决定分辨率 ②EUV不可替代 ③华为被迫寻找非光刻路径<br><strong>实际案例</strong>: 台积电7nm首次EUV~14层,5nm提升至15+层</li>
-</ol>
-</div>
-
-<div class="box exercise"><div class="label">🎯 动手练习</div>
-<p><strong>练习目标</strong>: 用Python模拟RC延迟，验证逻辑折叠对τ的缩减效果。</p>
-<pre><code>import numpy as np
-
-def simulate_critical_path(length_um, pitch_factor=1.0, layer_count=1):
-    """
-    模拟关键路径的RC延迟
-    参数:
-        length_um: 关键路径长度
-        pitch_factor: 工艺因子(越小越先进)
-        layer_count: 折叠层数
-    Returns:
-        RC延迟 (ps)
-    """
-    rho = 0.0035 * pitch_factor       # 铜电阻率 (含尺寸效应)
-    epsilon = 2.2                     # 低k介质介电常数
-    width = 3 * pitch_factor          # 线宽
-    height = 6 * pitch_factor         # 线高
-    spacing = 3 * pitch_factor        # 线间距
-    
-    R_per_um = rho / (width * height * 1e-8)
-    C_per_um = epsilon * 8.85e-18 * (width + spacing) / spacing * 1e6
-    
-    total_delay = 0
-    for layer in range(layer_count):
-        layer_len = length_um / layer_count
-        R = R_per_um * layer_len
-        C = C_per_um * layer_len
-        if layer > 0:
-            R += 0.5 * rho  # TSV接触电阻
-            C += 10e-15      # TSV寄生电容
-        total_delay += R * C
-    
-    return total_delay * 1e15  # ps
-
-# 模拟不同折叠层数的效果
-print("="*60)
-print("逻辑折叠对RC延迟的缩减效果")
-print("="*60)
-lengths = [50, 100, 200]
-
-for n in [1, 2, 4]:
-    print(f"\n折叠层数: {n}")
-    for L in lengths:
-        tau = simulate_critical_path(L, pitch_factor=1.0, layer_count=n)
-        if n == 1:
-            baseline = tau
-            print(f"  L={L:>3}μm: τ={tau:.1f}ps (基准)")
-        else:
-            reduction = (1 - tau/baseline) * 100
-            print(f"  L={L:>3}μm: τ={tau:.1f}ps (↓{reduction:.0f}%)")
-
-print("\n结论: 2层折叠可降低τ约60-70%, 验证了逻辑折叠的物理基础")</code></pre>
-</div>
-
-<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
-<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a2a3a,#0d1720);border:1px solid #2d4a5a;border-left:3px solid #60a5fa;border-radius:8px;padding:16px;margin:12px 0">
-<div class="label" style="color:#60a5fa;font-weight:bold;font-size:1.05em">💡 参考答案与详解</div>
-<p><strong>解题思路</strong>: 脚本基于RC延迟公式τ=R×C，其中R=ρ×L/A, C=ε×A/d。缩短路径(L减小)直接降低R和C。垂直互连(TSV)的寄生极小,因此折叠效果显著。</p><pre><code># 输出示例:
-折叠层数: 2
-  L= 50μm: τ=5.8ps  (↓73%)
-  L=100μm: τ=23.3ps  (↓74%)
-  L=200μm: τ=93.1ps  (↓72%)</code></pre><p><strong>关键知识点</strong>: ①RC延迟是逻辑折叠的理论基础 ②垂直互连的寄生远小于水平互连 ③折叠层数与缩减率非线性</p>
-</div>
-
-</div>
 <div class="footer">
 <p>华为韬(τ)定律学习指南 · 前置知识模块</p>
 <p><a href="index.html">返回总览</a></p>
 </div>
-
-<script>
-function toggleAnswer(btn) {
-  var content = btn.nextElementSibling;
-  if (content && content.classList.contains('answer-content')) {
-    if (content.classList.contains('show')) {
-      content.classList.remove('show');
-      btn.classList.remove('open');
-      btn.innerHTML = '<span class="icon">▶</span>显示答案';
-    } else {
-      content.classList.add('show');
-      btn.classList.add('open');
-      btn.innerHTML = '<span class="icon">▶</span>隐藏答案';
-    }
-  }
-}
-</script>
-
 </body>
 </html>

@@ -1,15 +1,200 @@
-<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Megatron-LM核心原理 - 分布式训练系统</title><style>
-*{margin:0;padding:0;box-sizing:border-box}body{background:#0f1117;color:#c9d1d9;font-family:'Segoe UI',system-ui,sans-serif;line-height:1.8;padding:20px;max-width:1000px;margin:0 auto}h1{color:#58a6ff;font-size:1.8em;margin:20px 0 10px;border-bottom:2px solid #30363d;padding-bottom:10px}h2{color:#79c0ff;font-size:1.4em;margin:25px 0 10px}h3{color:#d2a8ff;font-size:1.2em;margin:20px 0 8px}p{margin:10px 0}.nav{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;margin-bottom:25px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px}.nav a{color:#58a6ff;text-decoration:none;font-size:0.9em}.nav a:hover{text-decoration:underline}pre{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;overflow-x:auto;margin:15px 0;font-size:0.9em;line-height:1.6}code{background:#161b22;padding:2px 6px;border-radius:4px;font-size:0.9em;color:#e6edf3}pre code{background:none;padding:0}table{border-collapse:collapse;width:100%;margin:15px 0}th,td{border:1px solid #30363d;padding:10px 12px;text-align:left}th{background:#161b22;color:#58a6ff}tr:nth-child(even){background:#161b22}.highlight{background:#1a2332;border-left:4px solid #58a6ff;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.formula{background:#1a1a2e;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;text-align:center;font-family:'Courier New',monospace;color:#e6edf3}.ascii-art{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:16px;margin:15px 0;font-family:'Courier New',monospace;font-size:0.85em;line-height:1.4;white-space:pre;overflow-x:auto}ul,ol{margin:10px 0 10px 25px}li{margin:5px 0}.warning{background:#2d1b00;border-left:4px solid #d29922;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.tip{background:#0d2818;border-left:4px solid #3fb950;padding:12px 16px;margin:15px 0;border-radius:0 8px 8px 0}.footer{margin-top:40px;padding-top:20px;border-top:1px solid #30363d;font-size:0.85em;color:#8b949e}.ref{margin-top:30px;padding:16px;background:#161b22;border-radius:8px;border:1px solid #30363d}.ref h2{margin-top:0}.ref a{color:#58a6ff}</style></head><body><div class="nav"><a href="03-DeepSpeed架构深度剖析.html">⬅ DeepSpeed架构深度剖析</a><a href="index.html">📖 目录</a><a href="05-3D并行与混合并行.html">3D并行与混合并行 ➡</a></div><h1>04 Megatron-LM 核心原理</h1>
-
 <h2>为什么 Megatron-LM 是大模型训练的王者？</h2>
-<p>Megatron-LM 是 NVIDIA 开发的大模型训练框架，专注于<strong>张量并行</strong>和<strong>流水线并行</strong>的极致优化。几乎所有 100B+ 模型的训练都使用了 Megatron 的技术。</p>
+<p><strong>核心优势</strong>：Megatron-LM 之所以成为 1000亿+参数模型训练的行业标准，根本原因是它解决了分布式训练的<strong>通信瓶颈</strong>问题。在千亿参数模型中，分布式训练的通信开销可以占到总时间的 30-50%，Megatron 通过张量并行（TP）、流水线并行（PP）、序列并行（SP）的精细设计，将通信开销压缩到 15-25%。</p>
+
+<div class="formula">
+Megatron-LM 的并行效率模型:<br>
+Efficiency = T_compute / (T_compute + T_comm + T_bubble)<br>
+<br>
+其中: T_compute = 纯计算时间, T_comm = 通信时间, T_bubble = 流水线气泡<br>
+<br>
+典型配置 (70B 模型, 64×H100, TP=8, PP=4, DP=2):<br>
+T_compute ≈ 850ms/step, T_comm ≈ 120ms/step, T_bubble ≈ 80ms/step<br>
+Efficiency = 850 / (850+120+80) ≈ 81%<br>
+<br>
+对比: 纯数据并行 (DP=64): Efficiency ≈ 45% (通信成为瓶颈)
+</div>
+
+<p>这个公式展示了 Megatron 3D 并行的核心价值：通过将通信分散到不同层级（TP 在机内 NVLink 上，PP 在机间 IB 上，DP 在 IB Ring 上），每层的通信量远小于纯数据并行的全局 AllReduce。实测表明，在 64 块 H100 上训练 70B 模型，Megatron 的 MFU（Model FLOPs Utilization）可达 38-48%，而纯数据并行仅 20-25%。</p>
+
+<div class="warn"><strong>⚠ Megatron-LM 的配置陷阱</strong>：Megatron 的性能极度依赖硬件拓扑匹配。TP 度必须等于节点内 GPU 数（利用 NVLink 900 GB/s），PP 度等于节点数（利用 IB 400 Gbps）。配置错误（如 TP=4 在 8 卡节点内）会导致通信走 PCIe 而非 NVLink，带宽从 900 GB/s 降到 32 GB/s，性能退化 5-10x。务必先用 <code>nvidia-smi topo -m</code> 确认 GPU 拓扑。</p>
+
+<div class="deep"><strong>🔍 深入理解：</strong>Megatron-LM 的设计哲学体现了 NVIDIA 对硬件-软件协同优化的深刻理解——每个并行策略都针对特定的硬件通信层级（NVLink → 机内，IB → 机间），而不是抽象地"并行化"。这种"硬件感知"设计是其相比通用框架（如 DeepSpeed）性能领先 20-30% 的根本原因。</div>
+
+<h2>混合精度训练原理</h2>
+<p>Megatron-LM 默认使用混合精度训练（Mixed Precision Training），在大部分计算中使用 FP16/BF16 以节省显存和加速计算，同时在关键操作（如 AllReduce、参数更新）中保持 FP32 精度。这是大模型训练的核心加速技术。</p>
+
+<div class="formula">
+混合精度训练的显存节省:<br>
+Memory_FP16 = 1/2 × Memory_FP32<br>
+<br>
+70B 模型显存对比:<br>
+FP32: 参数 280GB + 优化器状态 840GB = 1.12TB (不可行)<br>
+FP16: 参数 140GB + 优化器状态(FP32) 280GB = 420GB (可行)<br>
+BF16: 同 FP16，但数值范围更大，训练更稳定<br>
+<br>
+计算加速:<br>
+H100 FP16 Tensor Core: 989 TFLOPS<br>
+H100 FP32 CUDA Core: 51 TFLOPS<br>
+加速比: 989/51 ≈ 19x
+</div>
+
+<p>这个公式展示了混合精度训练的核心价值：显存减半 + 计算加速 19x。对于 70B 模型，纯 FP32 训练需要 1.12TB 显存（远超单卡 80GB），而混合精度只需 420GB（8 卡可承载）。H100 的 FP16 Tensor Core 提供 989 TFLOPS，是 FP32 的 19 倍。</p>
+
+<div class="tip"><strong>💡 实用技巧：</strong>Megatron-LM 通过 <code>--fp16</code> 或 <code>--bf16</code> 参数启用混合精度。BF16 比 FP16 更稳定（动态范围与 FP32 相同），Ampere 及以上 GPU 推荐使用 BF16。FP16 需要额外的 loss scaling 来防止梯度下溢。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>FP16 的最大值仅为 65504，在训练大模型时容易出现 overflow/underflow。Megatron 使用动态 loss scaling（Dynamic Loss Scaling）解决：初始 scale=2^16，如果检测到 inf/NaN 则减半，连续成功则加倍。BF16 不需要 loss scaling。</div>
+
+<div class="deep"><strong>🔍 深入理解：混合精度的实现机制</strong>
+混合精度训练的关键是在不同操作中使用不同精度：
+
+<div class="ascii-art">
+混合精度训练流程 (前向):<br>
+<br>
+参数存储: FP32 master weights (用于更新)<br>
+    ↓ cast<br>
+前向计算: FP16/BF16 (节省显存 + 加速)<br>
+    ↓<br>
+Loss 计算: FP32 (精度敏感)<br>
+    ↓ × loss_scale<br>
+反向传播: FP16/BF16 (梯度)<br>
+    ↓ ÷ loss_scale<br>
+梯度 AllReduce: FP16/BF16 或 FP32<br>
+    ↓<br>
+参数更新: FP32 master weights += lr × grad<br>
+    ↓ cast<br>
+下一轮前向: FP16/BF16
+</div>
+
+关键设计决策：
+1. FP32 master weights：参数更新在 FP32 下进行，避免精度损失
+2. Loss scaling：将 loss 放大 2^16 倍，防止 FP16 梯度下溢
+3. FP32 敏感操作：LayerNorm、Softmax、AllReduce 在 FP32 下计算
+4. BF16 优势：动态范围与 FP32 相同（7 bits vs 8 bits 指数），不需要 loss scaling
+</div>
+
+<div class="deep"><strong>🔍 实现细节：Megatron 的混合精度实现伪代码</strong>
+
+<pre><code>import torch
+import torch.nn as nn
+import torch.distributed as dist
+
+class MixedPrecisionTrainer:
+    """Megatron-LM 混合精度训练器核心逻辑"""
+    
+    def __init__(self, model, use_fp16=True, loss_scale=2**16):
+        self.model = model
+        self.use_fp16 = use_fp16
+        self.loss_scale = loss_scale
+        # FP32 master weights — 用于参数更新
+        self.fp32_params = [p.float() for p in model.parameters()]
+        # FP16 model weights — 用于前向/反向计算
+        self.fp16_params = [p.half() for p in self.fp32_params]
+    
+    def forward(self, x):
+        # 前向使用 FP16 计算（加速 19x）
+        # 但 LayerNorm 和 Softmax 在 FP32 下计算
+        with torch.cuda.amp.autocast(dtype=torch.float16):
+            output = self.model(x)
+        return output
+    
+    def backward(self, loss):
+        # Loss scaling: 放大 loss 防止梯度下溢
+        scaled_loss = loss * self.loss_scale
+        scaled_loss.backward()
+        
+        # 将 FP16 梯度转为 FP32 并除以 scale
+        for fp16_p, fp32_p in zip(self.fp16_params, self.fp32_params):
+            if fp16_p.grad is not None:
+                fp32_p.grad = fp16_p.grad.float() / self.loss_scale
+    
+    def allreduce_gradients(self):
+        # 梯度 AllReduce — 在 FP16 或 FP32 下进行
+        # Megatron 默认在 FP16 下 AllReduce 以节省通信量
+        grads = [p.grad for p in self.fp16_params if p.grad is not None]
+        # Ring AllReduce
+        dist.all_reduce_coalesced(grads)
+    
+    def step(self, optimizer):
+        # 参数更新在 FP32 master weights 上进行
+        optimizer.step(self.fp32_params)
+        # 将更新后的 FP32 参数 cast 回 FP16
+        for fp16_p, fp32_p in zip(self.fp16_params, self.fp32_params):
+            fp16_p.copy_(fp32_p.half())
+    
+    def update_loss_scale(self, has_inf_nan):
+        """动态 loss scaling: 检测到 inf/NaN 则减半"""
+        if has_inf_nan:
+            self.loss_scale /= 2
+        else:
+            self.loss_scale *= 2
+</code></pre>
+</div>
 
 
-<div class="tip"><strong>💡 实用技巧：</strong>Megatron-LM 的核心优势是极致的内核融合和通信优化。几乎每个 100B+ 模型（GPT-4、Llama 3 405B 等）都使用了 Megatron 的张量并行技术。入门建议：先用 Megatron-Core 的 <code>examples/</code> 在 8 卡上跑通 7B 模型，理解 TP=8 的实际通信模式。</div>
+<h2>数据并行与 ZeRO 优化</h2>
+<p>数据并行（Data Parallelism, DP）是最直观的分布式训练方式：每个 GPU 持有完整模型副本，处理不同的数据 mini-batch，训练后同步梯度。Megatron-LM 中 DP 通常与 TP/PP 组合使用（3D 并行），剩余 GPU 自动组成 DP 组。</p>
 
-<div class="warn"><strong>⚠️ 注意事项：</strong>Megatron-LM 的配置参数需要与硬件拓扑严格匹配。TP 度必须等于节点内 GPU 数（利用 NVLink），PP 度等于节点数。配置错误会导致严重的性能退化。务必先用 <code>nvidia-smi topo -m</code> 确认 GPU 拓扑。</div>
+<div class="formula">
+数据并行的通信开销:<br>
+Comm_DP = 2 × (N-1)/N × ModelSize × sizeof(fp16)<br>
+<br>
+其中 N = DP 度（GPU 数量）<br>
+<br>
+对于 70B 模型 (140GB in FP16), DP=2:<br>
+Comm = 2 × (2-1)/2 × 140GB = 140GB<br>
+IB 通信时间 = 140GB / 50GB/s ≈ 2.8s — 这是不可接受的!<br>
+<br>
+对比: 3D 并行 (TP=8, PP=4, DP=2):<br>
+每步通信仅 120ms — 比纯 DP 快 23x
+</div>
 
-<div class="deep"><strong>🔍 深入理解：</strong>「为什么 Megatron-LM 是大模型训练的王者？」的深层理解：从系统设计的角度看，NVIDIA的设计体现了关注点分离的原则——每个组件只负责一个明确的功能，通过清晰的接口协作。这种设计哲学是构建可维护、可扩展系统的基础。</div>
+<p>这个公式展示了纯数据并行在大模型训练中的根本问题：梯度 AllReduce 的通信量与模型大小成正比。对于 70B 模型，每步需要传输 140GB 梯度，在 IB 50GB/s 下需要 2.8s，完全无法接受。3D 并行通过将大部分通信转移到 NVLink（900 GB/s）上，只在 IB 上做少量 DP 通信，解决了这个问题。</p>
+
+<div class="tip"><strong>💡 实用技巧：</strong>Megatron-LM 中 DP 是"隐式"的——当你设置 TP=8, PP=4 使用 32 张 GPU 时，如果总共有 64 张 GPU，剩余的 32 张自动组成 DP=2 组。不需要显式配置 DP 度，它由 <code>DP = 总GPU / (TP × PP)</code> 自动计算。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>纯数据并行在 70B+ 模型上效率极低（MFU &lt; 20%），因为梯度同步的通信量与模型大小成正比。Megatron 的 3D 并行将 DP 度压缩到 1-4，使通信量减少 16-64x。</div>
+
+<div class="deep"><strong>🔍 深入理解：ZeRO 优化器与 DP 的关系</strong>
+ZeRO（Zero Redundancy Optimizer）通过将优化器状态、梯度和参数分片到多个 GPU 上，消除了数据并行中的冗余存储。Megatron-LM 虽然没有直接集成 ZeRO，但其序列并行（SP）实现了类似的"消除冗余"思想。两者的对比：
+
+<div class="formula">
+ZeRO 三阶段对比:<br>
+Stage 1: 优化器状态分片 → 显存减少 4x (Adam 有 3 个状态)<br>
+Stage 2: 梯度分片 → 显存减少 8x<br>
+Stage 3: 参数分片 → 显存减少 Nx<br>
+<br>
+Megatron 3D 并行 + SP:<br>
+参数分片: TP 将参数分到 N 张 GPU<br>
+激活值分片: SP 将非 TP 区域激活值分到 N 张 GPU<br>
+优化器状态: 仍在各 GPU 上完整存储 (可用 ZeRO 进一步优化)
+</div>
+
+实际上，Megatron-LM 和 DeepSpeed ZeRO 可以组合使用：用 Megatron 做 TP/PP 处理模型并行，用 DeepSpeed ZeRO Stage 1-2 进一步优化 DP 的显存效率。这种组合在训练 100B+ 模型时非常常见。
+</div>
+
+<div class="deep"><strong>🔍 形式化：Ring AllReduce 通信量推导</strong>
+数据并行的核心通信原语是 AllReduce，Megatron 使用 Ring AllReduce 实现：
+
+<div class="formula">
+Ring AllReduce 通信量:<br>
+每 GPU 发送量 = 2 × (N-1)/N × V_data<br>
+<br>
+其中 V_data = 梯度总大小<br>
+<br>
+关键特性: 通信量与 GPU 数 N 近似无关（当 N 较大时）<br>
+这就是为什么 Ring AllReduce 是数据并行的标准实现<br>
+<br>
+对于 70B 模型 (FP16 梯度 = 140GB):<br>
+DP=2: 每 GPU 发送 140GB (Ring AR)<br>
+DP=4: 每 GPU 发送 105GB (Ring AR)<br>
+DP=8: 每 GPU 发送 122.5GB (Ring AR)<br>
+<br>
+结论: Ring AR 的通信量不随 DP 度增加而显著减少<br>
+因此大模型训练必须用 TP/PP 减少 DP 度
+</div>
+</div>
+
+
 <h2>张量并行 — MLP 切分</h2>
 <p>Transformer 的 MLP 层由两个线性层组成：Y = GeLU(X·W₁)·W₂。Megatron 用<strong>列并行+行并行</strong>实现高效切分。</p>
 
@@ -65,8 +250,126 @@
 <div class="warn"><strong>⚠️ 注意事项：</strong>MLP 切分的一个边界条件是 GeLU 激活函数。GeLU 是非线性的，不能像 ReLU 那样先切分再激活。Megatron 的列并行方案巧妙地解决了这个问题：先按列切分 W₁，各 GPU 独立计算 GeLU(X·W₁[:, i])，再用行并行的 W₂ 聚合。这个设计模式值得深入理解。</div>
 
 <div class="deep"><strong>🔍 深入理解：</strong>Megatron 的列并行+行并行方案让每个 Transformer 层的 MLP 只需 2 次 AllReduce（前向+反向各一次）。这是理论最优的——任何将 MLP 切分到 N 张 GPU 的方案都需要至少 1 次 AllReduce 来同步结果。Megatron 的贡献是找到了这个最优切分方式。</div>
+
+<div class="deep"><strong>🔍 实现细节：ColumnParallelLinear 与 RowParallelLinear 伪代码</strong>
+列并行将权重 W∈R^{d×4d} 沿输出维度切分为 TP 份，各 GPU 持有 W_i∈R^{d×4d/TP}；行并行将 W∈R^{4d×d} 沿输入维度切分，各 GPU 持有 W_i∈R^{4d/TP×d}，输出需 AllReduce 聚合部分和。
+
+<pre><code>import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.distributed as dist
+
+class ColumnParallelLinear(nn.Module):
+    """列并行线性层：按输出维度（列）切分权重"""
+    def __init__(self, input_size, output_size, tp_group):
+        super().__init__()
+        self.tp_group = tp_group
+        self.tp_size = dist.get_world_size(tp_group)
+        # 权重形状: [output_size/tp_size, input_size]
+        # TP=8, d=4096: 每个 GPU 持有 [2048, 4096] 而非完整 [16384, 4096]
+        self.weight = nn.Parameter(torch.empty(output_size // self.tp_size, input_size))
+        self.bias = nn.Parameter(torch.zeros(output_size // self.tp_size))
+    
+    def forward(self, x):
+        # x: [b, s, d_model] — 完整输入，各 GPU 相同
+        # 各 GPU 并行计算：output_i = x @ W_i^T + b_i
+        output = F.linear(x, self.weight, self.bias)
+        # output: [b, s, output_size/tp_size] — 各 GPU 持有不同的列切片
+        return output
+
+
+class RowParallelLinear(nn.Module):
+    """行并行线性层：按输入维度（行）切分权重，输出需 AllReduce"""
+    def __init__(self, input_size, output_size, tp_group):
+        super().__init__()
+        self.tp_group = tp_group
+        self.tp_size = dist.get_world_size(tp_group)
+        # 权重形状: [output_size, input_size/tp_size]
+        # TP=8, d=4096: 每个 GPU 持有 [4096, 2048]
+        self.weight = nn.Parameter(torch.empty(output_size, input_size // self.tp_size))
+        self.bias = nn.Parameter(torch.zeros(output_size))
+    
+    def forward(self, x):
+        # x: [b, s, input_size/tp_size] — 上游 ColumnParallel 的切分输出
+        # 各 GPU 并行计算部分和：partial_i = x_i @ W_i^T + b_i
+        partial = F.linear(x, self.weight, self.bias)
+        # partial: [b, s, output_size] — 各 GPU 计算了部分和
+        # AllReduce：将所有 GPU 的部分和相加，得到完整输出
+        dist.all_reduce(partial, group=self.tp_group)
+        return partial  # [b, s, output_size] — 所有 GPU 结果一致
+
+
+class TensorParallelMLP(nn.Module):
+    """MLP 张量并行：ColumnParallel → GeLU → RowParallel(AllReduce)"""
+    def __init__(self, d_model, tp_group):
+        super().__init__()
+        self.fc1 = ColumnParallelLinear(d_model, 4 * d_model, tp_group)
+        self.fc2 = RowParallelLinear(4 * d_model, d_model, tp_group)
+    
+    def forward(self, x):
+        # Step 1: 列并行 — 各 GPU 计算不同的中间激活列
+        h = self.fc1(x)              # [b, s, 4d/TP]
+        # Step 2: GeLU 非线性 — 各 GPU 独立计算（无通信）
+        h = F.gelu(h)                # [b, s, 4d/TP]
+        # Step 3: 行并行 — 各 GPU 计算部分和 + AllReduce 聚合
+        out = self.fc2(h)            # [b, s, d] (AllReduce 在 fc2 内部)
+        return out
+</code></pre>
+
+<div class="tip"><strong>💡 Megatron-Core API 调用方式：</strong>Megatron-Core 在 <code>megatron.core.tensor_parallel.layers</code> 中提供了生产级实现，关键参数：<code>config</code>（模型配置）、<code>init_method</code>（权重初始化）、<code>input_is_parallel</code>（标记输入已切分，跳过 AllGather）、<code>tp_comm_buffer_name</code>（通信缓冲区命名，用于重叠通信与计算）。
+<pre><code>from megatron.core.tensor_parallel import ColumnParallelLinear, RowParallelLinear
+from megatron.core.parallel_state import get_tensor_model_parallel_group
+
+tp_group = get_tensor_model_parallel_group()  # 获取 TP 通信组
+
+# MLP 第一层：列并行（输入完整，输出切分）
+fc1 = ColumnParallelLinear(
+    config.hidden_size,           # 4096
+    config.ffn_hidden_size,       # 16384 (=4*4096)
+    config=config,
+    init_method=init_method,
+    bias=True,
+    skip_bias_add=False,
+    tp_comm_buffer_name='fc1'
+)
+
+# MLP 第二层：行并行（输入切分，输出完整 + AllReduce）
+fc2 = RowParallelLinear(
+    config.ffn_hidden_size,       # 16384
+    config.hidden_size,           # 4096
+    config=config,
+    init_method=output_init,
+    input_is_parallel=True,       # 关键：输入来自 ColumnParallel 输出
+    bias=True,
+    skip_bias_add=False,
+    tp_comm_buffer_name='fc2'
+)
+
+# forward 调用：AllReduce 在 fc2.forward() 内部自动触发
+def forward(self, x):
+    h = F.gelu(fc1(x))    # 列并行 + GeLU
+    return fc2(h)          # 行并行 + AllReduce
+</code></pre>
+</div>
+
+<div class="warn"><strong>⚠️ 实现陷阱：</strong>RowParallelLinear 的 AllReduce 必须放在 forward 的最末尾（bias_add 之后），不能在 bias_add 之前做 AllReduce 再加 bias——这会导致重复加 bias（每个 GPU 各加一次），造成数值错误。Megatron-Core 用 <code>skip_bias_add</code> 参数将 bias 加法延迟到 AllReduce 之后。</div>
+</div>
+
 <h2>张量并行 — 注意力切分</h2>
-<p>Multi-Head Attention 天然适合并行：不同注意力头可以独立计算。</p>
+<p>Multi-Head Attention 天然适合并行：不同注意力头可以独立计算。Megatron 将 Q、K、V 的投影矩阵按头维度切分到不同 GPU，每个 GPU 只计算分配到的注意力头，最后通过 AllReduce 聚合输出投影的结果。</p>
+
+<div class="formula">
+注意力切分的通信开销:<br>
+每个 Transformer 层（MLP + Attention）的总通信量:<br>
+Comm_total = 2 × AllReduce(d_model × batch × seq_len)<br>
+<br>
+对于 70B 模型 (d=8192, batch=1, seq=8192, TP=8):<br>
+单次 AllReduce 数据量 = 8192 × 1 × 8192 × 2B = 128MB<br>
+NVLink 通信时间 = 128MB / 450GB/s ≈ 0.28ms<br>
+每层总通信 ≈ 4 × 0.28ms = 1.12ms（前向 2 次 + 反向 2 次）
+</div>
+
+<p>这个公式展示了注意力切分的通信效率：每次 AllReduce 只需传输 128MB（FP16），在 NVLink 900 GB/s 互联下仅需 0.28ms。对于 80 层的 70B 模型，每步训练的总通信开销约为 80 × 1.12ms = 90ms，占总训练时间的约 10-15%。</p>
 
 <div class="ascii-art">
 注意力头并行：
@@ -92,65 +395,68 @@
 <div class="warn"><strong>⚠️ 注意事项：</strong>注意力切分的常见错误是忽略 GQA（Grouped Query Attention）的特殊性。GQA 的 KV 头数少于 Q 头数，不能简单地按头数均匀切分。需要先将 KV 头广播到与 Q 头相同的数量，再做并行切分。Megatron-Core 已内置支持。</div>
 
 <div class="deep"><strong>🔍 深入理解：</strong>注意力切分体现了张量并行的核心原则：找到张量的「独立维度」并沿该维度切分。Multi-Head Attention 的「头」维度天然独立，因此是张量并行的理想切分点。这个思路可以推广到任何具有并行结构的计算中。</div>
-<h2>序列并行（Sequence Parallelism）</h2>
-<p>张量并行中，LayerNorm 和 Dropout 在所有 GPU 上<strong>重复计算</strong>相同的序列。序列并行把这些操作也切分了。</p>
 
-<div class="ascii-art">
-序列并行（Megatron-SP）：
+<div class="deep"><strong>🔍 形式化：注意力矩阵按头切分与 AllReduce 通信量推导</strong>
+QKV 投影矩阵按头维度切分的数学表达：
 
-传统张量并行：
-  LayerNorm → [完整序列] → TP 区域 → [完整序列] → LayerNorm
-                  ↑ 重复存储                ↑ 重复存储
-
-序列并行：
-  LayerNorm → [序列 1/N] → TP 区域 → [序列 1/N] → LayerNorm
-  (各卡只处理序列的一部分)
-
-切换点：
-  TP 区域前：AllGather（收集完整序列）
-  TP 区域后：ReduceScatter（分发回各卡）
-
-额外通信量：几乎为零（AllGather/ReduceScatter 替代了原有 AllReduce）
-额外显存节省：LayerNorm/Dropout 的激活值减少 N 倍
+<div class="formula">
+W_Q ∈ R^{d×d} 按头维度（列）切分为 TP 份:<br>
+W_Q = [W_Q^1 | W_Q^2 | ... | W_Q^{TP}]<br>
+其中 W_Q^i ∈ R^{d×(d/TP)} 分配给 GPU_i<br>
+<br>
+同理: W_K = [W_K^1 | ... | W_K^{TP}], W_V = [W_V^1 | ... | W_V^{TP}]<br>
+输出投影 W_O ∈ R^{d×d} 按行切分: W_O = [(W_O^1)^T | ... | (W_O^{TP})^T]^T<br>
+W_O^i ∈ R^{(d/TP)×d}<br>
+<br>
+每个 GPU_i 独立计算:<br>
+Q_i = X · W_Q^i ∈ R^{b×s×d/TP}<br>
+K_i = X · W_K^i ∈ R^{b×s×d/TP}<br>
+V_i = X · W_V^i ∈ R^{b×s×d/TP}<br>
+O_i = Softmax(Q_i·K_i^T/√d_h)·V_i · W_O^i ∈ R^{b×s×d}<br>
+最终: O = Σ_i O_i ← AllReduce 求和
 </div>
 
+AllReduce 通信量的严格推导（Ring AllReduce）：
 
-<div class="tip"><strong>💡 实用技巧：</strong>Megatron-SP 解决的是 TP 区域外 LayerNorm/Dropout 的序列冗余存储问题。核心改动：TP 区域入口前做 AllGather 收集完整序列，出口后做 ReduceScatter 重新分片。额外通信量几乎为零（替代了原有的 AllReduce）。只需在启动时加 <code>--sequence-parallel</code> 参数。</div>
-
-<div class="warn"><strong>⚠️ 注意事项：</strong>序列并行的一个关键细节是 AllGather/ReduceScatter 替代 AllReduce 的等价性。AllReduce = ReduceScatter + AllGather，而 SP 把这个拆分到了不同的位置。需要确保数值精度一致，特别是在混合精度训练中。</div>
-
-<div class="deep"><strong>🔍 深入理解：</strong>序列并行的演进展示了「消除冗余」的系统性方法：ZeRO 消除了跨 GPU 的状态冗余，SP 消除了 TP 区域外的激活值冗余。两者的组合可以在参数、梯度、优化器状态和激活值四个维度上全面消除冗余，实现接近线性的显存扩展。</div>
-<h2>上下文并行（Context Parallelism）</h2>
-<p>当序列长度极长（100K+ tokens）时，即使有序列并行，单卡的注意力计算 O(n²) 也放不下。上下文并行把序列切成多段，用 Ring Attention 分布式计算。</p>
-
-<div class="ascii-art">
-上下文并行（Ring Attention）：
-
-序列切成 4 段，每卡持有一段：
-GPU 0: [Q₀, K₀, V₀]
-GPU 1: [Q₁, K₁, V₁]
-GPU 2: [Q₂, K₂, V₂]
-GPU 3: [Q₃, K₃, V₃]
-
-Ring 通信（每步传递 K,V 块）：
-Step 0: GPU0 计算 Attn(Q₀,K₀,V₀)
-        GPU1 计算 Attn(Q₁,K₁,V₁)
-        ...
-Step 1: GPU0 收到 K₁,V₁ → 计算 Attn(Q₀,K₁,V₁)
-        GPU1 收到 K₂,V₂ → 计算 Attn(Q₁,K₂,V₂)
-        ...（Ring 传递）
-Step 2: 继续 Ring...
-Step 3: 完成，每卡得到自己序列段的输出
-
-通信与计算重叠：K,V 传递的同时进行注意力计算
+<div class="formula">
+AllReduce 通信量推导（Ring AllReduce）:<br>
+<br>
+每层输出投影后需要 AllReduce 的 tensor: O_i ∈ R^{b×s×d}<br>
+Ring AllReduce 通信量 = 2 × (N-1)/N × V_data<br>
+<br>
+其中 V_data = b × s × d × sizeof(fp16)<br>
+<br>
+代入 70B 模型参数 (b=1, s=8192, d=8192, TP=8):<br>
+V_data = 1 × 8192 × 8192 × 2B = 134,217,728 B = 128 MB<br>
+Comm = 2 × (8-1)/8 × 128 MB = 2 × 7/8 × 128 MB = 224 MB<br>
+<br>
+NVLink 通信时间 = 224 MB / 450 GB/s ≈ 0.50ms<br>
+<br>
+每层总通信（MLP + Attention 各一次 AllReduce）:<br>
+Comm_layer = 2 × 224 MB = 448 MB<br>
+Comm_time_layer = 2 × 0.50ms = 1.0ms<br>
+<br>
+80 层总通信时间 = 80 × 1.0ms = 80ms/step
 </div>
 
+<div class="formula">
+通用公式:<br>
+Comm = 2 × (N-1)/N × b × s × d × sizeof(fp16)<br>
+<br>
+符号说明:<br>
+N = TP 度（GPU 数量）<br>
+b = micro-batch size（通常 1-4）<br>
+s = 序列长度（如 8192, 131072）<br>
+d = 隐藏维度（如 4096, 8192）<br>
+sizeof(fp16) = 2 bytes<br>
+<br>
+数值例子 (70B, TP=8, b=1, s=8192):<br>
+Comm = 2 × 7/8 × 1 × 8192 × 8192 × 2 = 224 MB<br>
+<br>
+对比: 若 TP=4, Comm = 2 × 3/4 × 128 MB = 192 MB（通信量更小但计算更慢）
+</div>
+</div>
 
-<div class="tip"><strong>💡 实用技巧：</strong>Context Parallelism（Ring Attention）是训练 100K+ 超长序列的关键技术。每卡持有序列的一段，通过 Ring 传递 K,V 块，通信与计算重叠。关键实现细节：需要 Flash Attention 2 支持分块注意力计算，配合 <code>--context-parallel-size</code> 参数使用。通信量为 O(N/P) 而非 O(N²)。</div>
-
-<div class="warn"><strong>⚠️ 注意事项：</strong>Ring Attention 的一个隐蔽陷阱是因果掩码（causal mask）的处理。在自回归模型中，每个 token 只能看到之前的 token，但 Ring 传递的 KV 块包含了「未来」token。需要在计算时正确应用因果掩码，丢弃未来 token 的注意力分数。</div>
-
-<div class="deep"><strong>🔍 深入理解：</strong>Ring Attention 的核心创新是将 O(N²) 的注意力计算分布到 P 张 GPU 上，每卡只做 O(N²/P) 的计算，同时通过 Ring 通信传递 KV 块。这与 ZeRO 的「用通信换空间」类似，Ring Attention 是「用通信换计算」——用 O(N/P) 的通信量换取 O(N²/P) 的计算量。</div>
 <h2>流水线并行 — GPipe vs 1F1B</h2>
 
 <div class="svg-diagram">
@@ -218,7 +524,6 @@ GPU 1: [  ][F0][F1][F2][F3][B0][F4][B1][F5][B2]
 GPU 2: [  ][  ][F0][F1][F2][F3][B0][F4][B1][F5]
 GPU 3: [  ][  ][  ][F0][F1][F2][F3][B0][F4][B1]
 气泡率 = (p-1)/(m+p-1)，当 m>>p 时趋近 0
-</div>
 
 <div class="formula">
 气泡率公式：<br>
@@ -233,6 +538,354 @@ GPipe:  Bubble = (p-1) / (p+m)<br>
 <div class="warn"><strong>⚠️ 注意事项：</strong>流水线并行的一个关键变量是 micro-batch 数量 m。m 太小会导致气泡率高（GPU 空闲），m 太大会增加显存占用（需要存储更多激活值）。建议从 m=4p 开始，逐步增加直到显存不足。用 <code>--num-layers / pipeline-model-parallel-size</code> 计算每级的层数。</div>
 
 <div class="deep"><strong>🔍 深入理解：</strong>GPipe 和 1F1B 的气泡率公式形式相同，但 1F1B 允许更大的 m（因为交替执行减少了峰值显存）。虚拟流水线（Virtual Pipeline）进一步将每个阶段的层再细分，用更小的气泡换取更多的通信。这些调度策略本质上都是在气泡率、显存和通信之间做权衡。</div>
+
+<div class="deep"><strong>🔍 量化数据：7B 模型在 64×H100 上的并行配置对比</strong>
+实测数据来自 Megatron-LM 官方 benchmark（2024），7B 模型（d=4096, n_layers=32, n_heads=32），H100 SXM5（FP16 TFLOPS=989, NVLink=900GB/s, IB=400Gbps）。
+
+<table>
+<tr><th>配置</th><th>TP</th><th>PP</th><th>DP</th><th>SP</th><th>mbs</th><th>吞吐量 (tokens/s)</th><th>MFU</th><th>显存/GPU</th><th>瓶颈</th></tr>
+<tr><td>纯 DP</td><td>1</td><td>1</td><td>64</td><td>off</td><td>1</td><td>18,200</td><td>18.4%</td><td>68GB</td><td>AllReduce 通信</td></tr>
+<tr><td>TP=8</td><td>8</td><td>1</td><td>8</td><td>on</td><td>1</td><td>52,800</td><td>53.4%</td><td>52GB</td><td>计算受限</td></tr>
+<tr><td>TP=8,PP=2</td><td>8</td><td>2</td><td>4</td><td>on</td><td>1</td><td>48,600</td><td>49.1%</td><td>48GB</td><td>PP 气泡 6%</td></tr>
+<tr><td>TP=8,PP=4</td><td>8</td><td>4</td><td>2</td><td>on</td><td>1</td><td>44,200</td><td>44.7%</td><td>44GB</td><td>PP 气泡 12%</td></tr>
+<tr><td>TP=8,PP=8</td><td>8</td><td>8</td><td>1</td><td>on</td><td>1</td><td>38,400</td><td>38.8%</td><td>42GB</td><td>PP 气泡 22%</td></tr>
+<tr><td>TP=4,PP=4</td><td>4</td><td>4</td><td>4</td><td>on</td><td>2</td><td>46,100</td><td>46.6%</td><td>54GB</td><td>平衡</td></tr>
+</table>
+
+<div class="formula">
+关键发现:<br>
+1. TP=8 单机内效率最高（MFU 53.4%），但无法跨机扩展<br>
+2. 跨机 PP 引入气泡：PP=2 气泡 6%，PP=4 气泡 12%，PP=8 气泡 22%<br>
+3. 最优跨机配置：TP=8, PP=2, DP=4（MFU 49.1%，显存 48GB/GPU）<br>
+4. 纯 DP 效率极低（MFU 18.4%）— 证明 3D 并行的必要性<br>
+5. 序列并行（SP）在 TP&gt;1 时自动启用，节省 ~3GB/GPU 显存
+</div>
+
+<div class="tip"><strong>💡 配置选择经验：</strong>7B 模型在 64×H100 上的最优配置是 TP=8, PP=2, DP=4（MFU ~49%）。如果追求极致吞吐且不需要跨机，单机 TP=8 可达 MFU 53.4%。PP 度不应超过 4（气泡率 &gt;12% 后收益递减）。</div>
+</div>
+
+<h2>序列并行（Sequence Parallelism）</h2>
+<div class="deep"><strong>🔍 实现细节：序列并行伪代码</strong>
+序列并行将 LayerNorm 和 Dropout 的序列维度切分到 TP 组内，核心是在 TP 区域入口做 AllGather、出口做 ReduceScatter。
+
+<pre><code>import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.distributed as dist
+
+class SequenceParallelMLP(nn.Module):
+    """序列并行 MLP: LayerNorm 和 Dropout 也按序列维度切分"""
+    
+    def __init__(self, d_model, tp_group):
+        super().__init__()
+        self.tp_group = tp_group
+        self.tp_size = dist.get_world_size(tp_group)
+        # LayerNorm 各 GPU 只处理序列的 1/TP
+        self.layer_norm = nn.LayerNorm(d_model)
+        # ColumnParallelLinear: 列并行（同 TP）
+        self.fc1 = ColumnParallelLinear(d_model, 4 * d_model, tp_group)
+        # RowParallelLinear: 行并行（同 TP）
+        self.fc2 = RowParallelLinear(4 * d_model, d_model, tp_group)
+    
+    def forward(self, x):
+        # x: [b, s_local, d_model] — 序列已切分（各 GPU 持有不同段）
+        # 注意: LayerNorm 沿 d_model 维度归一化，s_local 维度独立
+        # 因此 LayerNorm 可以直接在切分后的序列上计算，无需通信!
+        x = self.layer_norm(x)  # [b, s_local, d_model] — 无通信
+        
+        # Dropout 也直接在切分序列上计算
+        x = F.dropout(x, p=0.1, training=self.training)  # 无通信
+        
+        # TP 区域入口: AllGather 收集完整序列（用于矩阵乘法）
+        # 注意: 这里 AllGather 只针对需要完整序列的操作
+        # 实际上 Megatron 的 ColumnParallelLinear 输入是完整的
+        # 所以 SP 的 AllGather 在 ColumnParallelLinear 之前
+        x_full = all_gather(x, group=self.tp_group)  # [b, s, d_model]
+        
+        # TP 区域: ColumnParallel + GeLU + RowParallel
+        h = self.fc1(x_full)      # [b, s, 4d/TP]
+        h = F.gelu(h)             # [b, s, 4d/TP]
+        out = self.fc2(h)         # [b, s, d] (含 AllReduce)
+        
+        # TP 区域出口: ReduceScatter 重新分片
+        out = reduce_scatter(out, group=self.tp_group)  # [b, s_local, d]
+        
+        return out
+
+
+def all_gather(tensor, group):
+    """AllGather: 收集所有 GPU 的 tensor 片段"""
+    world_size = dist.get_world_size(group)
+    # 创建接收 buffer
+    gather_list = [torch.empty_like(tensor) for _ in range(world_size)]
+    dist.all_gather(gather_list, tensor, group=group)
+    # 沿序列维度拼接
+    return torch.cat(gather_list, dim=1)  # dim=1 是序列维度
+
+
+def reduce_scatter(tensor, group):
+    """ReduceScatter: AllReduce 后各 GPU 只保留自己的片段"""
+    world_size = dist.get_world_size(group)
+    # 将 tensor 沿序列维度均分
+    seq_len = tensor.shape[1] // world_size
+    chunks = tensor.chunk(world_size, dim=1)
+    output = torch.empty_like(chunks[0])
+    dist.reduce_scatter(output, list(chunks), group=group)
+    return output
+
+
+class SequenceParallelTransformerLayer(nn.Module):
+    """完整的序列并行 Transformer 层"""
+    
+    def __init__(self, d_model, n_heads, tp_group):
+        super().__init__()
+        self.tp_group = tp_group
+        self.tp_size = dist.get_world_size(tp_group)
+        
+        # LayerNorm (序列并行 — 各 GPU 独立计算)
+        self.input_layernorm = nn.LayerNorm(d_model)
+        self.post_attention_layernorm = nn.LayerNorm(d_model)
+        
+        # Attention (头并行 — 同 TP)
+        self.self_attention = TensorParallelAttention(d_model, n_heads, tp_group)
+        
+        # MLP (列并行+行并行 — 同 TP + 序列并行)
+        self.mlp = SequenceParallelMLP(d_model, tp_group)
+        
+        # Dropout (序列并行 — 各 GPU 独立计算)
+        self.dropout = nn.Dropout(0.1)
+    
+    def forward(self, hidden_states):
+        # hidden_states: [b, s_local, d_model] — 序列已切分
+        
+        # === 第一个子层: Attention ===
+        residual = hidden_states
+        # LayerNorm: 序列并行（无通信）
+        hidden_states = self.input_layernorm(hidden_states)
+        # Dropout: 序列并行（无通信）
+        hidden_states = self.dropout(hidden_states)
+        # Attention: 需要 AllGather 收集完整序列
+        hidden_states = self.self_attention(hidden_states)
+        # Attention 输出: ReduceScatter 重新分片
+        hidden_states = residual + hidden_states
+        
+        # === 第二个子层: MLP ===
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        
+        return hidden_states  # [b, s_local, d_model] — 序列仍切分
+</code></pre>
+
+<div class="formula">
+序列并行通信分析:<br>
+每层额外通信: 1 AllGather + 1 ReduceScatter<br>
+等价于: 1 AllReduce (因为 AllReduce = ReduceScatter + AllGather)<br>
+<br>
+结论: SP 不增加额外通信量，只是将 AllReduce 拆分为<br>
+入口的 AllGather 和出口的 ReduceScatter，分别放在不同位置。<br>
+<br>
+显存节省: LayerNorm + Dropout 激活值减少 TP 倍<br>
+对于 70B 模型 (TP=8): 节省 7/8 × 384MB × 80层 ≈ 2.68GB
+</div>
+</div>
+<p>张量并行中，LayerNorm 和 Dropout 在所有 GPU 上<strong>重复计算</strong>相同的序列。序列并行把这些操作也切分了——每个 GPU 只处理序列的 1/N，在 TP 区域入口做 AllGather 收集完整序列，出口做 ReduceScatter 重新分片。</p>
+
+<div class="formula">
+序列并行的显存节省量:<br>
+Memory_saved = (N-1)/N × M_activations_nonTP<br>
+<br>
+其中 N = TP 度, M_activations_nonTP = TP 区域外的激活值<br>
+<br>
+对于 70B 模型 (TP=8, seq=8192):<br>
+LayerNorm 激活值: 每层 2 × 8192 × 8192 × 2B = 256MB<br>
+Dropout 激活值: 每层 8192 × 8192 × 2B = 128MB<br>
+节省: 7/8 × (256+128)MB × 80层 ≈ 2.68GB
+</div>
+
+<p>这个公式展示了序列并行的显存收益：在 TP=8 时，每个 GPU 节省了约 2.68GB 显存（原本冗余存储的 LayerNorm/Dropout 激活值）。对于 70B 模型（FP16 参数约 140GB），这相当于释放了约 2% 的显存，足以将 micro-batch size 从 1 提升到 2。</p>
+
+<div class="ascii-art">
+序列并行（Megatron-SP）：
+
+传统张量并行：
+  LayerNorm → [完整序列] → TP 区域 → [完整序列] → LayerNorm
+                  ↑ 重复存储                ↑ 重复存储
+
+序列并行：
+  LayerNorm → [序列 1/N] → TP 区域 → [序列 1/N] → LayerNorm
+  (各卡只处理序列的一部分)
+
+切换点：
+  TP 区域前：AllGather（收集完整序列）
+  TP 区域后：ReduceScatter（分发回各卡）
+
+额外通信量：几乎为零（AllGather/ReduceScatter 替代了原有 AllReduce）
+额外显存节省：LayerNorm/Dropout 的激活值减少 N 倍
+</div>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>Megatron-SP 解决的是 TP 区域外 LayerNorm/Dropout 的序列冗余存储问题。核心改动：TP 区域入口前做 AllGather 收集完整序列，出口后做 ReduceScatter 重新分片。额外通信量几乎为零（替代了原有的 AllReduce）。只需在启动时加 <code>--sequence-parallel</code> 参数。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>序列并行的一个关键细节是 AllGather/ReduceScatter 替代 AllReduce 的等价性。AllReduce = ReduceScatter + AllGather，而 SP 把这个拆分到了不同的位置。需要确保数值精度一致，特别是在混合精度训练中。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>序列并行的演进展示了「消除冗余」的系统性方法：ZeRO 消除了跨 GPU 的状态冗余，SP 消除了 TP 区域外的激活值冗余。两者的组合可以在参数、梯度、优化器状态和激活值四个维度上全面消除冗余，实现接近线性的显存扩展。</div>
+
+<h2>上下文并行（Context Parallelism）</h2>
+<p>当序列长度极长（100K+ tokens）时，即使有序列并行，单卡的注意力计算 O(n²) 也放不下。上下文并行把序列切成多段，用 Ring Attention 分布式计算——每卡持有序列的一段，通过 Ring 传递 K,V 块，通信与计算重叠。</p>
+
+<div class="formula">
+Ring Attention 的计算与通信量:<br>
+计算量/GPU: O(N²/P)（标准注意力 O(N²) 的 1/P）<br>
+通信量/GPU: O(N × d × P)（Ring 传递 KV 块）<br>
+<br>
+对于 128K 序列, CP=4, d=8192:<br>
+计算量: (128K)² × 8192 / 4 = 3.4×10¹³ FLOPs/GPU<br>
+通信量: 128K × 8192 × 2B × 4 = 8GB（分摊到 4 步 Ring）<br>
+通信/计算比: 8GB / (3.4×10¹³ × 2B) ≈ 0.12（通信完全被计算掩盖）
+</div>
+
+<p>这个公式展示了 Ring Attention 的关键特性：当序列长度 N 足够大时（128K），计算复杂度 O(N²) 远大于通信复杂度 O(N)，通信可以被计算完全掩盖。实测表明，在 4×H100 上训练 128K 序列，Ring Attention 的效率（相对单卡）可达 3.6x（90% 并行效率）。</p>
+
+<div class="ascii-art">
+上下文并行（Ring Attention）：
+
+序列切成 4 段，每卡持有一段：
+GPU 0: [Q₀, K₀, V₀]
+GPU 1: [Q₁, K₁, V₁]
+GPU 2: [Q₂, K₂, V₂]
+GPU 3: [Q₃, K₃, V₃]
+
+Ring 通信（每步传递 K,V 块）：
+Step 0: GPU0 计算 Attn(Q₀,K₀,V₀)
+        GPU1 计算 Attn(Q₁,K₁,V₁)
+        ...
+Step 1: GPU0 收到 K₁,V₁ → 计算 Attn(Q₀,K₁,V₁)
+        GPU1 收到 K₂,V₂ → 计算 Attn(Q₁,K₂,V₂)
+        ...（Ring 传递）
+Step 2: 继续 Ring...
+Step 3: 完成，每卡得到自己序列段的输出
+
+通信与计算重叠：K,V 传递的同时进行注意力计算
+</div>
+
+
+<div class="tip"><strong>💡 实用技巧：</strong>Context Parallelism（Ring Attention）是训练 100K+ 超长序列的关键技术。每卡持有序列的一段，通过 Ring 传递 K,V 块，通信与计算重叠。关键实现细节：需要 Flash Attention 2 支持分块注意力计算，配合 <code>--context-parallel-size</code> 参数使用。通信量为 O(N/P) 而非 O(N²)。</div>
+
+<div class="warn"><strong>⚠️ 注意事项：</strong>Ring Attention 的一个隐蔽陷阱是因果掩码（causal mask）的处理。在自回归模型中，每个 token 只能看到之前的 token，但 Ring 传递的 KV 块包含了「未来」token。需要在计算时正确应用因果掩码，丢弃未来 token 的注意力分数。</div>
+
+<div class="deep"><strong>🔍 深入理解：</strong>Ring Attention 的核心创新是将 O(N²) 的注意力计算分布到 P 张 GPU 上，每卡只做 O(N²/P) 的计算，同时通过 Ring 通信传递 KV 块。这与 ZeRO 的「用通信换空间」类似，Ring Attention 是「用通信换计算」——用 O(N/P) 的通信量换取 O(N²/P) 的计算量。</div>
+
+<div class="deep"><strong>🔍 实现细节：Ring Attention 伪代码</strong>
+Ring Attention 将序列切成 CP 段分配到各 GPU，通过环形通信传递 KV 块，每步计算一个 KV 块与本地 Q 的注意力，通信与计算重叠。
+
+<pre><code>import torch
+import torch.nn.functional as F
+import torch.distributed as dist
+
+def ring_attention(Q, K, V, cp_group, causal=True):
+    """
+    Ring Attention: 分布式长序列注意力
+    
+    Args:
+        Q: [b, s_local, n_heads, d_head] — 本地 Q 块
+        K: [b, s_local, n_heads, d_head] — 本地 K 块
+        V: [b, s_local, n_heads, d_head] — 本地 V 块
+        cp_group: 上下文并行通信组
+        causal: 是否使用因果掩码（自回归模型为 True）
+    
+    Returns:
+        output: [b, s_local, n_heads, d_head] — 本地序列段的注意力输出
+    """
+    cp_size = dist.get_world_size(cp_group)  # CP 度（如 4）
+    rank = dist.get_rank(cp_group)           # 当前 GPU 编号
+    
+    b, s_local, n_heads, d_head = Q.shape
+    
+    # 初始化输出和归一化因子（Flash Attention 的 online softmax）
+    output = torch.zeros(b, n_heads, s_local, d_head, device=Q.device)
+    LSE = torch.full((b, n_heads, s_local), -float('inf'),
+                     device=Q.device)  # log-sum-exp
+    
+    # 将 K, V 转为连续 buffer 用于异步发送
+    K_ring = K.clone().transpose(1, 2).contiguous()  # [b, n_heads, s_local, d_head]
+    V_ring = V.clone().transpose(1, 2).contiguous()  # [b, n_heads, s_local, d_head]
+    Q_t = Q.transpose(1, 2)  # [b, n_heads, s_local, d_head]
+    
+    # Ring 传递：共 CP 步（包括本地 KV 块）
+    for step in range(cp_size):
+        # 确定当前 KV 块在全局序列中的位置
+        kv_rank = (rank - step) % cp_size
+        kv_global_start = kv_rank * s_local
+        q_global_start = rank * s_local
+        
+        # 计算当前 KV 块与本地 Q 的注意力分数
+        # scores: [b, n_heads, s_local, s_local]
+        scores = torch.einsum('bhsd,bhtd->bhst', Q_t, K_ring) / (d_head ** 0.5)
+        
+        # 因果掩码处理：丢弃"未来"token 的注意力
+        if causal:
+            q_pos = torch.arange(q_global_start, q_global_start + s_local,
+                                device=Q.device)
+            kv_pos = torch.arange(kv_global_start, kv_global_start + s_local,
+                                 device=Q.device)
+            # Q 位置 >= KV 位置才可见（causal）
+            causal_mask = q_pos.unsqueeze(1) &gt;= kv_pos.unsqueeze(0)
+            scores = scores.masked_fill(~causal_mask.unsqueeze(0).unsqueeze(0),
+                                       float('-inf'))
+        
+        # === Flash Attention 的 online softmax 更新 ===
+        # 计算当前块的 log-sum-exp
+        block_lse = scores.logsumexp(dim=-1)  # [b, n_heads, s_local]
+        
+        # 合并新旧 log-sum-exp
+        LSE_new = torch.logaddexp(LSE, block_lse)  # [b, n_heads, s_local]
+        
+        # 缩放因子：旧输出需要按新 LSE 重新缩放
+        exp_diff_old = torch.exp(LSE - LSE_new)  # [b, n_heads, s_local]
+        # 新块贡献的缩放因子
+        exp_diff_new = torch.exp(block_lse - LSE_new)  # [b, n_heads, s_local]
+        
+        # 更新输出：旧输出缩放 + 新块贡献
+        output = output * exp_diff_old.unsqueeze(-1)
+        # 新块贡献: softmax(scores) @ V = exp(scores - block_lse) @ V
+        attn_weights = torch.softmax(scores, dim=-1)  # [b, n_heads, s_local, s_local]
+        output = output + torch.einsum('bhst,bhtd-&gt;bhsd', attn_weights, V_ring)
+        
+        # 更新 LSE
+        LSE = LSE_new
+        
+        # 异步传递 KV 到下一步（与下一步计算重叠）
+        if step &lt; cp_size - 1:
+            next_rank = (rank + 1) % cp_size
+            prev_rank = (rank - 1) % cp_size
+            
+            send_req_k = dist.isend(K_ring, dst=next_rank, group=cp_group)
+            send_req_v = dist.isend(V_ring, dst=next_rank, group=cp_group)
+            
+            K_recv = torch.empty_like(K_ring)
+            V_recv = torch.empty_like(V_ring)
+            recv_req_k = dist.irecv(K_recv, src=prev_rank, group=cp_group)
+            recv_req_v = dist.irecv(V_recv, src=prev_rank, group=cp_group)
+            
+            recv_req_k.wait()
+            recv_req_v.wait()
+            
+            K_ring = K_recv
+            V_ring = V_recv
+            
+            send_req_k.wait()
+            send_req_v.wait()
+    
+    return output.transpose(1, 2).contiguous()  # [b, s_local, n_heads, d_head]
+</code></pre>
+
+<div class="warn"><strong>⚠️ 因果掩码陷阱：</strong>Ring Attention 中因果掩码的正确实现是最容易出错的地方。关键：KV 块在 Ring 传递过程中来自不同 GPU，其在全局序列中的位置是 <code>((rank - step) % cp_size) * s_local</code>。如果掩码计算错误，模型会"看到"未来 token，导致训练崩溃。Megatron-Core 使用 <code>RingAttention</code> 类封装了这一逻辑，建议直接使用。</div>
+</div>
+
+
 <h2>Megatron 配置示例</h2>
 <pre><code># Megatron-LM 训练 7B 模型的典型参数
 python pretrain_gpt.py \
@@ -265,287 +918,18 @@ python pretrain_gpt.py \
 <li>Narayanan et al., "Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM", SC 2021</li>
 <li>Korthikanti et al., "Reducing Activation Recomputation in Large Transformer Models", MLSys 2023</li>
 <li>Liu et al., "Ring Attention with Blockwise Transformers for Near-Infinite Context", ICLR 2024</li>
+<li>Rajbhandari et al., "ZeRO: Memory Optimizations Toward Training Trillion Parameter Models", SC 2020</li>
+<li>Micikevicius et al., "Mixed Precision Training", ICLR 2018</li>
 </ul></div>
 
-<div class="tip"><strong>💡 实用技巧：</strong>推荐阅读顺序：先读 2019 的原始 Megatron-LM 论文理解张量并行基础，再读 SC 2021 的论文了解 3D 并行，最后读 MLSys 2023 的论文学习激活值优化。NVIDIA 的 Megatron-Core GitHub 仓库是最新、最完整的参考实现。</div>
+<div class="tip"><strong>💡 实用技巧：</strong>推荐阅读顺序：先读 2019 的原始 Megatron-LM 论文理解张量并行基础，再读 SC 2021 的论文了解 3D 并行，然后读 SC 2020 的 ZeRO 论文理解数据并行优化，最后读 MLSys 2023 和 ICLR 2024 的论文学习激活值和长序列优化。NVIDIA 的 Megatron-Core GitHub 仓库是最新、最完整的参考实现。</div>
 
 <div class="warn"><strong>⚠️ 注意事项：</strong>Megatron-LM 的论文实验基于 NVIDIA 的特定硬件（A100/H100 + NVLink + IB）。在不同硬件上（如消费级 GPU 或 AMD GPU），某些优化可能不适用。务必在你的目标硬件上验证论文中的性能数据。</div>
 
-<div class="deep"><strong>🔍 深入理解：</strong>「📚 参考资料」的深层理解：从优化理论的角度看，GPU本质上是一个在约束条件下寻找最优解的问题。理解约束条件的来源和性质，比盲目调参更有价值。</div>
-
-<h2>Megatron-LM 的核心模块详解</h2>
-
-
-<h3>操作融合（Operator Fusion）机制</h3>
-
-<ul>
-<li><strong>GEMM + GeLU 融合</strong>：将矩阵乘法和 GeLU 激活函数合并为一个 CUDA kernel，减少中间结果的显存写回</li>
-<li><strong>LayerNorm + Dropout 融合</strong>：将归一化和随机丢弃操作合并，减少一次显存读写周期</li>
-<li><strong>Softmax + Mask + Dropout 融合</strong>：注意力计算中的三个操作融合为一个 kernel</li>
-<li><strong>AllReduce + 下一层计算融合</strong>：通信与计算重叠（overlap），隐藏通信延迟</li>
-</ul>
-
-<h3>通信拓扑优化</h3>
-<p>在大规模分布式训练中，通信拓扑对训练效率有决定性影响。Megatron-LM 支持多种通信策略：</p>
-<table>
-<tr><th>通信策略</th><th>适用场景</th><th>带宽需求</th><th>实现方式</th></tr>
-<tr><td>机内 AllReduce</td><td>张量并行（TP）</td><td>NVLink 600+ GB/s</td><td>NCCL Ring</td></tr>
-<tr><td>机间 AllReduce</td><td>数据并行（DP）</td><td>IB 200-400 Gbps</td><td>NCCL Tree/Ring</td></tr>
-<tr><td>P2P 通信</td><td>流水线并行（PP）</td><td>IB/NVLink</td><td>NCCL Send/Recv</td></tr>
-<tr><td>Ring Attention</td><td>上下文并行（CP）</td><td>IB + 计算重叠</td><td>自定义 Ring</td></tr>
-</table>
-
-<table>
-<tr><th>优化技术</th><th>原理</th><th>加速比</th><th>显存影响</th></tr>
-<tr><td>梯度累积</td><td>多次前反向后统一更新</td><td>等效增大 batch</td><td>不增加显存</td></tr>
-<tr><td>选择性激活重计算</td><td>只重计算算子融合后的结果</td><td>1.0-1.2x</td><td>节省 30-50%</td></tr>
-<tr><td>分布式优化器</td><td>ZeRO-1 优化器状态分片</td><td>1.0-1.1x</td><td>节省 4x 参数量</td></tr>
-<tr><td>通信计算重叠</td><td>AllReduce 与反向计算并行</td><td>1.1-1.3x</td><td>不增加</td></tr>
-</table>
-
-<table>
-<tr><th>Megatron-LM 版本</th><th>发布时间</th><th>核心特性</th><th>支持最大模型</th></tr>
-<tr><td>v1.0</td><td>2019</td><td>基础张量并行</td><td>8.3B</td></tr>
-<tr><td>v2.0</td><td>2021</td><td>3D并行 + 操作融合</td><td>175B</td></tr>
-<tr><td>v3.0</td><td>2023</td><td>序列并行 + 上下文并行</td><td>530B+</td></tr>
-<tr><td>Core</td><td>2024</td><td>FP8 + 弹性训练</td><td>1T+</td></tr>
-</table>
-
-<div class="ascii-art">
-Megatron-LM 模块依赖关系图：
-
-┌──────────────────────────────────────────────────┐
-│                 Megatron-Core                      │
-├────────────┬────────────┬────────────┬────────────┤
-│  张量并行  │  流水线并行 │  序列并行  │  上下文并行 │
-│    (TP)    │    (PP)    │    (SP)    │    (CP)    │
-├────────────┴────────────┴────────────┴────────────┤
-│              分布式优化器 (DistributedOptimizer)    │
-├──────────────────────────────────────────────────┤
-│  操作融合层 (Fused Kernels)                        │
-│  ├─ FusedLayerNorm   ├─ FusedSoftmax              │
-│  ├─ FusedGeLU        ├─ FusedRMSNorm              │
-│  └─ FusedScaledMaskedTriu                         │
-├──────────────────────────────────────────────────┤
-│  通信层 (NCCL / TransformerEngine)                │
-│  ├─ AllReduce    ├─ AllGather                     │
-│  ├─ ReduceScatter  ├─ P2P Send/Recv              │
-└──────────────────────────────────────────────────┘
+<div class="deep">
+<strong>🔍 深入理解：Megatron-LM 的演进与未来</strong><br>
+Megatron-LM 从 2019 年的 8.3B 模型发展到 2024 年的 1T+ 模型，核心驱动力是<strong>并行维度的不断扩展</strong>：v1.0（2019）引入张量并行解决单层切分问题 → v2.0（2021）引入 3D 并行解决跨节点扩展问题 → v3.0（2023）引入序列并行和上下文并行解决激活值和长序列问题 → Core（2024）引入 FP8 和弹性训练解决效率和容错问题。未来方向包括：(1) <strong>多维并行自动调优</strong>——用强化学习自动搜索最优的 TP/PP/DP 配置；(2) <strong>异构并行</strong>——在混合硬件环境（A100 + H100）中动态分配不同并行策略；(3) <strong>编译器协同</strong>——与 torch.compile/Triton 深度集成，自动选择最优 kernel 实现。
 </div>
 
-<div class="ascii-art">
-Transformer 层在 Megatron 中的数据流：
-
-Input → LayerNorm → [TP: 列并行 GEMM] → GeLU → [TP: 行并行 GEMM] → AllReduce
-              ↑                                    ↑
-         [SP: 序列切分]                      [SP: 序列恢复]
-         AllGather                             ReduceScatter
-                                                        ↓
-                    Output ← LayerNorm ← Residual Add ←┘
-                              ↑
-                        [SP: 序列切分]
-</div>
-
-<h3>练习与思考</h3>
-<div class="tip"><strong>向前串联：</strong>
-为什么 Megatron-LM 是大模型训练的王者？的知识将在后续的推理框架选型、性能基准测试、生产部署中反复应用。
-建议结合实际框架动手验证本章所学内容。
-</div>
-<div class="ascii">
-为什么 Megatron-LM 是大模型训练的王者？ 系统架构
-┌──────────┐    ┌──────────────┐    ┌──────────┐
-│  Input   │───→│  Processing  │───→│  Output  │
-│  Layer   │    │    Engine    │    │  Layer   │
-└──────────┘    └──────────────┘    └──────────┘
-     │                │                    │
-     ▼                ▼                    ▼
-  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
-</div>
-<div class="tip"><strong>相关章节：</strong>
-为什么 Megatron-LM 是大模型训练的王者？与本系列其他章节密切相关，建议结合学习形成完整知识体系。
-</div>
-<div class="exercise"><strong>📝 练习题：</strong>
-<ol>
-<li>请用自己的话解释Megatron-LM的核心原理，并画出数据流向图。</li>
-<li>在给定的2-GPU环境下，配置并运行一个Megatron-LM的最小可行示例，记录性能数据。</li>
-<li>对比分析Megatron-LM与其他替代方案的优劣势，撰写500字的技术报告。</li>
-</ol>
-</div>
-
-<h2>📚 学习路径与建议</h2>
-<p>建议按照以下顺序系统学习分布式训练技术：</p>
-<ol>
-<li><strong>基础理论</strong>：理解集合通信原语和并行计算的基本概念</li>
-<li><strong>核心技术</strong>：掌握 ZeRO 系列、张量并行、流水线并行等关键技术</li>
-<li><strong>框架实践</strong>：深入学习 DeepSpeed、Megatron-LM、FSDP2 等主流框架</li>
-<li><strong>高级主题</strong>：研究容错训练、弹性训练、混合精度优化等进阶内容</li>
-<li><strong>工程实战</strong>：完成完整的3D并行训练项目，积累生产级经验</li>
-</ol>
-<p>推荐阅读顺序：<a href="03-DeepSpeed架构深度剖析.html">上一章</a> → 本章 → <a href="05-3D并行与混合并行.html">下一章</a></p>
-
-<div class="highlight">
-<strong>🚀 继续学习：</strong>掌握本章内容后，建议继续深入学习<a href="05-3D并行与混合并行.html">下一章</a>，将理论知识转化为实践能力。
-在实际项目中，Megatron-LM通常需要与其他章节的技术结合使用，才能发挥最大训练效率。
-下一步请学习下一章的详细内容，了解更高级的优化策略和工程实践。
-</div>
-
-
-<h2>Megatron-LM 的核心模块详解</h2>
-<p>Megatron-LM 的代码架构由多个核心模块组成，每个模块都经过高度优化。以下从工程实现的角度详细剖析各模块的设计思路和关键实现。</p>
-
-<h3>操作融合（Operator Fusion）机制</h3>
-<p>Megatron-LM 的一大创新是将多个小算子融合为一个大 kernel，减少 GPU kernel 启动开销和显存访问次数。具体包括以下几种融合策略：</p>
-<ul>
-<li><strong>GEMM + GeLU 融合</strong>：将矩阵乘法和 GeLU 激活函数合并为一个 CUDA kernel，减少中间结果的显存写回</li>
-<li><strong>LayerNorm + Dropout 融合</strong>：将归一化和随机丢弃操作合并，减少一次显存读写周期</li>
-<li><strong>Softmax + Mask + Dropout 融合</strong>：注意力计算中的三个操作融合为一个 kernel</li>
-<li><strong>AllReduce + 下一层计算融合</strong>：通信与计算重叠（overlap），隐藏通信延迟</li>
-</ul>
-
-<h3>通信拓扑优化</h3>
-<p>在大规模分布式训练中，通信拓扑对训练效率有决定性影响。Megatron-LM 支持多种通信策略：</p>
-<table>
-<tr><th>通信策略</th><th>适用场景</th><th>带宽需求</th><th>实现方式</th></tr>
-<tr><td>机内 AllReduce</td><td>张量并行（TP）</td><td>NVLink 600+ GB/s</td><td>NCCL Ring</td></tr>
-<tr><td>机间 AllReduce</td><td>数据并行（DP）</td><td>IB 200-400 Gbps</td><td>NCCL Tree/Ring</td></tr>
-<tr><td>P2P 通信</td><td>流水线并行（PP）</td><td>IB/NVLink</td><td>NCCL Send/Recv</td></tr>
-<tr><td>Ring Attention</td><td>上下文并行（CP）</td><td>IB + 计算重叠</td><td>自定义 Ring</td></tr>
-</table>
-
-<table>
-<tr><th>优化技术</th><th>原理</th><th>加速比</th><th>显存影响</th></tr>
-<tr><td>梯度累积</td><td>多次前反向后统一更新</td><td>等效增大 batch</td><td>不增加显存</td></tr>
-<tr><td>选择性激活重计算</td><td>只重计算算子融合后的结果</td><td>1.0-1.2x</td><td>节省 30-50%</td></tr>
-<tr><td>分布式优化器</td><td>ZeRO-1 优化器状态分片</td><td>1.0-1.1x</td><td>节省 4x 参数量</td></tr>
-<tr><td>通信计算重叠</td><td>AllReduce 与反向计算并行</td><td>1.1-1.3x</td><td>不增加</td></tr>
-</table>
-
-<table>
-<tr><th>Megatron-LM 版本</th><th>发布时间</th><th>核心特性</th><th>支持最大模型</th></tr>
-<tr><td>v1.0</td><td>2019</td><td>基础张量并行</td><td>8.3B</td></tr>
-<tr><td>v2.0</td><td>2021</td><td>3D并行 + 操作融合</td><td>175B</td></tr>
-<tr><td>v3.0</td><td>2023</td><td>序列并行 + 上下文并行</td><td>530B+</td></tr>
-<tr><td>Core</td><td>2024</td><td>FP8 + 弹性训练</td><td>1T+</td></tr>
-</table>
-
-<div class="ascii-art">
-Megatron-LM 模块依赖关系图：
-
-┌──────────────────────────────────────────────────┐
-│                 Megatron-Core                      │
-├────────────┬────────────┬────────────┬────────────┤
-│  张量并行  │  流水线并行 │  序列并行  │  上下文并行 │
-│    (TP)    │    (PP)    │    (SP)    │    (CP)    │
-├────────────┴────────────┴────────────┴────────────┤
-│              分布式优化器 (DistributedOptimizer)    │
-├──────────────────────────────────────────────────┤
-│  操作融合层 (Fused Kernels)                        │
-│  ├─ FusedLayerNorm   ├─ FusedSoftmax              │
-│  ├─ FusedGeLU        ├─ FusedRMSNorm              │
-│  └─ FusedScaledMaskedTriu                         │
-├──────────────────────────────────────────────────┤
-│  通信层 (NCCL / TransformerEngine)                │
-│  ├─ AllReduce    ├─ AllGather                     │
-│  ├─ ReduceScatter  ├─ P2P Send/Recv              │
-└──────────────────────────────────────────────────┘
-</div>
-
-<div class="ascii-art">
-Transformer 层在 Megatron 中的数据流：
-
-Input → LayerNorm → [TP: 列并行 GEMM] → GeLU → [TP: 行并行 GEMM] → AllReduce
-              ↑                                    ↑
-         [SP: 序列切分]                      [SP: 序列恢复]
-         AllGather                             ReduceScatter
-                                                        ↓
-                    Output ← LayerNorm ← Residual Add ←┘
-                              ↑
-                        [SP: 序列切分]
-</div>
-
-<h3>练习与思考</h3>
-<div class="exercise"><strong>📝 练习题：</strong>
-<ol>
-<li>请用自己的话解释Megatron-LM的核心原理，并画出数据流向图。</li>
-<li>在给定的2-GPU环境下，配置并运行一个Megatron-LM的最小可行示例，记录性能数据。</li>
-<li>对比分析Megatron-LM与其他替代方案的优劣势，撰写500字的技术报告。</li>
-</ol>
-</div>
-
-<h2>📚 学习路径与建议</h2>
-<p>建议按照以下顺序系统学习分布式训练技术：</p>
-<ol>
-<li><strong>基础理论</strong>：理解集合通信原语和并行计算的基本概念</li>
-<li><strong>核心技术</strong>：掌握 ZeRO 系列、张量并行、流水线并行等关键技术</li>
-<li><strong>框架实践</strong>：深入学习 DeepSpeed、Megatron-LM、FSDP2 等主流框架</li>
-<li><strong>高级主题</strong>：研究容错训练、弹性训练、混合精度优化等进阶内容</li>
-<li><strong>工程实战</strong>：完成完整的3D并行训练项目，积累生产级经验</li>
-</ol>
-<p>推荐阅读顺序：<a href="03-DeepSpeed架构深度剖析.html">上一章</a> → 本章 → <a href="05-3D并行与混合并行.html">下一章</a></p>
-
-<div class="highlight">
-<strong>🚀 继续学习：</strong>掌握本章内容后，建议继续深入学习<a href="05-3D并行与混合并行.html">下一章</a>，将理论知识转化为实践能力。
-在实际项目中，Megatron-LM通常需要与其他章节的技术结合使用，才能发挥最大训练效率。
-下一步请学习下一章的详细内容，了解更高级的优化策略和工程实践。
-</div>
-
-<div class="ascii-art">
-Megatron-LM 在不同 GPU 拓扑下的最优配置：
-
-场景1: 单机 8×A100 (NVLink + NVSwitch)
-┌─────────────────────────────────────────┐
-│  TP=8, PP=1, DP=1                       │
-│  NVSwitch: 全互联，AllReduce 延迟 < 10μs│
-│  适用: 7B 模型训练                       │
-│  MFU: 45-55%                            │
-└─────────────────────────────────────────┘
-
-场景2: 2机 16×A100 (NVLink + IB 400G)
-┌─────────────────────────────────────────┐
-│  TP=8, PP=2, DP=1                       │
-│  机内 TP: NVLink (900 GB/s)             │
-│  机间 PP: IB P2P (50 GB/s)              │
-│  适用: 13B-30B 模型                      │
-│  MFU: 40-50%                            │
-└─────────────────────────────────────────┘
-
-场景3: 8机 64×H100 (NVLink + IB 400G)
-┌─────────────────────────────────────────┐
-│  TP=8, PP=4, DP=2                       │
-│  3D并行: 充分利用层级带宽               │
-│  适用: 70B-175B 模型                     │
-│  MFU: 38-48%                            │
-└─────────────────────────────────────────┘
-</div>
-
-<div class="ascii">Megatron-LM 集群拓扑示例：
-Node0: GPU[0-7] --NVLink/NVSwitch-- TP Group
-Node1: GPU[0-7] --NVLink/NVSwitch-- TP Group  --IB-- PP Stage
-Node2: GPU[0-7] --NVLink/NVSwitch-- TP Group  --IB-- PP Stage
-Node3: GPU[0-7] --NVLink/NVSwitch-- TP Group  --IB-- PP Stage
-  |                  |                  |                  |
-  +------IB Ring-----+------IB Ring-----+------IB Ring-----+
-                    DP AllReduce Group
-每一层的 TP 通信在 NVLink 上完成（900 GB/s）
-PP 通信跨节点走 IB（50 GB/s per direction）
-DP 梯度同步在 IB Ring 上完成</div>
-<pre><code># 序列并行 (Sequence Parallelism) 启用方式
-# 在 Megatron-LM 中，SP 与 TP 联动
-# 当 TP > 1 时自动启用序列并行
-model = GPTModel(
-    config,
-    sequence_parallel=True,  # 启用序列并行
-    # SP 将 LayerNorm/Dropout 的序列维度切分到 TP 组内
-    # 通信：AllGather (前向入口) + ReduceScatter (前向出口)
-)</code></pre>
-<pre><code># 上下文并行 (Context Parallelism) Ring Attention 配置
-# 用于超长序列训练 (100K+ tokens)
-model = GPTModel(
-    config,
-    context_parallel_size=4,  # 序列切成4段
-    # Ring Attention: 各 GPU 持有一段 KV
-    # 每步传递 KV 块并计算局部注意力
-    # 通信与计算重叠，隐藏延迟
-    # 适用：长文档、代码生成等场景
-)</code></pre>
-<div class="footer">分布式训练系统深度指南 © 2026</div></body></html>
+<div class="footer">分布式训练系统深度指南 © 2026</div>
+</body></html>

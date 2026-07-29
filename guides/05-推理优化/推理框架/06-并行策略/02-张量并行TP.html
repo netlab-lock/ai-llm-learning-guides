@@ -72,17 +72,6 @@
 <div class="subtitle">把每一层的权重矩阵"切开"分给多张 GPU — 同机多卡的首选方案</div>
 
 <h2>一、核心思想</h2>
-<div class="warn"><strong>常见误区：</strong>
-学习一、核心思想时，很多人只看概念不动手实验。建议每学完一个知识点就写验证代码，
-在实际运行中观察行为是否符合预期。理论和实践的差距往往比想象中大。
-</div>
-<div class="warn"><strong>常见误区：</strong>
-不要以为一、核心思想可以跳过基础直接上手高级内容。基础概念是后续所有优化和应用的前提，
-跳过基础会导致后续学习事倍功半。
-</div>
-
-<h3>一、核心思想</h3>"><strong>通俗类比：</strong>一、核心思想</div>
-
 
 
 <table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
@@ -113,18 +102,6 @@ TP=2: 把蛋糕切成两半，两个人各吃一半:
 </div>
 
 <h2>二、列切分 vs 行切分</h2>
-
-
-
-
-
-
-<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
-<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
-<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
-<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
-<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
-<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
 
 <p>矩阵切分有两种方式，在 Transformer 中配合使用：</p>
 
@@ -193,19 +170,13 @@ GPU 1: Y_right = X_right × W_bottom  ← 右输入 × 下半权重
 </div>
 
 <h2>三、TP 的通信瓶颈</h2>
-理，有助于在实际工程中做出更合理的技术选择和优化决策。</p>
 
-<h3>三、TP 的通信瓶颈</h3>
+<p><strong>核心洞察</strong>：TP 的最大限制是通信带宽——每层需要 2 次 AllReduce，80 层模型 = 160 次 AllReduce。这要求 GPU 间有极高带宽互联（NVLink），跨机器做 TP 效率极低。</p>
 
-
-
-
-<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
-<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
-<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
-<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
-<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
-<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+<p><strong>量化分析</strong>：TP 的通信量计算：</p>
+<div class="formula">每次 AllReduce 数据量 = batch_size × seq_len × hidden_dim × sizeof(dtype)
+总通信量 = 层数 × 2 × 每次 AllReduce 数据量</div>
+<p>以 Llama-70B 为例（hidden_dim=8192, seq_len=4096, batch=4, TP=4）：每次 AllReduce ≈ 4×4096×8192×2 = 256MB，80 层 × 2 次 × 256MB = 40GB/请求。不同互联方式的耗时：NVLink 900GB/s ≈ 0.04s，PCIe 64GB/s ≈ 0.6s，100GbE 12GB/s ≈ 3.3s。
 
 <div class="box warn">
 <strong>⚠️ TP 对通信带宽要求极高！</strong>
@@ -226,10 +197,8 @@ GPU 1: Y_right = X_right × W_bottom  ← 右输入 × 下半权重
 </div>
 
 <h2>四、TP 的特点总结</h2>
-<h3>四、TP 的特点总结</h3>
 
-
-<div class="deep"><strong>深入探讨：</strong>从系统设计的<strong>底层原理</strong>看，一、核心思想的核心挑战是在性能、精度和资源三者之间寻找最优平衡。<strong>为什么</strong>不能同时最大化三者？因为提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），减少资源又会降低性能。理解这个三角约束，就能推导出大多数技术选择背后的逻辑。</div>
+<p><strong>核心洞察</strong>：TP 的本质是"层内并行"——将同一层的权重矩阵切分到多张 GPU，通过 AllReduce 合并结果。显存节省线性（TP=N → 1/N），延迟降低接近线性，但通信开销随层数线性增长。</p>
 <div class="ascii"><pre>LLM 推理全流程
 ┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
 │  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
@@ -240,12 +209,6 @@ GPU 1: Y_right = X_right × W_bottom  ← 右输入 × 下半权重
                      │  用户看到    │◀───│  Tokenizer   │◀─────┘
                      │  "你好！..." │    │  解码        │
                      └──────────────┘    └──────────────┘</pre></div>
-<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
-<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
-<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
-<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
-<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
-<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
 
 <table>
   <tr><th>方面</th><th>说明</th></tr>
@@ -273,189 +236,5 @@ GPU 1: Y_right = X_right × W_bottom  ← 右输入 × 下半权重
 </div>
 
 </div>
-<h3>一、核心思想</h3>
-<p>从系统架构的<strong>底层原理</strong>来看，一、核心思想由多个协同工作的组件构成。
-<strong>为什么</strong>需要这样的分层设计？<strong>推导</strong>表明，
-将复杂系统分解为独立模块可以将维护成本从O(N²)降低到O(N)，
-每个模块只需关注自身的<strong>工作机制</strong>，通过标准接口与外部交互。</p>
-
-<h3>一、核心思想</h3>
-<p>衡量一、核心思想性能的核心指标包括延迟（latency）、吞吐（throughput）和资源利用率。
-从<strong>数学本质</strong>看，这三者之间存在固有权衡关系：
-吞吐 = batch_size / latency，而资源利用率 = 实际计算时间 / 总时间。
-<strong>为什么</strong>不能同时优化三者？因为提高batch_size会增加延迟，
-降低延迟会减少batch_size进而降低吞吐——这就是<strong>为什么</strong>需要
-针对具体场景选择优化目标的<strong>底层原因</strong>。</p>
-<div class="deep"><strong>一、核心思想的技术原理与数学推导：</strong>
-从<strong>底层</strong>硬件角度分析，一、核心思想的性能瓶颈通常在于内存带宽而非计算能力。
-<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
-算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
-因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
-这一<strong>数学本质</strong>决定了一、核心思想的所有优化策略都应围绕减少内存访问展开。
-从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
-是提升算术强度的两大核心手段。
-</div>
-<div class="deep"><strong>一、核心思想的系统架构分析：</strong>
-从系统设计的<strong>原理</strong>出发，一、核心思想采用分层架构来管理复杂性。
-<strong>为什么</strong>分层是主流选择？<strong>推导</strong>如下：
-设系统有N个组件，全连接交互复杂度为O(N²)，分层后降低到O(N·L)，L为层数。
-<strong>数学本质</strong>上，这是用少量层间通信开销换取大幅降低的组件间耦合。
-在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过标准接口解耦——
-这类似于TCP/IP协议栈的设计<strong>原理</strong>，每层独立优化，层内改动不影响整体。
-</div>
-<h3>一、核心思想的性能优化策略</h3>
-<p>优化一、核心思想性能需要系统性的方法论。首先用profiling工具定位瓶颈——
-从<strong>底层</strong>看，GPU推理的瓶颈通常表现为三种模式：
-1) 计算受限（GPU利用率>80%，SM活跃）；
-2) 内存受限（带宽利用率高，但计算单元空闲）；
-3) 通信受限（多卡场景，NCCL等待时间长）。
-<strong>为什么</strong>要区分这三种模式？因为优化策略完全不同：
-计算受限→减少FLOPs（量化/剪枝）；内存受限→减少数据搬运（算子融合/缓存）；
-通信受限→优化通信拓扑（梯度压缩/异步通信）。
-这一<strong>原理</strong>是推理性能调优的基础框架。</p>
-<h3>一、核心思想的工程实践与最佳实践</h3>
-<p>在生产环境中部署一、核心思想时，需要考虑以下<strong>工作机制</strong>：
-资源规划（GPU显存预算<strong>公式</strong>：M_total = M_model + M_kv×B + M_overhead，
-B为并发数）、容错机制（健康检查、自动重启、灰度发布）、
-监控告警（延迟p99、错误率、GPU利用率）。
-<strong>为什么</strong>这些因素如此关键？因为推理服务是持续运行的，
-任何微小的效率问题在高并发下都会被放大——
-从<strong>数学本质</strong>看，总成本 = 单次成本 × QPS × 时间，
-当QPS达到百万级时，1%的优化意味着年节省数十万元。</p>
-<pre><code class="language-python"># 一、核心思想 - 性能基准测试
-import torch
-import time
-
-def benchmark(model, input_data, warmup=10, iters=100):
-    """测量推理延迟和吞吐"""
-    for _ in range(warmup):
-        model(input_data)
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    for _ in range(iters):
-        model(input_data)
-    torch.cuda.synchronize()
-    elapsed = (time.perf_counter() - start) / iters
-    print(f"Latency: {elapsed*1000:.2f}ms")
-    print(f"Throughput: {1/elapsed:.0f} req/s")
-    return elapsed
-</code></pre>
-<pre><code class="language-python"># 一、核心思想 - 性能基准测试
-import torch
-import time
-
-def benchmark(model, input_data, warmup=10, iters=100):
-    """测量推理延迟和吞吐"""
-    for _ in range(warmup):
-        model(input_data)
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    for _ in range(iters):
-        model(input_data)
-    torch.cuda.synchronize()
-    elapsed = (time.perf_counter() - start) / iters
-    print(f"Latency: {elapsed*1000:.2f}ms")
-    print(f"Throughput: {1/elapsed:.0f} req/s")
-    return elapsed
-</code></pre>
-<div class="ascii">
-一、核心思想 系统架构
-┌──────────┐    ┌──────────────┐    ┌──────────┐
-│  Input   │───→│  Processing  │───→│  Output  │
-│  Layer   │    │    Engine    │    │  Layer   │
-└──────────┘    └──────────────┘    └──────────┘
-     │                │                    │
-     ▼                ▼                    ▼
-  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
-  PCIe传输       Tensor Core          结果回传
-</div>
-<div class="ascii">
-一、核心思想 性能分析 (屋顶模型)
-                    
-  计算吞吐  │         ╱ 计算受限区
-  (TFLOPS)  │       ╱
-            │     ╱   ← 实际工作点
-            │   ╱
-            │ ╱ 带宽受限区
-            │╱
-            └──────────────── 带宽利用率
-             
-  转折点 = 峰值算力 / 峰值带宽
-  A100: 312T/2T = 156 FLOPs/Byte
-  H100: 989T/3.35T = 295 FLOPs/Byte
-</div>
-<div class="tip"><strong>相关章节：</strong>
-一、核心思想与以下内容密切相关：<a href="00-并行策略总览.html">00-并行策略总览</a> | <a href="01-数据并行DP.html">01-数据并行DP</a> | <a href="03-流水线并行PP.html">03-流水线并行PP</a>。
-建议结合这些章节一起学习，形成完整的知识体系。
-</div>
-<div class="tip"><strong>实用技巧：</strong>
-在学习一、核心思想时，建议先建立整体认知框架，再深入细节。
-用最小化实验验证核心概念——比如用小模型+短序列跑通完整流程，
-确认理解正确后再扩展到生产规模。记录每一步的性能数据，
-建立自己的"优化知识库"，这些经验在后续项目中会反复用到。
-</div>
-<h2>一、核心思想的工程实践与总结</h2>
-<h3>生产环境部署要点</h3>
-<p>在生产环境中应用一、核心思想时，需要考虑资源规划、容错机制和监控告警。
-从<strong>底层原理</strong>看，推理服务的可用性 = 1 - Π(1-可用性_i)，
-当组件数增加时系统可用性指数下降——这就是<strong>为什么</strong>需要冗余设计。</p>
-<h3>常见问题与解决方案</h3>
-<p>实际工程中遇到的大多数问题都可以归为三类：性能问题（延迟/吞吐不达标）、
-精度问题（输出质量下降）、稳定性问题（偶发OOM/超时）。
-<strong>为什么</strong>要这样分类？因为每类问题的诊断<strong>工作机制</strong>完全不同：
-性能问题用profiler，精度问题用eval benchmark，稳定性问题用日志分析。</p>
-<div class="exercise">
-<h3>📝 思考与练��</h3>
-<ol>
-  <li>请用自己的话解释<strong>一、核心思想</strong>的核心原理，并举一个实际应用场景。</li>
-  <li>请用自己的话解释<strong>二、列切分 vs 行切分</strong>的核心原理，并举一个实际应用场景。</li>
-  <li>请用自己的话解释<strong>三、TP 的通信瓶颈</strong>的核心原理，并举一个实际应用场景。</li>
-  <li>请用自己的话解释<strong>四、TP 的特点总结</strong>的核心原理，并举一个实际应用场景。</li>
-</ol>
-</div>
-
-<div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
-<div class="box answer answer-content" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
-<div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
-<ol>
-<li><strong>核心原理</strong>: 张量并行（TP）的核心思想是将每一层的权重矩阵"切开"分配到多张GPU上，每张GPU只存储和计算部分权重，最后通过集合通信合并结果。文件用"切蛋糕"做类比：一块大蛋糕一个人吃不下（单卡显存不够），切成两半两个人各吃一半（TP=2）。技术实现上，Transformer层的权重矩阵W从[d×d']被切分为两个[d×d'/2]（列切分）或两个[d/2×d']（行切分），每张GPU只存储一半权重并计算部分结果。TP的本质是"层内并行"——在同一层内部将计算和显存需求分散到多张GPU，显存节省为线性（TP=N则每卡显存约1/N），延迟也接近线性降低（TP=2延迟约减半）。<br><strong>关键要点</strong>: ①将权重矩阵切分到多张GPU；②每卡只存1/N权重；③每次计算后需AllReduce合并；④显存和延迟均接近线性改善。<br><strong>实际案例</strong>: 在单台8×H100服务器上部署LLaMA-70B推理，使用TP=8将80层Transformer的权重均匀切分到8张GPU，每卡只存约17.5GB权重，使推理成为可能。<br><strong>关联知识</strong>: 与Megatron-LM的TensorParallel实现、NVLink通信架构、Transformer权重矩阵维度（hidden_dim ×intermediate_dim）等直接相关。</li>
-<li><strong>核心原理</strong>: 矩阵切分的两种方式——列切分和行切分——是TP的技术基石。列切分（Column Parallel）按列将W切成左右两半[d×d'/2]，输入X完整地送到每张GPU，每张GPU计算X×W_left和X×W_right得到输出的左右两半，结果天然互补无需AllReduce。行切分（Row Parallel）按行将W切成上下两半[d/2×d']，输入X也被切分为左右两半，每张GPU计算X_left×W_top和X_right×W_bottom得到部分结果，需要AllReduce求和才能得到最终输出。在Transformer中两者配合使用：Q/K/V投影和Gate/Up投影使用列切分（按head自然切分，无通信），输出投影和Down投影使用行切分（需要AllReduce），每层恰好2次AllReduce。<br><strong>关键要点</strong>: ①列切分按列切、无AllReduce；②行切分按行切、需AllReduce；③Transformer中两者交替使用；④每层固定2次AllReduce（Attention输出+MLP输出）。<br><strong>实际案例</strong>: Llama-2-13B的hidden_dim=5120，80层模型使用TP=2时，每层产生2次AllReduce（传输batch×seq×5120×2bytes的数据），总计160次AllReduce。<br><strong>关联知识</strong>: 与多头注意力的并行head分配（GPU0负责head0-15，GPU1负责head16-31）、NCCL AllReduce操作的原生优化、通信量计算公式（2×batch×seq×dim×sizeof(dtype)）紧密相关。</li>
-<li><strong>核心原理</strong>: TP对通信带宽有极高要求，这是其最大限制。文件以Llama-70B（hidden_dim=8192, TP=4）为例精确计算：每次AllReduce数据量≈128MB，80层×2次=160次AllReduce，总通信量约20GB/请求。不同互联方式的带宽差异巨大：NVLink(H100) 900GB/s仅需0.02秒，PCIe Gen5 64GB/s需0.3秒，而100GbE网络12GB/s需1.7秒——完全不可用。这个计算的底层逻辑是：TP的AllReduce发生在每一层（80层×2次=160次），频率极高（每层都有），所以必须依赖NVLink这种高带宽低延迟的NVLink。跨机器的网络带宽（即使100GbE RDMA）也比NVLink低两个数量级。<br><strong>关键要点</strong>: ①每层2次AllReduce（80层=160次）；②每次AllReduce数据量与hidden_dim成正比；③跨机器网络带宽低两个数量级；④TP必须使用NVLink不能跨机。<br><strong>实际案例</strong>: 某团队尝试在两台各4×A100的服务器上做TP=8（跨机），发现延迟比单机TP=8高出10倍以上，根本原因是跨机走网络而不是NVLink。<br><strong>关联知识</strong>: 与GPU服务器内部拓扑（NVSwitch全互联、PCIe tree）、RDMA/RoCE网络、AllReduce算法（Ring AllReduce的通信量=2×(N-1)/N×data_size）等知识直接相关。</li>
-<li><strong>核心原理</strong>: TP的特点总结可归纳为四句话：显存线性节省、延迟接近线性降低、通信模式固定（每层AllReduce）、必须NVLink互联。KV Cache也按TP切分——每张GPU只存储分配到的attention head对应的KV Cache，这也是一种显存节省。最佳实践明确指出：TP只在同机NVLink互联的卡上使用，TP=2/4最常见，跨机器时用TP(同机)+PP(跨机)组合。值得注意的是，TP对延迟的降低效果在prefill阶段（并行处理所有输入token）最明显，但在decode阶段（逐token生成）由于batch size通常为1，计算量小，AllReduce的通信开销占比增大，TP的收益相对降低。<br><strong>关键要点</strong>: ①显存节省线性（TP=N→1/N）；②延迟降低接近线性；③KV Cache也按TP切分；④最佳配置TP=2/4同机NVLink。<br><strong>实际案例</strong>: vLLM部署LLaMA-70B时使用--tensor-parallel-size=2（双卡H100 NVLink），相比单卡无法运行，TP=2使推理延迟从不可能降至约200ms/token。<br><strong>关联知识</strong>: 与推理框架的TP配置参数（vLLM的--tp、TRT-LLM的--tp_size）、KV Cache内存管理（PagedAttention中KV按head分配到不同GPU）、推理阶段差异（prefill vs decode的并行度）密切相关。</li>
-</ol>
-</div>
-
-
-<div class="tip"><strong>向前串联：</strong>
-一、核心思想的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
-建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
-将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
-这些数据将成为后续优化决策的量化依据。
-</div>
-
-
-<div class="deep"><strong>学习路径建议：</strong>
-建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
-再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
-每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
-</div>
-
-
-<script>
-function toggleAnswer(btn) {
-  var content = btn.nextElementSibling;
-  if (content && content.classList.contains('answer-content')) {
-    if (content.classList.contains('show')) {
-      content.classList.remove('show');
-      btn.classList.remove('open');
-      btn.innerHTML = '<span class="icon">▶</span>显示答案';
-    } else {
-      content.classList.add('show');
-      btn.classList.add('open');
-      btn.innerHTML = '<span class="icon">▶</span>隐藏答案';
-    }
-  }
-}
-</script>
 
 </body></html>

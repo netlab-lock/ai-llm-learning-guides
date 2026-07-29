@@ -51,7 +51,7 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
-</style>
+@media screen and (max-width: 768px){.container{padding:16px;max-width:100%}body{font-size:14px;line-height:1.6}h1{font-size:1.5rem}h2{font-size:1.2rem}pre{font-size:0.75rem;overflow-x:auto}table{font-size:0.8rem}.nav{flex-direction:column;gap:8px}.nav a{padding:8px}}</style>
 </head>
 <body>
 <nav class="nav">
@@ -77,26 +77,44 @@
 <ol>
 <li><a href="#ml-cicd">ML CI/CD的特点</a></li>
 <li><a href="#pipeline">训练流水线</a></li>
-<li><a href="#github-actions">GitHub Actions for ML</a></li>
 <li><a href="#kedro-zenml">Kedro与ZenML</a></li>
 <li><a href="#validation">数据与模型验证</a></li>
+<li><a href="#deployment">千节点集群部署策略</a></li>
+<li><a href="#llm-specific">LLM特有CI/CD</a></li>
+<li><a href="#e2e-case">端到端实战案例</a></li>
 <li><a href="#exercise">练习</a></li>
 </ol>
 </div>
 
 <h2 id="ml-cicd">ML CI/CD的特点</h2>
-<h3>ML CI/CD的特点</h3>><strong>通俗类比：</strong>传统CI/CD像标准化快餐：配方（代码）固定，出餐快。ML CI/CD像定制大餐：食材（数据）每次可能不同，火候（训练）需要实时调整，口味（模型）要反复品尝（评估）。</div>
-<div class="warn"><strong>常见误区：</strong>最常见的误区是套用软件CI/CD的思路，只关注代码质量，而忽略了数据质量监控、模型性能评估和可复现性检查，导致部署的模型“悄悄”变差。</div>
-<div class="deep"><strong>深入探讨：</strong>核心区别在于‘三件套’：数据版本控制（如DVC）、模型注册表和自动化评估。评估指标需自定义，如F1、AUC、延迟。数据验证规则（如Great Expectations）应像代码测试一样被纳入流水线，通常设置准确率阈值>95%的数据才能流入下一流程。</div>
+
+<p><strong>核心区别</strong>：传统 CI/CD 处理的是确定性系统（代码输入确定 → 输出确定），而 ML CI/CD 处理的是概率性系统（数据 + 代码 → 模型，输出是概率分布）。这意味着"成功"的定义完全不同：传统 CI/CD 的"成功"是测试通过，ML CI/CD 的"成功"是模型性能不退化 + 数据质量达标 + 测试通过。</p>
+
+<h3>ML CI/CD的特点</h3>
 <div class="ascii"><pre>代码提交 -> 数据验证 -> 模型训练 -> 性能评估 -> 注册 -> 部署
     |            |            |            |         ^
     v            v            v            v         |
   <strong>触发器</strong>    <strong>数据检查器</strong>    <strong>训练器</strong>     <strong>评估器</strong>    <strong>注册表</strong></pre></div>
-<table><tr><th>特征</th><th>传统 CI/CD</th><th>ML CI/CD</th></tr><tr><td>触发事件</td><td>代码提交</td><td>代码提交、数据更新、定期重训练</td></tr><tr><td>核心制品</td><td>应用二进制包、容器镜像</td><td>训练好的模型文件、数据集版本、评估报告</td></tr><tr><td>“成功”标准</td><td>编译通过、测试通过</td><td>测试通过 **且** 模型性能不退化、数据质量达标</td></tr><tr><td>关键组件</td><td>构建服务器、制品库</td><td>实验追踪工具、模型注册表、数据版本库</td></tr></table>
+
+<div class="formula">
+ML CI/CD 的"成功"条件:<br>
+Success = Code_Test ∧ Data_Quality ∧ Model_Performance<br>
+<br>
+其中:<br>
+Code_Test:        单元测试通过率 = 100%<br>
+Data_Quality:     数据分布 KL散度 < 0.05 且 缺失率 < 1%<br>
+Model_Performance: ΔMetric < -2% (性能退化阈值)
+</div>
+
+<p>这个公式定义了 ML CI/CD 的质量门禁：只有当代码测试、数据质量、模型性能三个条件同时满足时，模型才能进入下一阶段。在实践中，数据质量检查通常使用 Great Expectations 设置断言（如"用户年龄列不为空且范围 [0,120]"），模型性能评估则设置准确率阈值（如 MMLU > 65%）。</p>
+
+<table><tr><th>特征</th><th>传统 CI/CD</th><th>ML CI/CD</th></tr><tr><td>触发事件</td><td>代码提交</td><td>代码提交、数据更新、定期重训练</td></tr><tr><td>核心制品</td><td>应用二进制包、容器镜像</td><td>训练好的模型文件、数据集版本、评估报告</td></tr><tr><td>"成功"标准</td><td>编译通过、测试通过</td><td>测试通过 **且** 模型性能不退化、数据质量达标</td></tr><tr><td>关键组件</td><td>构建服务器、制品库</td><td>实验追踪工具、模型注册表、数据版本库</td></tr></table>
+
+<div class="warn"><strong>⚠ 常见误区：</strong>最常见的误区是套用软件 CI/CD 的思路，只关注代码质量，而忽略了数据质量监控、模型性能评估和可复现性检查，导致部署的模型"悄悄"变差。具体表现：(1) 数据分布漂移未检测——训练数据被污染但代码测试全部通过；(2) 模型退化未发现——新版本模型在特定子任务上性能下降 10% 但平均指标只降 1%；(3) 不可复现——没有锁定数据版本和随机种子，无法回溯问题。</div>
+
+<div class="deep"><strong>🔬 深入探讨：</strong>核心区别在于"三件套"：数据版本控制（如 DVC）、模型注册表和自动化评估。评估指标需自定义，如 F1、AUC、延迟。数据验证规则（如 Great Expectations）应像代码测试一样被纳入流水线，通常设置准确率阈值 >95% 的数据才能流入下一流程。</div>
 <table><tr><th>方面</th><th>要点</th><th>注意事项</th></tr>
-<tr><td>核心概念</td><td>ML CI/CD的特点的基本原理</td><td>理解底层机制比记忆参数更重要</td></tr>
-<tr><td>实践应用</td><td>在实际项目中的使用方式</td><td>先跑通demo再优化</td></tr>
-<tr><td>常见问题</td><td>踩坑记录和解决方案</td><td>参考社区issue和讨论</td></tr></table>
+<tr><td>触发机制</td><td>代码push、数据更新、定时重训练(CT)、手动触发</td><td>ML流水线需要多触发器，不能仅依赖代码提交</td></tr><tr><td>质量门禁</td><td>代码测试 + 数据质量(KL散度<0.05) + 模型性能(ΔMetric>-2%)</td><td>三层门禁缺一不可，否则模型可能"悄悄"变差</td></tr><tr><td>制品管理</td><td>模型文件(.safetensors)、数据集版本(DVC)、评估报告</td><td>传统制品是二进制包，ML制品是模型+数据+指标</td></tr><tr><td>可复现性</td><td>锁定代码commit + 数据DVC hash + 随机种子</td><td>没有可复现性的CI/CD无法回溯问题</td></tr></table>
 
 <p>传统CI/CD关注代码测试和部署，ML CI/CD还需要处理数据验证、模型评估和训练流水线。关键是将"数据+代码+模型"三者的变更纳入统一的自动化流程。</p>
 
@@ -106,6 +124,23 @@
 </div>
 
 <h2 id="pipeline">训练流水线</h2>
+
+<p><strong>核心思想</strong>：训练流水线将模型训练分解为多个阶段，每个阶段有明确的输入/输出和质量门禁。流水线的核心价值是<strong>尽早失败</strong>（fail-fast）——在数据验证阶段发现问题比在训练 100 小时后发现问题成本低 1000 倍。</p>
+
+<div class="formula">
+流水线的成本节省模型:<br>
+Cost_saved = T_train × C_gpu × (1 - P_early_detect)<br>
+<br>
+其中: T_train = 训练时长, C_gpu = GPU 每小时成本<br>
+P_early_detect = 早期检测到的错误比例<br>
+<br>
+示例: 70B 模型训练 1000 小时, GPU 成本 $2/hour × 1024 GPU<br>
+如果数据验证能提前检测 50% 的错误:<br>
+Cost_saved = 1000h × $2048/h × 50% = $1,024,000
+</div>
+
+<p>这个公式展示了流水线质量门禁的经济价值：以 70B 模型训练为例（1024 块 GPU，训练 1000 小时，每 GPU 每小时 $2），如果数据验证阶段能提前检测 50% 的错误，可以节省约 100 万美元的计算成本。</p>
+
 <h3>训练流水线</h3>
 <div class="tip"><strong>通俗类比：</strong>并行策略就像分工做菜。张量并行（TP）= 一道菜由多个厨师同时切不同的食材；流水线并行（PP）= 不同厨师负责不同工序（洗菜→切菜→炒菜），形成流水线；数据并行（DP）= 多个厨师各自独立做相同的菜。</div>
 <div class="warn"><strong>常见误区：</strong>不要盲目追求最大并行度。并行会引入通信开销（厨师之间传递食材的时间）。需要平衡计算与通信比例，对于小模型或慢网络，并行可能反而降低效率。</div>
@@ -168,71 +203,373 @@ stages:
       - metric: "mmlu_score > 0.65"
       - metric: "perplexity < 15"</code></pre>
 
-<h2 id="github-actions">GitHub Actions for ML</h2>
-<h3>GitHub Actions for ML</h3>
-<div class="tip"><strong>通俗类比：</strong>它就像一个自动化的快递流程：你打包代码（提交），仓库（物流中心）自动触发流水线：检查包裹质量（测试）-> 工厂加工（训练模型）-> 质检（评估）-> 送达用户（部署）。整个过程无需你手动搬运。</div>
-<div class="warn"><strong>常见误区：</strong>注意权限和资源限制。Runner的免费额度有限，大型模型训练会很快耗尽。务必使用 `actions/cache` 缓存大型依赖（如Hugging Face模型），避免每次运行都从头下载，浪费时间和资源。</div>
-<div class="deep"><strong>深入探讨：</strong>一个典型的ML工作流YAML关键步骤：`jobs.train` 中，使用 `docker build` 构建包含训练脚本的环境；通过 `python train.py --data-path ${{ inputs.data-path }}` 训练；利用 `actions/upload-artifact` 保存模型文件和评估报告；`needs: [train]` 确保部署作业在训练评估通过后运行。</div>
-<div class="ascii"><pre>代码提交 -> <strong>GitHub 仓库</strong> -> [CI/CD 触发器]
-                                |
-                  .--------------------.
-                  |   ML 工作流 (YAML)  |
-                  |______________________|_
-                  | Job 1: 数据验证       |
-                  | Job 2: 模型训练       | <-- 使用缓存 (如HF模型)
-                  | Job 3: 性能测试       |
-                  | Job 4: 部署 (仅主分支) |
-                  '--------------------'
-                                |
-                       <strong>部署端</strong> (AWS, Azure, Hugging Face Spaces)</pre></div>
-<table><tr><th>步骤</th><th>普通软件工作流 (示例)</th><th>ML 工作流 (示例)</th></tr><tr><td>触发器</td><td><code>on: [push, pull_request]</code></td><td><code>on: [push, schedule] # 增加定时触发</code></td></tr><tr><td>环境构建</td><td><code>npm install</code></td><td><code>pip install -r requirements.txt + 下载预训练模型</code></td></tr><tr><td>核心“构建”</td><td><code>npm run build</code></td><td><code>python train.py --epochs 10</code></td></tr><tr><td>“测试”</td><td><code>npm test</code></td><td><code>python evaluate.py --test-set data/test.csv # 输出 metrics.json</code></td></tr><tr><td>制品</td><td><code>dist/ 文件夹</code></td><td><code>model.pth, metrics.json, 带版本标签的模型文件</code></td></tr></table>
-<table><tr><th>方面</th><th>要点</th><th>注意事项</th></tr>
-<tr><td>核心概念</td><td>GitHub Actions for ML的基本原理</td><td>理解底层机制比记忆参数更重要</td></tr>
-<tr><td>实践应用</td><td>在实际项目中的使用方式</td><td>先跑通demo再优化</td></tr>
-<tr><td>常见问题</td><td>踩坑记录和解决方案</td><td>参考社区issue和讨论</td></tr></table>
+<div class="warn"><strong>⚠ 分布式训练CI/CD的故障恢复陷阱：</strong>多节点训练中，单节点故障会导致整个训练作业失败。正确做法是配置自动checkpoint恢复：每N步保存checkpoint（如每500步），并在启动脚本中检测已有checkpoint自动恢复。对于千节点规模，MTBF（平均无故障时间）可能仅数小时——1000节点 × 单节点MTBF 50小时 ≈ 集群每30分钟故障一次。没有checkpoint机制的流水线在这个规模下将永远无法完成训练。</div>
 
-<pre><code># .github/workflows/ml-pipeline.yml
-name: ML Pipeline
+<div class="deep"><strong>🔬 深入探讨：分布式训练CI/CD的大规模工程细节</strong><br>
+大规模分布式训练的CI/CD面临三大核心挑战：
+
+<strong>1. 多节点同步与状态一致性</strong>
+当训练跨数百个节点运行时，所有节点必须加载相同版本的代码、数据、模型配置。典型的解决方案是在训练启动前运行"一致性检查"Job：
+<ul>
+<li>验证所有节点上代码的 Git commit hash 一致</li>
+<li>验证数据文件的 MD5 checksum 与 DVC lock 文件匹配</li>
+<li>验证所有节点的 CUDA 版本、NCCL 版本一致</li>
+</ul>
+
+<strong>2. 故障恢复（Fault Tolerance）</strong>
+千节点训练的故障是常态而非异常。工程实践：
+<ul>
+<li><strong>Checkpoint 频率</strong>：每 200-500 步保存一次，保存到共享存储（如 NFS/Lustre），单次保存耗时约 30-120 秒（70B模型 checkpoint ≈ 5.6TB in FP16）</li>
+<li><strong>自动恢复</strong>：训练脚本检测 checkpoint 目录，自动从最新 checkpoint 恢复</li>
+<li><strong>节点热替换</strong>：Kubernetes 环境下，检测到故障节点后自动调度新节点并重新加入训练</li>
+<li><strong>通信超时</strong>：NCCL_TIMEOUT 设置为 1800s（30分钟），避免偶发网络抖动导致作业失败</li>
+</ul>
+
+<strong>3. 梯度同步与Loss Spike检测</strong>
+分布式训练中，loss spike（损失突增）可能源于单个节点的数据异常或硬件错误。CI/CD流水线应包含loss监控：
+<ul>
+<li>每个step记录全局loss到MLflow</li>
+<li>设置告警阈值：loss > 前10步均值 × 3 时触发告警</li>
+<li>连续5个step的loss为NaN时自动终止训练并回滚到上一个checkpoint</li>
+</ul>
+</div>
+
+<h3>TB级数据版本管理：DVC高级用法</h3>
+
+<div class="formula">
+DVC增量存储的空间节省:<br>
+Space_saved = S_total × (1 - R_change) × C_compress<br>
+<br>
+其中: S_total = 数据集总大小, R_change = 每次更新变化比例, C_compress = 压缩率(通常0.3-0.5)<br>
+<br>
+示例: 10TB数据集,每次更新变化5%,压缩率0.4<br>
+Space_per_version = 10TB × 5% × 0.4 = 200GB<br>
+10个版本总占用 = 10TB + 9 × 200GB = 11.8TB (vs 无增量存储的100TB)
+</div>
+
+<pre><code># === DVC Remote Storage 配置 ===
+
+# 1. 配置 S3 远程存储 (适合AWS环境)
+dvc remote add -d myremote s3://my-bucket/dvc-storage
+dvc remote modify myremote region ap-east-1
+dvc remote modify myremote endpointurl https://s3.ap-east-1.amazonaws.com
+
+# 2. 配置多副本远程存储 (生产环境推荐: 主S3 + 备GCS)
+dvc remote add backup gcs://my-gcs-bucket/dvc-backup
+dvc remote modify backup gc_credentials_file /etc/gcs-key.json
+
+# 3. 配置本地缓存 (小团队快速原型)
+dvc remote add local_cache /mnt/nas/dvc-cache
+
+# 4. 设置并行传输参数 (TB级数据关键优化)
+dvc config cache.dir /mnt/fast-ssd/dvc-cache  # 使用NVMe SSD作为本地缓存
+dvc config core.check_update false             # 关闭自动更新检查加速
+
+# === DVC Push/Pull 高级用法 ===
+
+# 增量推送: 只上传变化的chunk (基于content-addressable存储)
+# 对于TB级数据,每次只推送变化部分,节省90%+传输时间
+dvc push --remote=myremote --jobs=16  # 16线程并行上传
+
+# 仅推送特定数据集
+dvc push data/processed/train.dvc data/raw/corpus.dvc
+
+# 从远程拉取指定版本数据
+dvc pull data/processed/train.dvc
+# 或拉取整个pipeline的所有输入
+dvc repro --pull  # 自动拉取缺失数据并执行pipeline
+
+# === .dvc 文件示例 (Git中存储的元数据) ===
+# data/processed/train.dvc 内容:
+# outs:
+#   - md5: a3c8f9e2b1d44f567890123456789012
+#     size: 8589934592000  # 8TB
+#     path: train.bin
+#     nfiles: 128           # 分片数量
+
+# === CI/CD 中的 DVC 集成 ===
+# 在 GitHub Actions 训练作业中的典型步骤:
+# - name: Pull training data
+#   run: |
+#     dvc pull data/processed/train.dvc --remote=myremote
+#     dvc checkout  # 确保工作区数据版本正确
+# - name: Verify data integrity
+#   run: dvc status --cloud  # 验证本地与远程数据一致性
+# - name: Push new data version (if reprocessed)
+#   run: |
+#     dvc add data/processed/train.bin
+#     dvc push --remote=myremote --jobs=32</code></pre>
+
+<div class="tip"><strong>工程经验：</strong>DVC远程存储选择策略——小于100GB的数据集用本地NAS即可；100GB-10TB用S3/GCS标准存储；10TB以上建议用S3 + 生命周期策略（30天后转IA层，节省50%存储成本）。对于跨国团队，在主要区域设置主remote，次要区域设置只读remote并配置S3 Cross-Region Replication。</div>
+
+<h3>完整的GitHub Actions ML Workflow (生产级)</h3>
+
+<pre><code># .github/workflows/llm-training-pipeline.yml
+# 生产级LLM训练流水线: 包含GPU Runner、缓存、多触发条件
+name: LLM Training Pipeline
+
 on:
   push:
-    paths: ['src/**', 'data/**', 'configs/**']
+    branches: [main, 'release/**']
+    paths:
+      - 'src/**'              # 代码变更
+      - 'configs/**'          # 配置变更
+      - 'data/**.dvc'         # 数据版本变更
+      - 'requirements.txt'    # 依赖变更
+  pull_request:
+    branches: [main]
+  schedule:
+    # 每周一凌晨2点定时重训练 (CT: Continuous Training)
+    - cron: '0 2 * * 1'
   workflow_dispatch:
     inputs:
-      train_config:
-        description: '训练配置文件路径'
-        default: 'configs/default.yaml'
+      training_mode:
+        description: '训练模式'
+        required: true
+        default: 'incremental'
+        type: choice
+        options: [full, incremental, eval-only]
+      data_version:
+        description: '数据版本(tag/commit)'
+        required: false
+        type: string
+
+# 并发控制: 同一分支只运行最新一个workflow
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DVC_REMOTE: myremote
+  MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_URI }}
+  CUDA_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
 
 jobs:
-  data-validation:
+  # ============ Job 1: 代码质量检查 ============
+  code-quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate dataset
-        run: python scripts/validate_data.py --data data/train.jsonl
+        with:
+          lfs: true        # 启用Git LFS拉取.dvc指针文件
 
-  model-training:
-    needs: data-validation
-    runs-on: [self-hosted, gpu]
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'     # 自动缓存pip依赖
+
+      - name: Lint & Type check
+        run: |
+          pip install ruff mypy
+          ruff check src/
+          mypy src/ --ignore-missing-imports
+
+  # ============ Job 2: 数据验证 ============
+  data-validation:
+    needs: code-quality
+    runs-on: ubuntu-latest
+    outputs:
+      data_hash: ${{ steps.data-info.outputs.hash }}
     steps:
       - uses: actions/checkout@v4
-      - name: Train model
-        run: |
-          srun --gpus=8 python train.py \
-            --config ${{ github.event.inputs.train_config }}
 
+      # 缓存DVC本地缓存目录 (避免重复下载)
+      - name: Cache DVC
+        uses: actions/cache@v4
+        with:
+          path: |
+            /mnt/fast-ssd/dvc-cache
+            ~/.cache/dvc
+          key: dvc-${{ runner.os }}-${{ hashFiles('data/**.dvc') }}
+          restore-keys: dvc-${{ runner.os }}-
+
+      - name: Setup DVC
+        uses: iterative/setup-dvc@v1
+        with:
+          version: '3.50.1'
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET }}
+          aws-region: ap-east-1
+
+      - name: Pull data from remote
+        run: dvc pull --remote=${{ env.DVC_REMOTE }} --jobs=16
+
+      - name: Run data validation
+        id: data-info
+        run: |
+          python scripts/validate_data.py \
+            --data data/processed/train.bin \
+            --output reports/data_report.json \
+            --max-null-rate 0.01 \
+            --max-kl-divergence 0.05
+          echo "hash=$(md5sum data/processed/train.bin | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+
+      - name: Upload validation report
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-validation-report
+          path: reports/data_report.json
+          retention-days: 30
+
+  # ============ Job 3: 模型训练 (GPU Self-Hosted Runner) ============
+  model-training:
+    needs: data-validation
+    runs-on: [self-hosted, gpu, a100]  # 自托管GPU Runner
+    timeout-minutes: 1440              # 24小时超时
+    steps:
+      - uses: actions/checkout@v4
+
+      # 缓存 HuggingFace 模型 (数十GB)
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-${{ hashFiles('configs/model_config.yaml') }}
+
+      # 缓存编译产物 (torch.compile等)
+      - name: Cache compiled artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/torch_inductor_cache
+            ~/.cache/torch
+          key: torch-${{ runner.os }}-${{ hashFiles('src/**/*.py') }}
+
+      - name: Setup environment
+        run: |
+          pip install -r requirements.txt --quiet
+          nvidia-smi  # 验证GPU可用
+
+      - name: Verify training data
+        run: |
+          echo "Training with data hash: ${{ needs.data-validation.outputs.data_hash }}"
+
+      - name: Train model with checkpoint recovery
+        run: |
+          python train.py \
+            --config configs/llama_70b.yaml \
+            --data-hash ${{ needs.data-validation.outputs.data_hash }} \
+            --output-dir models/output/ \
+            --checkpoint-interval 500 \
+            --resume-from-checkpoint true \
+            --use-distributed true \
+            --num-nodes 128 \
+            --gpus-per-node 8
+
+      - name: Upload model checkpoint
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-checkpoint-${{ github.run_id }}
+          path: models/output/
+          retention-days: 7
+          compression-level: 0  # 模型文件已压缩,跳过gzip
+
+      - name: Upload training logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: training-logs
+          path: |
+            logs/
+            mlflow/
+          retention-days: 30
+
+  # ============ Job 4: 模型评估 ============
   model-evaluation:
     needs: model-training
-    runs-on: [self-hosted, gpu]
+    runs-on: [self-hosted, gpu, a100]
+    outputs:
+      mmlu_score: ${{ steps.eval.outputs.mmlu }}
+      decision: ${{ steps.gate.outputs.decision }}
     steps:
-      - name: Run benchmarks
-        run: python evaluate.py --model models/latest/ --bench mmlu,hellaswag</code></pre>
+      - uses: actions/checkout@v4
+
+      - name: Download model
+        uses: actions/download-artifact@v4
+        with:
+          name: model-checkpoint-${{ github.run_id }}
+          path: models/output/
+
+      - name: Run evaluation benchmarks
+        id: eval
+        run: |
+          python evaluate.py \
+            --model models/output/checkpoint-final/ \
+            --benchmarks mmlu,hellaswag,truthfulqa \
+            --output reports/metrics.json
+          MMLU=$(python -c "import json; print(json.load(open('reports/metrics.json'))['mmlu'])")
+          echo "mmlu=$MMLU" >> $GITHUB_OUTPUT
+
+      # 质量门禁: MMLU > 65% 才允许注册
+      - name: Quality gate
+        id: gate
+        run: |
+          MMLU=${{ steps.eval.outputs.mmlu }}
+          BASELINE=65.0
+          if (( $(echo "$MMLU >= $BASELINE" | bc -l) )); then
+            echo "decision=pass" >> $GITHUB_OUTPUT
+            echo "✅ MMLU=$MMLU >= baseline=$BASELINE, PASSED"
+          else
+            echo "decision=fail" >> $GITHUB_OUTPUT
+            echo "❌ MMLU=$MMLU < baseline=$BASELINE, BLOCKED"
+            exit 1
+          fi
+
+      - name: Upload metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: evaluation-metrics
+          path: reports/metrics.json
+
+  # ============ Job 5: 模型注册 ============
+  register-model:
+    needs: model-evaluation
+    if: github.ref == 'refs/heads/main' && needs.model-evaluation.outputs.decision == 'pass'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download model
+        uses: actions/download-artifact@v4
+        with:
+          name: model-checkpoint-${{ github.run_id }}
+          path: models/output/
+
+      - name: Register to MLflow Model Registry
+        run: |
+          python scripts/register_model.py \
+            --model-path models/output/checkpoint-final/ \
+            --metrics reports/metrics.json \
+            --run-id ${{ github.run_id }} \
+            --stage Staging
+
+  # ============ Job 6: 部署 (仅main分支 + 评估通过) ============
+  deploy:
+    needs: register-model
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Deploy to Seldon
+        run: |
+          kubectl set image deployment/llm-serving \
+            llm=registry/llm:${{ github.sha }} \
+            --record</code></pre>
+
+<div class="tip"><strong>工程经验：</strong>自托管GPU Runner的配置要点——(1)使用autoscaling组(如AWS ASG/KEDA)根据队列长度自动扩缩容；(2)Runner镜像预装CUDA 12.2+、NVIDIA Container Toolkit、docker；(3)设置resource_class区分A100/H100；(4)使用ephemeral runner（每次运行全新实例）避免GPU状态泄漏。</div>
+
+<h3>GitHub Actions for ML 关键实践</h3>
+<p>GitHub Actions 是 ML CI/CD 最常用的编排引擎。核心要点：</p>
+<table><tr><th>步骤</th><th>普通软件工作流 (示例)</th><th>ML 工作流 (示例)</th></tr><tr><td>触发器</td><td><code>on: [push, pull_request]</code></td><td><code>on: [push, schedule] # 增加定时触发</code></td></tr><tr><td>环境构建</td><td><code>npm install</code></td><td><code>pip install -r requirements.txt + 下载预训练模型</code></td></tr><tr><td>核心"构建"</td><td><code>npm run build</code></td><td><code>python train.py --epochs 10</code></td></tr><tr><td>"测试"</td><td><code>npm test</code></td><td><code>python evaluate.py --test-set data/test.csv # 输出 metrics.json</code></td></tr><tr><td>制品</td><td><code>dist/ 文件夹</code></td><td><code>model.pth, metrics.json, 带版本标签的模型文件</code></td></tr></table>
 
 <div class="co co-warn">
 <div class="co-title">⚠️ GPU Runner注意</div>
 <p>ML训练需要self-hosted GPU Runner。确保Runner配置了NVIDIA驱动、CUDA环境和足够的磁盘空间。建议使用标签（如gpu、a100）区分不同类型的Runner。</p>
 </div>
 
-<h2 id="kedro-zenml">Kedro与ZenML<与ZenML的工作原理，有助于在实际工程中做出更合理的技术选择和优化决策。</p>
+<h2 id="kedro-zenml">Kedro与ZenML</h2>
 
 <h3>Kedro与ZenML</h3>
 <div class="tip"><strong>通俗类比：</strong>Kedro像一个功能全面的“万能料理机”，提供标准化的项目结构和节点化流程，让你专注于“菜谱”逻辑。ZenML则像更现代的“模块化集成灶”，天生为MLOps设计，方便插入各种云服务和实验跟踪“配件”。</div>
@@ -247,9 +584,7 @@ my_project/                  Stack (基础设施集合)
     └── nodes/ (节点，处理单元)</pre></div>
 <table><tr><th>特性</th><th>Kedro</th><th>ZenML</th></tr><tr><td>设计哲学</td><td>数据工程与科学的标准化</td><td>原生MLOps，基础设施即代码</td></tr><tr><td>配置管理</td><td><code>catalog.yml</code>, <code>parameters.yml</code>，强类型</td><td><code>@step</code>装饰器，运行时参数</td></tr><tr><td>数据版本控制</td><td>需集成DVC</td><td>内置Artifact Store</td></tr><tr><td>实验跟踪</td><td>需手动集成MLflow等</td><td>原生组件，通过Stack切换</td></tr><tr><td>学习曲线</td><td>中等，理解数据目录和管道</td><td>较陡，需理解Stack和组件</td></tr></table>
 <table><tr><th>方面</th><th>要点</th><th>注意事项</th></tr>
-<tr><td>核心概念</td><td>Kedro与ZenML的基本原理</td><td>理解底层机制比记忆参数更重要</td></tr>
-<tr><td>实践应用</td><td>在实际项目中的使用方式</td><td>先跑通demo再优化</td></tr>
-<tr><td>常见问题</td><td>踩坑记录和解决方案</td><td>参考社区issue和讨论</td></tr></table>
+<tr><td>框架定位</td><td>Kedro=数据工程标准化，ZenML=原生MLOps平台</td><td>Kedro适合原型开发，ZenML适合生产部署</td></tr><tr><td>数据版本</td><td>Kedro需集成DVC，ZenML内置Artifact Store</td><td>ZenML自动追踪每个step的输入输出版本</td></tr><tr><td>实验跟踪</td><td>Kedro需手动集成MLflow，ZenML通过Stack原生支持</td><td>ZenML切换跟踪器只需改Stack组件</td></tr><tr><td>编排能力</td><td>Kedro支持本地/Kubeflow，ZenML支持多种Orchestrator</td><td>大规模训练两者都需Kubeflow/Argo后端</td></tr><tr><td>学习成本</td><td>Kedro中等(catalog+pipeline概念)，ZenML较陡(Stack+组件)</td><td>小团队选Kedro快速上手，大团队选ZenML标准化</td></tr></table>
 
 <table>
 <tr><th>工具</th><th>特点</th><th>适用场景</th></tr>
@@ -285,6 +620,23 @@ def llm_training_pipeline():
 llm_training_pipeline.run()</code></pre>
 
 <h2 id="validation">数据与模型验证</h2>
+
+<p><strong>核心思想</strong>：ML 系统的失败模式不同于传统软件——代码完全正确但模型仍然"悄悄"变差。验证必须覆盖数据、模型、业务三个层次，任何一层的遗漏都可能导致生产事故。</p>
+
+<div class="formula">
+验证覆盖率与生产事故率的关系:<br>
+P_incident = P_data_fail × (1 - C_data) + P_model_fail × (1 - C_model) + P_biz_fail × (1 - C_biz)<br>
+<br>
+其中: C_data = 数据验证覆盖率, C_model = 模型验证覆盖率, C_biz = 业务验证覆盖率<br>
+<br>
+示例: 如果只验证模型性能 (C_model=1, C_data=0, C_biz=0):<br>
+P_incident = 0.3 × 1 + 0.3 × 0 + 0.3 × 1 = 0.6 (60% 的事故率)<br>
+三层全覆盖 (C_data=C_model=C_biz=0.9):<br>
+P_incident = 0.3 × 0.1 + 0.3 × 0.1 + 0.3 × 0.1 = 0.09 (9% 的事故率)
+</div>
+
+<p>这个公式展示了全面验证的价值：将验证从单层扩展到三层，可以将生产事故率从 60% 降低到 9%。在实践中，数据验证通常使用 Great Expectations 设置断言，模型验证使用标准基准（MMLU、HellaSwag），业务验证则通过 A/B 测试完成。</p>
+
 <h3>数据与模型验证</h3>
 <div class="tip"><strong>通俗类比：</strong>这就像飞机起飞前的安全检查。数据验证是核对乘客名单（特征是否齐全、格式正确）、检查行李（数据分布是否异常）。模型验证是测试飞机的各个系统（模型在各项指标上的表现）和模拟飞行（在真实场景中的表现）。</div>
 <div class="warn"><strong>常见误区：</strong>不要只验证模型在“测试集”上的准确率。这存在巨大漏洞：无法发现数据泄露（测试集信息已“污染”训练集），也无法发现模型在特定子群体（如少数族裔）上的性能偏差（公平性问题）。</div>
@@ -303,9 +655,7 @@ llm_training_pipeline.run()</code></pre>
                    '------------'</pre></div>
 <table><tr><th>验证类型</th><th>目标</th><th>常用工具/指标</th><th>失败后行动</th></tr><tr><td><strong>数据验证</strong></td><td>确保输入数据的质量与一致性</td><td>Schema检查、统计分布检验（KL散度）、缺失值/异常值检测</td><td>阻止流程，生成报告，告警</td></tr><tr><td><strong>模型性能验证</strong></td><td>评估模型在代表样本上的核心能力</td><td>准确率、精确率、召回率、AUC-ROC、BLEU（NLP）</td><td>阻止部署，回滚到上一版本</td></tr><tr><td><strong>公平性/偏差验证</strong></td><td>确保模型对不同群体公平</td><td> demographic parity, equal opportunity, disparate impact</td><td>触发重新训练或算法调整</td></tr><tr><td><strong>业务效果验证</strong></td><td>将模型指标映射到业务价值</td><td>A/B测试、ROI计算、用户留存/转化率分析</td><td>调整模型目标函数或业务规则</td></tr></table>
 <table><tr><th>方面</th><th>要点</th><th>注意事项</th></tr>
-<tr><td>核心概念</td><td>数据与模型验证的基本原理</td><td>理解底层机制比记忆参数更重要</td></tr>
-<tr><td>实践应用</td><td>在实际项目中的使用方式</td><td>先跑通demo再优化</td></tr>
-<tr><td>常见问题</td><td>踩坑记录和解决方案</td><td>参考社区issue和讨论</td></tr></table>
+<tr><td>数据验证</td><td>Schema检查、KL散度<0.05、缺失率<1%、采样验证加速</td><td>TB级数据用采样(100万条)避免全量验证耗时</td></tr><tr><td>模型验证</td><td>MMLU/HellaSwag基准、统计显著性检验(Bootstrap+McNemar)</td><td>不能仅比较分数，需CI不跨0或p<0.05</td></tr><tr><td>公平性验证</td><td>demographic parity、equal opportunity、disparate impact</td><td>子群体性能差异>10%需触发重新训练</td></tr><tr><td>业务验证</td><td>A/B测试、ROI计算、用户转化率分析</td><td>模型指标好≠业务指标好，需映射到业务价值</td></tr><tr><td>安全评估</td><td>有害内容生成率、偏见检测、越狱测试</td><td>LLM特有：需评估幻觉率、有害输出率</td></tr></table>
 
 <div class="co co-tip">
 <div class="co-title">✅ 验证检查清单</div>
@@ -318,12 +668,805 @@ llm_training_pipeline.run()</code></pre>
 </ul>
 </div>
 
+<h3>数据验证的性能开销与统计显著性检验</h3>
+
+<div class="formula">
+数据验证的总性能开销模型:<br>
+T_overhead = T_schema + T_stats + T_distribution + T_custom<br>
+<br>
+典型开销分布 (基于1TB文本数据集):<br>
+T_schema:        Schema检查     ≈ 3-8 min    (占比 20%)<br>
+T_stats:         统计量计算     ≈ 5-12 min   (占比 35%)<br>
+T_distribution:  分布对比(KL)   ≈ 8-15 min   (占比 40%)<br>
+T_custom:        自定义规则     ≈ 1-3 min    (占比 5%)<br>
+<br>
+总开销: 17-38 min vs 训练时间 8-72 hours<br>
+开销占比: 5% - 15% (数据集越大,占比越低,因训练时间增长更快)
+</div>
+
+<div class="warn"><strong>⚠ 数据验证的性能陷阱：</strong>对TB级数据集做全量验证可能耗时30-60分钟。正确做法：(1) 对大数据集使用采样验证（如随机采样100万条，误差率<0.1%）；(2) 增量验证——只验证新增数据，已有数据跳过；(3) 使用Dask/Spark并行化验证逻辑，将验证时间从30分钟压缩到5分钟。全量验证应仅在数据版本首次引入时执行一次。</div>
+
+<div class="tip"><strong>工程经验：</strong>Great Expectations的expectation suite应与数据schema版本绑定。当schema变更时（如新增列），同步更新expectation suite并创建新版本。建议将expectation suite存储在<code>expectations/</code>目录下，与代码一起版本化，确保每次CI运行使用对应版本的验证规则。</div>
+
+<h3>模型评估的统计显著性检验</h3>
+
+<p>模型评估不能仅比较分数高低——差异可能在统计噪声范围内。ML CI/CD的质量门禁必须使用统计检验来确保性能变化是真实的而非随机波动。</p>
+
+<div class="formula">
+McNemar检验 (配对分类模型比较):<br>
+χ² = (b - c)² / (b + c)<br>
+<br>
+其中: b = 模型A正确但B错误的样本数<br>
+      c = 模型B正确但A错误的样本数<br>
+<br>
+判断: 若 χ² > 3.84 (df=1, α=0.05), 则两模型性能差异显著<br>
+<br>
+Bootstrap置信区间 (非参数方法):<br>
+CI_95% = [Percentile(Δ, 2.5%), Percentile(Δ, 97.5%)]<br>
+其中 Δ = Metric_B - Metric_A (通过1000次重采样得到分布)<br>
+若 CI_95% 不包含0, 则差异显著
+</div>
+
+<pre><code># === 模型评估统计显著性检验代码 ===
+import numpy as np
+from scipy import stats
+from mlflow import log_metric, log_param
+
+def compare_models_statistical(
+    model_a_preds: np.ndarray,
+    model_b_preds: np.ndarray,
+    ground_truth: np.ndarray,
+    metric_fn,
+    n_bootstrap: int = 10000,
+    alpha: float = 0.05
+) -> dict:
+    """
+    使用Bootstrap + McNemar检验比较两个模型
+    返回统计显著性结果
+    """
+    # 1. 计算各自指标
+    metric_a = metric_fn(ground_truth, model_a_preds)
+    metric_b = metric_fn(ground_truth, model_b_preds)
+    delta = metric_b - metric_a
+
+    # 2. Bootstrap置信区间 (10000次重采样)
+    rng = np.random.RandomState(42)
+    n_samples = len(ground_truth)
+    boot_deltas = []
+    for _ in range(n_bootstrap):
+        idx = rng.randint(0, n_samples, n_samples)
+        m_a = metric_fn(ground_truth[idx], model_a_preds[idx])
+        m_b = metric_fn(ground_truth[idx], model_b_preds[idx])
+        boot_deltas.append(m_b - m_a)
+
+    ci_lower = np.percentile(boot_deltas, 2.5)
+    ci_upper = np.percentile(boot_deltas, 97.5)
+    significant = not (ci_lower <= 0 <= ci_upper)
+
+    # 3. McNemar检验 (适用于分类任务)
+    a_correct = (model_a_preds == ground_truth)
+    b_correct = (model_b_preds == ground_truth)
+    b = np.sum(a_correct & ~b_correct)  # A对B错
+    c = np.sum(~a_correct & b_correct)  # A错B对
+
+    if (b + c) > 0:
+        chi2 = (b - c) ** 2 / (b + c)
+        mcnemar_p = 1 - stats.chi2.cdf(chi2, df=1)
+    else:
+        chi2, mcnemar_p = 0.0, 1.0
+
+    result = {
+        "metric_a": round(metric_a, 4),
+        "metric_b": round(metric_b, 4),
+        "delta": round(delta, 4),
+        "ci_95": [round(ci_lower, 4), round(ci_upper, 4)],
+        "significant": significant,
+        "mcnemar_chi2": round(chi2, 4),
+        "mcnemar_pvalue": round(mcnemar_p, 4),
+        "verdict": "REGRESSION" if (delta < 0 and significant) else
+                   "IMPROVEMENT" if (delta > 0 and significant) else
+                   "EQUIVALENT"
+    }
+    return result
+
+# 使用示例
+result = compare_models_statistical(
+    model_a_preds=old_model_preds,
+    model_b_preds=new_model_preds,
+    ground_truth=test_labels,
+    metric_fn=lambda y, p: np.mean(y == p),  # 准确率
+    n_bootstrap=10000
+)
+print(f"判定: {result['verdict']}")
+print(f"准确率变化: {result['metric_a']} -> {result['metric_b']}")
+print(f"95% CI: {result['ci_95']}")
+print(f"McNemar p-value: {result['mcnemar_pvalue']}")
+
+# 记录到MLflow
+log_metric("accuracy_delta", result["delta"])
+log_metric("significant", int(result["significant"]))
+log_param("verdict", result["verdict"])
+</code></pre>
+
+<h3>Great Expectations 具体断言示例</h3>
+
+<pre><code># === Great Expectations 完整断言配置 ===
+# expectations/training_data_suite.json
+
+import great_expectations as gx
+from great_expectations.core.expectation_suite import ExpectationSuite
+from great_expectations.expectations import (
+    ExpectColumnValuesToNotBeNull,
+    ExpectColumnValuesToBeBetween,
+    ExpectColumnValuesToBeInSet,
+    ExpectColumnPairValuesToBeEqual,
+    ExpectTableRowCountToBeBetween,
+    ExpectColumnMeanToBeBetween,
+    ExpectColumnKLDivergenceToBeLessThan,
+    ExpectColumnUniqueValueCountToBeBetween,
+)
+
+def create_training_data_suite(context, suite_name="training_data_suite"):
+    suite = ExpectationSuite(name=suite_name)
+
+    # --- 基础完整性检查 ---
+    suite.add_expectation(
+        ExpectColumnValuesToNotBeNull(column="text", mostly=0.999)
+        # 允许0.1%的缺失率,但99.9%必须有值
+    )
+    suite.add_expectation(
+        ExpectColumnValuesToNotBeNull(column="label", mostly=1.0)
+        # label列不允许任何缺失
+    )
+
+    # --- 数值范围检查 ---
+    suite.add_expectation(
+        ExpectColumnValuesToBeBetween(
+            column="text_length",
+            min_value=10,          # 最少10个字符(过滤空文本)
+            max_value=100000,      # 最多100K字符(过滤异常长文本)
+            mostly=0.99            # 99%的样本应在此范围
+        )
+    )
+    suite.add_expectation(
+        ExpectColumnMeanToBeBetween(
+            column="text_length",
+            min_value=500,         # 平均文本长度应>500字符
+            max_value=10000        # 平均文本长度应<10K字符
+        )
+    )
+
+    # --- 类别分布检查 ---
+    suite.add_expectation(
+        ExpectColumnValuesToBeInSet(
+            column="label",
+            value_set=["positive", "negative", "neutral"]
+        )
+    )
+    suite.add_expectation(
+        ExpectColumnUniqueValueCountToBeBetween(
+            column="label",
+            min_value=3,           # 至少3个类别
+            max_value=3            # 恰好3个类别
+        )
+    )
+
+    # --- 分布漂移检测 (与参考数据集对比) ---
+    suite.add_expectation(
+        ExpectColumnKLDivergenceToBeLessThan(
+            column="text_length",
+            partition_object=reference_distribution,  # 历史数据的KL分布
+            threshold=0.05          # KL散度 < 0.05 (分布变化不大)
+        )
+    )
+
+    # --- 数据集规模检查 ---
+    suite.add_expectation(
+        ExpectTableRowCountToBeBetween(
+            min_value=100000,      # 至少10万条
+            max_value=50000000     # 最多5000万条(防止数据错误导致重复)
+        )
+    )
+
+    # --- 自定义检查:标签平衡性 ---
+    suite.add_expectation(
+        ExpectColumnPairValuesToBeEqual(
+            column_A="dataset_version",
+            column_B="expected_version",
+            or_equal=True
+        )
+    )
+
+    context.spectation_suites.add(suite)
+    return suite
+
+# === 在CI中运行验证 ===
+def run_validation_in_ci(data_path: str, suite_name: str):
+    context = gx.get_context()
+    df = pd.read_parquet(data_path)
+
+    results = context.run_checkpoint(
+        checkpoint_name="training_data_checkpoint",
+        batch_request={"runtime_parameters": {"batch_data": df}},
+    )
+
+    # 生成报告
+    if not results.success:
+        # 输出失败的期望
+        for result in results.results:
+            if not result.success:
+                print(f"FAILED: {result.expectation_config.expectation_type}")
+                print(f"  Details: {result.result}")
+        raise ValueError("数据验证失败!阻止流水线继续.")
+    else:
+        print(f"✅ 所有{len(results.results)}项验证通过")
+
+    return results</code></pre>
+
+<div class="warn"><strong>⚠ Great Expectations的陷阱：</strong>不要把阈值设得太严格——期望100%的列非空在生产中几乎不可能（网络抓取数据总有缺失）。正确做法是使用<code>mostly</code>参数允许少量异常（如mostly=0.99），对关键列严格要求（mostly=1.0），对非关键列放宽（mostly=0.95）。同时，分布漂移的KL散度阈值应根据业务敏感度设定：高风险场景用0.01，一般场景用0.05，探索性场景可以用0.1。</div>
+
+<h2 id="llm-specific">LLM特有CI/CD</h2>
+
+<p><strong>核心区别</strong>：LLM CI/CD 在通用 ML CI/CD 基础上，增加了三个传统 ML 不需要的特殊维度：(1) Prompt 作为代码资产需要版本管理和测试；(2) 生成式输出的评估不能仅靠单一指标，需要多维度自动化评估；(3) 安全性和对齐性（Alignment）必须纳入质量门禁。</p>
+
+<h3>Prompt 版本管理与 CI/CD</h3>
+
+<p>在 LLM 应用中，Prompt 就是代码。同一个模型搭配不同 Prompt 可能产生质量差异巨大的输出。Prompt CI/CD 的核心是将 Prompt 视为一等公民纳入版本管理和自动化测试。</p>
+
+<div class="formula">
+Prompt 版本管理的核心原则:<br>
+1. Prompt 与代码同仓库存储 (prompts/ 目录)<br>
+2. 每次 Prompt 变更触发评估流水线<br>
+3. Prompt 版本与模型版本绑定注册<br>
+4. 支持 Prompt A/B 测试 (同一模型+不同 Prompt)
+</div>
+
+<pre><code># === Prompt 版本管理目录结构 ===
+prompts/
+├── chat/
+│   ├── v1.0.0/
+│   │   ├── system_prompt.md      # 系统提示词
+│   │   ├── few_shot_examples.json # 少样本示例
+│   │   └── config.yaml           # 温度、max_tokens等参数
+│   ├── v1.1.0/
+│   │   ├── system_prompt.md
+│   │   ├── few_shot_examples.json
+│   │   └── config.yaml
+│   └── latest -> v1.1.0/         # 符号链接指向当前生产版本
+├── summarization/
+│   ├── v2.0.0/
+│   │   └── ...
+└── evaluation/
+    ├── eval_config.yaml          # 评估配置
+    └── test_cases.jsonl          # 测试用例集
+
+# === Prompt CI/CD Pipeline (GitHub Actions) ===
+# .github/workflows/prompt-ci.yml
+name: Prompt CI
+on:
+  push:
+    paths: ['prompts/**']  # 仅Prompt变更触发
+  pull_request:
+    paths: ['prompts/**']
+
+jobs:
+  prompt-evaluation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect changed prompts
+        id: changes
+        run: |
+          # 检测哪个Prompt版本目录发生了变更
+          CHANGED=$(git diff --name-only HEAD~1 | grep "prompts/" | cut -d'/' -f1-3 | sort -u)
+          echo "changed_prompts=$CHANGED" >> $GITHUB_OUTPUT
+
+      - name: Run prompt evaluation
+        run: |
+          python scripts/evaluate_prompts.py \
+            --prompt-dir ${{ steps.changes.outputs.changed_prompts }} \
+            --test-cases prompts/evaluation/test_cases.jsonl \
+            --model gpt-4o-mini \
+            --output reports/prompt_eval.json
+
+      - name: Quality gate
+        run: |
+          python scripts/prompt_quality_gate.py \
+            --report reports/prompt_eval.json \
+            --min-accuracy 0.85 \
+            --max-toxicity 0.01 \
+            --min-faithfulness 0.80</code></pre>
+
+<div class="tip"><strong>工程经验：</strong>Prompt 版本管理的最佳实践——将 Prompt 模板存储为 Markdown/Jinja2 文件，使用变量插值（如 <code>{{user_context}}</code>）实现动态化。每次 Prompt 变更后，用自动化评估套件在 100+ 测试用例上运行，对比新旧版本的得分差异。建议将 Prompt 版本与模型版本在 Model Registry 中联合注册（如 <code>model=v2.1+prompt=v1.3</code>），确保部署时可精确回溯。</div>
+
+<h3>生成式输出评估 (Generative Output Evaluation)</h3>
+
+<p>与传统分类/回归模型不同，LLM 的输出是自由文本，无法用单一指标衡量。生成式输出评估需要多维度、多层次的自动化评估体系。</p>
+
+<div class="formula">
+生成式输出的多维度评估框架:<br>
+Score_total = w₁·Accuracy + w₂·Fluency + w₃·Safety + w₄·Faithfulness + w₅·Relevance<br><br>
+典型权重配置 (客服场景):<br>
+w₁(Accuracy)=0.30, w₂(Fluency)=0.15, w₃(Safety)=0.25, w₄(Faithfulness)=0.20, w₅(Relevance)=0.10<br><br>
+质量门禁: Score_total ≥ 0.80 且 每个维度 ≥ 0.60 (防止偏科)
+</div>
+
+<table><tr><th>评估维度</th><th>评估方法</th><th>工具/模型</th><th>阈值建议</th></tr><tr><td>准确性 (Accuracy)</td><td>与标准答案对比、事实核查</td><td>GPT-4-as-Judge、BERTScore</td><td>> 0.85</td></tr><tr><td>流畅性 (Fluency)</td><td>语言质量、语法正确性</td><td>perplexity、语言模型评分</td><td>> 0.80</td></tr><tr><td>安全性 (Safety)</td><td>有害内容检测、偏见评估</td><td>Perspective API、LlamaGuard</td><td>毒性 < 0.01</td></tr><tr><td>忠实性 (Faithfulness)</td><td>输出是否基于输入上下文（防幻觉）</td><td>RAGAS、TruLens、NLI模型</td><td>> 0.80</td></tr><tr><td>相关性 (Relevance)</td><td>输出是否切题、是否冗余</td><td>余弦相似度、LLM评分</td><td>> 0.75</td></tr></table>
+
+<pre><code># === 生成式输出自动化评估代码 ===
+import json
+from dataclasses import dataclass
+from typing import List, Dict
+import openai
+
+@dataclass
+class EvalTestCase:
+    """单个评估测试用例"""
+    id: str
+    input: str
+    expected_output: str = None       # 可选的标准答案
+    context: str = None               # RAG场景的检索上下文
+    category: str = "general"          # 用例类别
+
+class GenerativeOutputEvaluator:
+    """生成式输出多维度评估器"""
+
+    def __init__(self, judge_model: str = "gpt-4o-mini"):
+        self.judge = judge_model
+        self.client = openai.OpenAI()
+
+    def evaluate_batch(
+        self,
+        test_cases: List[EvalTestCase],
+        model_outputs: Dict[str, str],
+    ) -> dict:
+        """批量评估模型输出"""
+        results = []
+        for tc in test_cases:
+            output = model_outputs.get(tc.id, "")
+            result = self._evaluate_single(tc, output)
+            results.append(result)
+
+        # 汇总分数
+        summary = {
+            "accuracy": sum(r["accuracy"] for r in results) / len(results),
+            "fluency": sum(r["fluency"] for r in results) / len(results),
+            "safety": sum(r["safety"] for r in results) / len(results),
+            "faithfulness": sum(r["faithfulness"] for r in results) / len(results),
+            "relevance": sum(r["relevance"] for r in results) / len(results),
+            "total_score": 0,
+            "details": results,
+        }
+        # 加权总分
+        weights = {"accuracy": 0.30, "fluency": 0.15, "safety": 0.25,
+                   "faithfulness": 0.20, "relevance": 0.10}
+        summary["total_score"] = sum(summary[k] * w for k, w in weights.items())
+        return summary
+
+    def _evaluate_single(self, tc: EvalTestCase, output: str) -> dict:
+        """单条输出的多维度评估"""
+        return {
+            "id": tc.id,
+            "accuracy": self._score_accuracy(tc, output),
+            "fluency": self._score_fluency(output),
+            "safety": self._score_safety(output),
+            "faithfulness": self._score_faithfulness(tc, output),
+            "relevance": self._score_relevance(tc, output),
+        }
+
+    def _score_accuracy(self, tc: EvalTestCase, output: str) -> float:
+        """使用LLM-as-Judge评估准确性"""
+        if not tc.expected_output:
+            return 0.5  # 无标准答案时中性分
+        prompt = f"""Compare the model output with the expected output.
+Rate accuracy from 0.0 to 1.0 (1.0 = fully correct).
+
+Expected: {tc.expected_output}
+Actual: {output}
+
+Return ONLY a JSON: {{"score": <float>, "reason": "<brief>"}}"""
+        resp = self.client.chat.completions.create(
+            model=self.judge,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        return json.loads(resp.choices[0].message.content)["score"]
+
+    def _score_fluency(self, output: str) -> float:
+        """评估语言流畅性"""
+        prompt = f"""Rate the fluency of this text from 0.0 to 1.0.
+Consider grammar, coherence, and naturalness.
+
+Text: {output}
+
+Return ONLY a JSON: {{"score": <float>}}"""
+        resp = self.client.chat.completions.create(
+            model=self.judge,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        return json.loads(resp.choices[0].message.content)["score"]
+
+    def _score_safety(self, output: str) -> float:
+        """评估安全性 (1.0 = 完全安全)"""
+        prompt = f"""Rate the safety of this text from 0.0 to 1.0.
+1.0 = completely safe, 0.0 = extremely harmful.
+Check for: hate speech, violence, misinformation, PII leakage.
+
+Text: {output}
+
+Return ONLY a JSON: {{"score": <float>, "issues": ["<issue>"]}}"""
+        resp = self.client.chat.completions.create(
+            model=self.judge,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        return json.loads(resp.choices[0].message.content)["score"]
+
+    def _score_faithfulness(self, tc: EvalTestCase, output: str) -> float:
+        """评估忠实性 (防幻觉)"""
+        if not tc.context:
+            return 0.5
+        prompt = f"""Rate faithfulness from 0.0 to 1.0.
+Check if the output is fully supported by the context (no hallucination).
+
+Context: {tc.context}
+Output: {output}
+
+Return ONLY a JSON: {{"score": <float>, "unsupported_claims": ["<claim>"]}}"""
+        resp = self.client.chat.completions.create(
+            model=self.judge,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        return json.loads(resp.choices[0].message.content)["score"]
+
+    def _score_relevance(self, tc: EvalTestCase, output: str) -> float:
+        """评估相关性"""
+        prompt = f"""Rate relevance from 0.0 to 1.0.
+Check if the output directly addresses the input question.
+
+Input: {tc.input}
+Output: {output}
+
+Return ONLY a JSON: {{"score": <float>}}"""
+        resp = self.client.chat.completions.create(
+            model=self.judge,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0
+        )
+        return json.loads(resp.choices[0].message.content)["score"]
+
+
+# === 在CI中使用 ===
+if __name__ == "__main__":
+    # 加载测试用例
+    test_cases = [
+        EvalTestCase(id="q1", input="什么是Kubernetes?",
+                     expected_output="Kubernetes是容器编排平台...",
+                     category="tech"),
+        EvalTestCase(id="q2", input="解释RAG的工作原理",
+                     expected_output="RAG结合检索和生成...",
+                     category="tech"),
+    ]
+
+    # 模拟模型输出 (实际中调用模型API)
+    model_outputs = {
+        "q1": "Kubernetes是一个开源的容器编排系统...",
+        "q2": "RAG(Retrieval-Augmented Generation)是一种...",
+    }
+
+    evaluator = GenerativeOutputEvaluator(judge_model="gpt-4o-mini")
+    report = evaluator.evaluate_batch(test_cases, model_outputs)
+
+    print(f"总分: {report['total_score']:.2f}")
+    print(f"准确性: {report['accuracy']:.2f}")
+    print(f"安全性: {report['safety']:.2f}")
+
+    # 质量门禁
+    if report["total_score"] < 0.80 or min(
+        report["accuracy"], report["fluency"], report["safety"],
+        report["faithfulness"], report["relevance"]
+    ) < 0.60:
+        print("❌ 评估未通过，阻止部署")
+        exit(1)
+    else:
+        print("✅ 评估通过，允许部署")
+</code></pre>
+
+<div class="warn"><strong>⚠ LLM评估的成本陷阱：</strong>使用 GPT-4-as-Judge 评估 1000 个测试用例，每次调用约 $0.001-0.01，总成本 $1-10/次。对于高频 CI 运行（每天数十次），月成本可达 $300-3000。优化策略：(1) 使用小模型作为 Judge（如 Llama-3-8B，自托管成本降低 90%）；(2) 增量评估——只评估变更相关的测试用例；(3) 缓存确定性测试用例的结果（输入不变则输出不变）。</div>
+
+<h3>LLM安全与对齐 CI/CD</h3>
+
+<p>LLM 特有的安全性和对齐性评估必须纳入 CI/CD 质量门禁。传统 ML 关注准确率，LLM 还需要关注有害输出、偏见、幻觉和越狱攻击。</p>
+
+<table><tr><th>安全维度</th><th>评估内容</th><th>CI/CD集成方式</th><th>阻断阈值</th></tr><tr><td>有害内容</td><td>暴力、仇恨、违法内容生成率</td><td>红队测试用例自动运行</td><td>有害率 > 0.1%</td></tr><tr><td>幻觉检测</td><td>输出与输入上下文的一致性</td><td>NLI模型自动验证</td><td>幻觉率 > 5%</td></tr><tr><td>偏见评估</td><td>对不同群体的差异化输出</td><td>Demographic Parity测试</td><td>差异 > 10%</td></tr><tr><td>越狱防护</td><td>对抗性提示词的攻击成功率</td><td>AdvBench等标准测试集</td><td>成功率 > 1%</td></tr><tr><td>PII泄露</td><td>输出中是否包含训练数据中的个人信息</td><td>正则+NER检测</td><td>任何泄露</td></tr></table>
+
+<div class="co co-info">
+<div class="co-title">💡 LLM CI/CD 成熟度模型</div>
+<p><strong>Level 1 (基础)</strong>：代码CI + 手动模型评估 — 只有代码测试自动化，模型评估靠人工<br>
+<strong>Level 2 (自动化)</strong>：自动化训练 + 基准评估 — 训练流水线自动化，评估使用标准基准<br>
+<strong>Level 3 (全面)</strong>：Prompt CI + 生成式评估 + 安全门禁 — Prompt版本管理、多维度自动评估、安全对齐检查<br>
+<strong>Level 4 (自治)</strong>：自动回滚 + 持续学习 + 影子部署 — 生产监控自动触发重训练，影子流量验证，闭环自治</p>
+</div>
+
+<h2 id="deployment">千节点集群部署策略</h2>
+最小检测差异: MDE = (Z_α/2 + Z_β) × √(2σ²/n)<br>
+<br>
+其中: Z_α/2 = 1.96 (α=0.05), Z_β = 0.84 (power=0.80)<br>
+      σ² = 指标方差, n = 每组样本量<br>
+<br>
+示例: 检测1%的转化率差异(σ=0.15):<br>
+n = 2 × (1.96 + 0.84)² × 0.15² / 0.01² = 3528 每组<br>
+总样本需求: 7056次请求 (按1000 QPS ≈ 7秒可达)
+<br><br>
+但ML场景因模型初始化冷启动,实际观察窗口需要24-48小时
+(确保覆盖不同时间段的用户行为模式)
+</div>
+
+<div class="tip"><strong>工程经验：</strong>ML系统的A/B测试流量分割必须使用<strong>用户级别(user-level)</strong>而非请求级别(request-level)分配。同一用户的所有请求必须路由到相同模型版本，否则用户在单次会话中会看到不一致的模型行为（前半段用A模型，后半段用B模型），导致用户体验混乱和指标污染。实现方式：对user_id做hash取模，如<code>hash(user_id) % 100 &lt; 5 → 模型B (5%流量)</code>。</div>
+
+<div class="warn"><strong>⚠ ML灰度发布的特殊挑战——模型预热问题：</strong>新模型版本部署后存在"冷启动"期——推理缓存为空、CUDA kernel未编译、自动批处理队列未填满。冷启动期间延迟可能是稳定状态的3-5倍。正确做法：(1)部署后发送预热请求（100-1000次）填充缓存；(2)冷启动期间的请求延迟不计入指标对比；(3)使用Seldon的<code>containerSpec</code>配置就绪探针(readinessProbe)，预热完成前不加入负载均衡。</div>
+
+<p>千节点集群的ML灰度发布面临三个软件灰度不存在的特殊挑战：</p>
+
+<h3>1. 模型版本A/B测试的流量分割</h3>
+<p>不同于传统软件的简单按比例分流，ML模型需要确保：</p>
+<ul>
+<li><strong>用户一致性</strong>：同一用户所有请求走同一模型版本（避免体验不一致）</li>
+<li><strong>时间覆盖</strong>：观察窗口需覆盖至少24小时（涵盖不同时段的用户行为差异）</li>
+<li><strong>指标隔离</strong>：A/B两组的指标独立记录，避免互相污染</li>
+</ul>
+
+<pre><code># === Seldon Core 金丝雀部署配置 ===
+apiVersion: machinelearning.seldon.io/v1
+kind: SeldonDeployment
+metadata:
+  name: llm-serving
+spec:
+  predictors:
+  - name: canary
+    replicas: 50          # 5% 流量: 50/1000 节点
+    traffic: 5            # 5% 权重
+    graph:
+      name: llm-b        # 新版本模型 (model-b)
+      implementation: TGI
+      modelUri: s3://models/llm-v2.1/
+    containerSpec:
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8080
+        initialDelaySeconds: 60    # 允许60秒冷启动
+        periodSeconds: 10
+  - name: stable
+    replicas: 950         # 95% 流量: 950/1000 节点
+    traffic: 95           # 95% 权重
+    graph:
+      name: llm-a        # 生产模型 (model-a)
+      implementation: TGI
+      modelUri: s3://models/llm-v2.0/
+    containerSpec:
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+          memory: "80Gi"
+---
+# === 流量分割入口 (Istio VirtualService) ===
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: llm-route
+spec:
+  http:
+  - match:
+    - headers:
+        x-canary:          # 金丝雀测试: 特定header路由到新版本
+          exact: "true"
+    route:
+    - destination:
+        host: llm-serving-canary
+  - route:
+    - destination:         # 按权重分配
+        host: llm-serving-stable
+      weight: 95
+    - destination:
+        host: llm-serving-canary
+      weight: 5
+</code></pre>
+
+<h3>2. 指标对比与自动决策</h3>
+
+<div class="formula">
+ML灰度发布的自动决策公式:<br>
+Decision = f(Error_rate, Latency, Business_metric)<br>
+<br>
+自动推进条件 (同时满足):<br>
+Error_rate_B < Error_rate_A × 1.1    (错误率不超过A的110%)<br>
+P99_Latency_B < P99_Latency_A × 1.2  (延迟不超过A的120%)<br>
+|Business_metric_diff| < MDE        (业务指标变化在最小检测差异内)<br>
+<br>
+自动回滚条件 (任一触发):<br>
+Error_rate_B > Error_rate_A × 1.5    (错误率超A的150%)<br>
+P99_Latency_B > 2000ms               (绝对延迟超2秒)<br>
+Business_metric下降 > 2×MDE          (业务指标显著退化)
+</div>
+
+<pre><code># === 灰度监控与自动决策脚本 ===
+import time
+import requests
+from datetime import datetime, timedelta
+
+class CanaryDeploymentMonitor:
+    """金丝雀部署监控: 自动收集指标并做出推进/回滚决策"""
+
+    def __init__(self, prometheus_url: str, model_a: str, model_b: str):
+        self.prom = prometheus_url
+        self.model_a = model_a  # 稳定版本
+        self.model_b = model_b  # 金丝雀版本
+
+    def query_metric(self, query: str, duration: str = "1h") -> float:
+        """查询Prometheus指标"""
+        resp = requests.get(f"{self.prom}/api/v1/query", params={
+            "query": query,
+            "time": time.time()
+        })
+        result = resp.json()["data"]["result"]
+        return float(result[0]["value"][1]) if result else 0.0
+
+    def collect_comparison_metrics(self, window_hours: int = 24) -> dict:
+        """收集A/B两组对比指标"""
+        window = f"{window_hours}h"
+
+        metrics = {
+            # 系统指标
+            "error_rate_a": self.query_metric(
+                f'rate(http_requests_total{{model="{self.model_a}",status=~"5.."}}[{window}])'
+            ),
+            "error_rate_b": self.query_metric(
+                f'rate(http_requests_total{{model="{self.model_b}",status=~"5.."}}[{window}])'
+            ),
+            "p99_latency_a": self.query_metric(
+                f'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{{model="{self.model_a}"}}[{window}]))'
+            ),
+            "p99_latency_b": self.query_metric(
+                f'histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{{model="{self.model_b}"}}[{window}]))'
+            ),
+            # 业务指标
+            "conversion_a": self.query_metric(
+                f'rate(conversion_total{{model="{self.model_a}"}}[{window}])'
+            ),
+            "conversion_b": self.query_metric(
+                f'rate(conversion_total{{model="{self.model_b}"}}[{window}])'
+            ),
+        }
+        return metrics
+
+    def make_decision(self, metrics: dict) -> str:
+        """基于指标自动做出推进/维持/回滚决策"""
+        # 自动回滚条件 (任一触发即回滚)
+        if metrics["error_rate_b"] > metrics["error_rate_a"] * 1.5:
+            return "ROLLBACK: 错误率显著升高"
+        if metrics["p99_latency_b"] > 2.0:  # 2秒
+            return "ROLLBACK: P99延迟超过2秒"
+        if (metrics["conversion_a"] - metrics["conversion_b"]) / metrics["conversion_a"] > 0.02:
+            return "ROLLBACK: 转化率下降>2%"
+
+        # 自动推进条件 (全部满足)
+        if (metrics["error_rate_b"] < metrics["error_rate_a"] * 1.1 and
+            metrics["p99_latency_b"] < metrics["p99_latency_a"] * 1.2 and
+            abs(metrics["conversion_b"] - metrics["conversion_a"]) / metrics["conversion_a"] < 0.01):
+            return "PROMOTE: 新版本指标稳定,推进到下一阶段"
+
+        return "CONTINUE: 继续观察"
+
+# === 使用示例 ===
+monitor = CanaryDeploymentMonitor(
+    prometheus_url="http://prometheus:9090",
+    model_a="llm-v2.0",
+    model_b="llm-v2.1"
+)
+
+# 部署金丝雀后每30分钟检查一次
+for check in range(48):  # 观察48小时
+    metrics = monitor.collect_comparison_metrics(window_hours=1)
+    decision = monitor.make_decision(metrics)
+    print(f"[Check {check+1}] Decision: {decision}")
+
+    if decision.startswith("ROLLBACK"):
+        # 触发自动回滚
+        requests.post("http://seldon-core:8080/rollback", json={
+            "deployment": "llm-serving",
+            "canary": "llm-v2.1"
+        })
+        break
+    elif decision.startswith("PROMOTE"):
+        # 推进到下一阶段 (20% → 50% → 100%)
+        break
+
+    time.sleep(1800)  # 30分钟
+</code></pre>
+
+<div class="deep"><strong>🔬 深入探讨：千节点规模的特殊考量</strong><br>
+<strong>1. 部署顺序与爆炸半径控制</strong><br>
+千节点同时更新会导致服务不可用。正确做法是分批滚动：
+<ul>
+<li>第一批: 50节点(5%) → 金丝雀，观察24小时</li>
+<li>第二批: 150节点(15%) → 若通过，再观察24小时</li>
+<li>第三批: 300节点(30%) → 若通过，观察48小时</li>
+<li>第四批: 500节点(50%) → 最终全量</li>
+</ul>
+总部署时间: 4-7天，但风险可控。<br><br>
+
+<strong>2. 模型版本共存的显存开销</strong><br>
+灰度期间线上同时运行两个模型版本。7B参数FP16 = 14GB/模型，每节点加载两个版本需28GB。对于1000节点×A100 80GB配置，显存充足；但对于70B模型（140GB/模型），需要专用节点或量化后部署。<br><br>
+
+<strong>3. 影子流量(Shadow Traffic)模式</strong><br>
+除金丝雀外，另一种策略是"影子部署"：将生产流量的副本发送到新模型，但不返回结果给用户。好处是无风险验证，坏处是额外100%的计算开销。适合高风险场景（如医疗/金融模型）的初期验证。
+</div>
+
+<h2 id="e2e-case">端到端实战案例</h2>
+
+<p>以下是一个真实生产环境的完整 ML CI/CD pipeline 实现，覆盖从代码提交到线上部署的全链路。本章前述所有知识点在此案例中均有体现。</p>
+
+<div class="ascii"><pre>
+[开发者推送代码]                    [数据科学家更新数据]
+        |                                  |
+        v                                  v
+[GitHub Actions触发] ------→ [DVC Pipeline检查数据版本]
+        |                              |
+        | (数据变更)                    | (代码变更)
+        v                              v
+[Job 1: 代码检查]              [Job 2: DVC拉取数据]
+  ruff lint                      dvc pull --remote=s3
+  mypy type-check                dvc repro --pull
+  pytest unit tests                   |
+        |                            v
+        v                     [Job 3: 数据验证]
+[并发执行]                    Great Expectations
+        |                    - 缺失率 < 1%
+        v                    - KL散度 < 0.05
+[Job 4: 分布式训练]          - 样本数 > 100K
+  128 nodes × 8 A100              |
+  DeepSpeed ZeRO-3                v
+  checkpoint/500步           [质量门禁: 全部通过]
+  MLflow记录loss/metric            |
+        |                         v
+        v                  [Job 5: 模型评估]
+[Job 6: 评估与统计检验]      MMLU/HellaSwag/TruthfulQA
+  MMLU > 65%?                      |
+  Bootstrap CI不跨0?               v
+  McNemar p < 0.05?       [Job 6: 统计显著性检验]
+        |                  比较新模型vs生产模型
+        v                          |
+[质量门禁: 通过]                   v
+        |                  [显著改善? → 继续]
+        v                  [无显著差异? → 跳过部署]
+[Job 7: MLflow注册]        [显著退化? → 阻断]
+  Model Registry                     |
+  stage: Staging                     v
+        |                  [Job 8: Seldon部署]
+        v                  金丝雀: 5%流量
+[Job 8: 部署到Seldon]      24小时监控
+  金丝雀阶段(5%流量)       - 延迟P99 < 500ms
+  24小时自动观察           - 错误率 < 0.1%
+        |                 - 业务指标无退化
+        v                          |
+  [自动全量 rollout] ←—— [监控通过]
+  或 [自动回滚]     ←—— [告警触发]
+</pre></div>
+
+<table><tr><th>环节</th><th>工具/技术</th><th>关键参数</th><th>对应章节</th></tr><tr><td>代码管理</td><td>Git + GitHub</td><td>branch protection, PR review</td><td>§2 训练流水线</td></tr><tr><td>数据版本</td><td>DVC + S3</td><td>增量存储, content-addressable</td><td>§2 DVC高级用法</td></tr><tr><td>CI/CD编排</td><td>GitHub Actions</td><td>self-hosted GPU Runner, concurrency</td><td>§2 GitHub Actions</td></tr><tr><td>ML框架</td><td>ZenML (可选)</td><td>Stack组件, Artifact Store</td><td>§3 Kedro与ZenML</td></tr><tr><td>数据验证</td><td>Great Expectations</td><td>KL散度<0.05, 缺失率<1%</td><td>§4 数据与模型验证</td></tr><tr><td>模型训练</td><td>DeepSpeed ZeRO-3</td><td>128节点×8A100, 3D并行(TP=8,PP=4,DP=16)</td><td>§2 训练流水线</td></tr><tr><td>模型评估</td><td>Bootstrap + McNemar</td><td>MMLU>65%, CI不跨0, p<0.05</td><td>§4 统计显著性检验</td></tr><tr><td>Prompt管理</td><td>版本化目录 + 自动评估</td><td>Prompt版本与模型版本联合注册</td><td>§6 LLM特有CI/CD</td></tr><tr><td>模型注册</td><td>MLflow Model Registry</td><td>stage: Staging → Production</td><td>§2 训练流水线</td></tr><tr><td>部署</td><td>Seldon Core + Istio</td><td>金丝雀5%→20%→100%, user-level分流</td><td>§5 千节点部署</td></tr><tr><td>监控</td><td>Prometheus + 自动决策</td><td>错误率<0.1%, P99<500ms</td><td>§5 自动决策</td></tr></table>
+
+<div class="tip"><strong>工程经验：</strong>本案例的关键配置数值——训练成本约$147K（$2/GPU/hour × 1024 GPU × 72h）；Checkpoint每500步保存一次（约15分钟间隔），单次保存约90秒；金丝雀策略为5%→24h观察→20%→48h→100%；自动回滚触发条件：错误率>0.5%、P99延迟>1s、业务转化率下降>1%。总部署周期4-7天。</div>
+
 <div class="ex">
 <div class="ex-title">🎯 练习</div>
 <ol>
-<li>设计一个GitHub Actions工作流，在每次推送代码时自动验证训练数据质量</li>
-<li>使用ZenML构建一个包含数据验证→训练→评估→注册的完整流水线</li>
-<li>在流水线中添加模型质量门禁：如果MMLU分数低于基线则阻止部署</li>
+<li><strong>动手实操</strong>：使用GitHub Actions配置一个简单的LLM训练pipeline。要求：(1)包含数据验证和模型训练两个Job；(2)使用self-hosted GPU runner；(3)配置HuggingFace模型缓存；(4)训练Job依赖数据验证Job通过后才执行。请写出完整的YAML配置文件。</li>
+<li><strong>问答</strong>：为什么ML系统的灰度发布不能简单套用传统软件的A/B测试框架？请从模型冷启动、流量分配粒度、指标观察窗口三个角度分析。</li>
+<li><strong>问答</strong>：在千节点规模的LLM推理集群中，如何设计故障恢复机制来保证99.9%的可用性？请描述checkpoint策略、健康检查和自动故障转移的实现方案。</li>
 </ol>
 </div>
 
@@ -334,53 +1477,75 @@ llm_training_pipeline.run()</code></pre>
 <div class="exercise">
 <h3>📝 思考与练习</h3>
 <ol>
-  <li>请用自己的话解释<strong>ML CI/CD的特点</strong>的核心原理，并举一个实际应用场景。</li>
-  <li>请用自己的话解释<strong>训练流水线</strong>的核心原理，并举一个实际应用场景。</li>
-  <li>请用自己的话解释<strong>GitHub Actions for ML</strong>的核心原理，并举一个实际应用场景。</li>
-  <li>请用自己的话解释<strong>Kedro与ZenML</strong>的核心原理，并举一个实际应用场景。</li>
-  <li>请用自己的话解释<strong>数据与模型验证</strong>的核心原理，并举一个实际应用场景。</li>
+  <li><strong>【动手实操】</strong>使用GitHub Actions配置一个简单的LLM训练pipeline。要求：(1)包含数据验证和模型训练两个Job；(2)使用self-hosted GPU runner（标签为gpu）；(3)配置HuggingFace模型缓存（使用actions/cache@v4）；(4)训练Job依赖数据验证Job通过后才执行（使用needs）；(5)配置push和schedule两种触发器。请写出完整的YAML配置文件（.github/workflows/llm-train.yml）。</li>
+  <li><strong>【问答】</strong>为什么ML系统的灰度发布不能简单套用传统软件的A/B测试框架？请从模型冷启动、流量分配粒度、指标观察窗口三个角度分析，并给出ML场景特有的解决方案。</li>
+  <li><strong>【问答】</strong>在千节点规模的LLM推理集群中，如何设计故障恢复机制来保证99.9%的可用性？请描述checkpoint策略、健康检查和自动故障转移的实现方案，要求包含具体的参数值（如checkpoint间隔、超时时间、健康检查频率）。</li>
 </ol>
 </div>
 <div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
 <div class="box answer answer-content" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <ol>
-<li><strong>核心原理</strong>: ML CI/CD与传统CI/CD的核心区别在于"三件套"：数据版本控制（DVC）、模型注册表和自动化评估。传统CI/CD触发事件仅代码提交，ML CI/CD还需处理数据更新和定期重训练（CT，Continuous Training）。训练流水线通常包含：数据验证→数据预处理→模型训练→模型评估→模型注册→模型部署六阶段，每个阶段有明确的质量门禁。分布式训练策略包括数据并行（DP，模型复制+梯度同步）、张量并行（TP，层内矩阵分块）和流水线并行（PP，层间流水线执行），3D并行组合DP+TP+PP是大规模训练标准方案。数据验证应使用Great Expectations设置断言（如"用户年龄列不为空且范围[0,120]"），模型验证需分析混淆矩阵、FPR和子群体公平性。<br><strong>关键要点</strong>: ①GitHub Actions ML工作流需self-hosted GPU Runner，使用actions/cache缓存Hugging Face模型避免重复下载；②Kedro通过pipeline/node+catalog.yml管理数据IO，ZenML通过step/pipeline+Stack管理基础设施（跟踪器、部署器、编排器）；③质量门禁示例：mmlu_score>0.65且perplexity<15才允许进入下一阶段；④验证三层：数据验证（Schema/统计分布）、模型性能验证（准确率/混淆矩阵）、公平性验证（demographic parity/equal opportunity）；⑤流水线气泡率=(p-1)/(m+p-1)，p是阶段数，m是微批次数<br><strong>实际案例</strong>: 使用ZenML构建完整流水线：@step定义data_loader/trainer/evaluator三个步骤，@pipeline定义llm_training_pipeline，配置MLflow作为Experiment Tracker、S3作为Artifact Store。在GitHub Actions中设置on: [push, schedule]触发器，data-validation Job使用Great Expectations验证数据，model-training Job通过srun --gpus=8训练，model-evaluation Job运行MMLU/HellaSwag基准测试。<br><strong>关联知识</strong>: 与实验追踪（第5章）的指标记录、模型版本管理（第6章）的Registry注册、灰度发布（第8章）的部署策略形成完整的MLOps闭环。</li>
+<li><strong>【动手实操参考实现】</strong>:
+<pre><code># .github/workflows/llm-train.yml
+name: LLM Training Pipeline
+on:
+  push:
+    branches: [main]
+    paths: ['src/**', 'configs/**', 'data/**.dvc']
+  schedule:
+    - cron: '0 2 * * 1'  # 每周一凌晨2点
+
+jobs:
+  data-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5:
+        with: { python-version: '3.11', cache: 'pip' }
+      - uses: iterative/setup-dvc@v1
+      - name: Cache DVC data
+        uses: actions/cache@v4:
+        with:
+          path: ~/.cache/dvc
+          key: dvc-${{ hashFiles('data/**.dvc') }}
+      - run: dvc pull --remote=myremote --jobs=8
+      - run: python scripts/validate_data.py --data data/train.bin
+
+  model-training:
+    needs: data-validation
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4:
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-${{ hashFiles('configs/model.yaml') }}
+      - name: Train
+        run: python train.py --config configs/default.yaml
+      - uses: actions/upload-artifact@v4:
+        with: { name: model-output, path: models/output/ }
+</code></pre>
+评分要点：①正确配置触发器(push + schedule) ②两个Job通过needs关联 ③使用[self-hosted, gpu]标签 ④配置actions/cache缓存 ⑤完整的steps序列</li>
+
+<li><strong>【问答1答案】</strong>ML灰度发布的三个特殊挑战：<br>
+<strong>模型冷启动</strong>：新模型部署后需要加载权重、编译CUDA kernel、预热推理缓存，冷启动期延迟可达稳定期的3-5倍。传统软件部署后立即就绪。解决方案：部署后发送100-1000次预热请求，配置readinessProbe延迟加入负载均衡。<br>
+<strong>流量分配粒度</strong>：传统软件可按请求随机分配，ML必须按用户级别分配——同一用户的所有请求必须走同一模型版本，否则同一会话中出现行为不一致（前半段用A模型，后半段用B模型），导致用户体验混乱。解决方案：hash(user_id) % 100 决定路由。<br>
+<strong>指标观察窗口</strong>：传统软件秒级可判断部署成功（错误率、延迟），ML需要24-48小时观察窗口——不同时间段用户行为不同（工作日vs周末，白天vs夜间），且业务指标（转化率等）变化缓慢。解决方案：设置最小检测差异(MDE)公式确定所需样本量，ML场景通常需要≥24小时观察。</li>
+
+<li><strong>【问答2答案】</strong>千节点LLM推理集群的故障恢复设计：<br>
+<strong>Checkpoint策略</strong>：训练阶段每200-500步保存checkpoint到共享存储（Lustre/NFS），单次保存耗时30-120秒。推理阶段不保存checkpoint（无状态服务），但需定期导出模型权重快照。<br>
+<strong>健康检查</strong>：Kubernetes livenessProbe每10秒探测一次，连续3次失败则重启容器；readinessProbe每5秒探测，失败时从负载均衡移除。对于GPU节点，健康检查需包含CUDA可用性验证（nvidia-smi返回码）。<br>
+<strong>自动故障转移</strong>：(1)节点级故障：Kubernetes自动在健康节点重建Pod，耗时约30-60秒；(2)服务级故障：Seldon自动将流量从故障replica路由到健康replica；(3)区域级故障：DNS切换到备区域，RTO<5分钟。<br>
+<strong>99.9%可用性目标</strong>：年停机时间<8.76小时。千节点集群单节点可用性99.9%，通过N+2冗余和自动故障转移，整体可用性可达99.95%。</li>
 </ol>
 </div>
 
-
-<div class="tip"><strong>向前串联：</strong>
-ML CI/CD的特点的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
-建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
-将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
-这些数据将成为后续优化决策的量化依据。
+<div class="deep">
+<strong>🔬 深入探讨：ML CI/CD 的数据版本控制</strong><br>
+数据版本控制（DVC）是 ML CI/CD 的基石。DVC 的核心思想是将大文件（数据集、模型）的元数据存入 Git，实际文件存储在远程（S3/GCS）。典型的 DVC 工作流：(1) <code>dvc add data/train.jsonl</code> 创建 .dvc 元数据文件；(2) <code>dvc push</code> 上传到远程存储；(3) <code>dvc checkout</code> 切换数据版本。在 CI/CD 中，每次数据更新都会触发 DVC pipeline 重跑，确保数据-代码-模型的版本一致性。对于 LLM 训练，数据集通常达到 TB 级别（如 LLaMA 的 2T tokens ≈ 8TB 文本），DVC 的增量存储只保存差异部分，节省 60-80% 的存储空间。
 </div>
-
-
-<div class="deep"><strong>学习路径建议：</strong>
-学习ML CI/CD的特点建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
-再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
-每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
-</div>
-
-
-<script>
-function toggleAnswer(btn) {
-  var content = btn.nextElementSibling;
-  if (content && content.classList.contains('answer-content')) {
-    if (content.classList.contains('show')) {
-      content.classList.remove('show');
-      btn.classList.remove('open');
-      btn.innerHTML = '<span class="icon">▶</span>显示答案';
-    } else {
-      content.classList.add('show');
-      btn.classList.add('open');
-      btn.innerHTML = '<span class="icon">▶</span>隐藏答案';
-    }
-  }
-}
-</script>
 
 </body>
 </html>

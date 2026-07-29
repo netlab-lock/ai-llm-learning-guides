@@ -68,321 +68,391 @@
 }
 
 </style></head><body><div class="nav"><a href="01-静态vs动态批处理.html">← 上一节</a><span class="title">模块 03 · 连续批处理</span><a href="03-Chunked Prefill.html">下一节 →</a></div>
-<div class="container"><h1>🔄 连续批处理 (Continuous Batching)</h1>
-<div class="callout"><strong>本节目标：</strong>理解 vLLM 提出的连续批处理技术——在每个 iteration（解码步）级别调度请求，而非等待整批完成。</div>
+<div class="container"><h1>🔄 连续批处理 (Continuous Batching / Iteration-Level Scheduling)</h1>
+<div class="callout"><strong>本节目标：</strong>深入理解 vLLM 提出的连续批处理技术——在每个 iteration（解码步）级别调度请求，实现 GPU 零闲置。掌握其调度器设计、与 PagedAttention 的配合机制，以及生产环境中的性能调优方法。</div>
 
-<h2>1. 核心思想</h2>
-<div class="warn"><strong>常见误区：</strong>
-学习核心思想时，很多人只看概念不动手实验。建议每学完一个知识点就写验证代码，
-在实际运行中观察行为是否符合预期。理论和实践的差距往往比想象中大。
+<h2>1. 核心思想：从请求级调度到 Iteration 级调度</h2>
+
+<p>连续批处理（Continuous Batching），也称为 Iteration-Level Scheduling，是 vLLM 论文（Kwon et al., 2023）提出的核心调度创新。其本质洞察是：<strong>GPU 闲置的根源不在于没有请求可处理，而在于调度粒度太粗</strong>——传统静态批处理以整个请求的生命周期为调度单位，导致短请求完成后 GPU 空等长请求。</p>
+
+<p>理解这一设计动机需要从 GPU 的利用率公式出发。设一个 batch 中有 N 个请求，各请求的生成长度为 L₁, L₂, ..., Lₙ，则静态批处理的总计算时间为 T_total = max(L₁, ..., Lₙ) × t_decode，其中 t_decode 是每步解码延迟。而各请求实际需要的计算时间为 Σ(Lᵢ × t_decode)。定义 GPU 利用率 η 为：</p>
+
+<div class="formula">
+η = Σ(Lᵢ) / (N × max(Lᵢ))
 </div>
-<div class="warn"><strong>常见误区：</strong>
-不要以为核心思想可以跳过基础直接上手高级内容。基础概念是后续所有优化和应用的前提，
-跳过基础会导致后续学习事倍功半。
-</div>
 
-<h3>核心思想</h3>p"><strong>通俗类比：</strong>核心思想</div>
+<p>当请求长度差异越大（即 max(Lᵢ) >> mean(Lᵢ)），η 越低。例如 batch_size=4，请求长度为 [10, 10, 10, 100]，则 η = 130 / (4×100) = 32.5%——超过 2/3 的算力被浪费。连续批处理通过动态替换已完成请求，使 η 始终接近 100%。</p>
 
+<h3>调度粒度对比</h3>
 
-
-<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
-<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
-<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
-<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
-<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
-<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
-
-<p>传统批处理以"请求"为单位调度，连续批处理以"iteration"为单位：</p>
 <div class="diagram">
 传统批处理 (请求级调度):
-  Batch 1: [A, B, C] 运行 → 全部完成 → Batch 2: [D, E, F] 运行
-  调度粒度: 请求
+  Batch 1: [A, B, C] ──运行──▶ 全部完成 ──▶ Batch 2: [D, E, F]
+  调度粒度: 请求生命周期
+  ✗ 短请求 A 完成后空等 C
+  ✗ GPU 在等待期间利用率降至 0
 
 连续批处理 (iteration 级调度):
   Step 1: [A, B, C] → A 完成, D 加入
   Step 2: [B, C, D] → C 完成, E 加入
   Step 3: [B, D, E] → B 完成, F 加入
   Step 4: [D, E, F] → ...
-  调度粒度: 每个 decode step</div>
+  调度粒度: 每个 decode step
+  ✓ 每步完成后立即调度新请求
+  ✓ GPU 始终有完整的 batch 可处理
+</div>
 
-<h2>2. 工作流程</h2>
-<h3>工作流程</h3>
+<p>这个设计的关键洞察是：<strong>LLM 推理的 Decode 阶段天然适合 iteration 级调度</strong>。因为 Decode 是逐 token 自回归的，每个 step 的计算量完全一致（都是对当前 batch 中所有请求各预测一个 token），不存在训练中不同样本计算量不同的问题。这意味着我们可以在任何 step 边界安全地增减请求，不会破坏计算的正确性。</p>
 
+<div class="warn"><strong>为什么 Prefill 不能直接 Iteration 级调度？</strong>
+Prefill 阶段需要一次性处理所有输入 token（并行注意力计算），如果像 Decode 一样逐 step 调度，每个新加入的请求都需要完整重算整个 batch 的注意力矩阵，复杂度从 O(n²) 退化为 O(n³)。这就是为什么 Chunked Prefill（下一节）被提出——将 Prefill 拆分为固定大小的 chunk，使其能与 Decode 交错执行。
+</div>
 
+<div class="deep"><strong>与 Orca 的理论联系：</strong>
+连续批处理并非全新概念。Orca (Yu et al., 2022) 首次提出了 Iteration-Level Scheduling 的理论框架，证明在迭代式计算中，以 iteration 为调度单位可以消除\"队头阻塞\"（Head-of-Line Blocking）。vLLM 的创新在于将其与 PagedAttention 结合，解决了 Orca 中内存碎片化的问题。另一类似实现是 TensorRT-LLM 的 \"Inflight Batching\" 和 DeepSpeed-FastGen 的 \"Dynamic Split-Fuse\"。
+</div>
 
+<h2>2. 工作流程：四步循环调度</h2>
 
-<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
-<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
-<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
-<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
-<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
-<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+<p>连续批处理在每个 decode step 执行一个精密的四步循环。理解这个流程是理解 vLLM 调度器实现的关键。Scheduler 在每个 step 的决策逻辑如下：</p>
+
+<h3>Step 1: 移除已完成请求</h3>
+<p>遍历当前 batch 中所有活跃请求，检查停止条件——是否生成了 EOS token 或达到了 max_tokens 限制。对已完成的请求，执行资源回收：释放其占占用的 KV Cache block（通过 BlockManager 标记为空闲），释放序列组（Sequence Group）的内存，并将结果返回给调用方。</p>
+
+<h3>Step 2: 从等待队列补充新请求</h3>
+<p>当 Step 1 释放了位置后，Scheduler 检查 waiting_queue。对于每个候选请求，计算其 Prefill 所需的 KV Cache block 数：blocks_needed = ⌈input_length / block_size⌉。如果有足够的空闲 block（由 BlockManager 追踪），则将请求加入当前 batch，并为其分配初始 KV Cache block。如果没有足够 block，该请求继续在队列中等待——<strong>这是连续批处理的一个关键限制：不能部分执行 Prefill</strong>。</p>
+
+<h3>Step 3: 执行一步 Decode</h3>
+<p>将当前 batch 中所有活跃请求送入 ModelRunner，执行一步自回归 decode。对于新加入的请求（Step 2 中加入的），这一步实际上是它们的 Prefill + 第一步 Decode：ModelRunner 先对新请求的所有输入 token 执行并行注意力计算（Prefill），生成初始 KV Cache；然后对所有请求（包括新请求）统一执行一步 token 生成。</p>
+
+<h3>Step 4: 检查停止条件并循环</h3>
+<p>更新每个请求的已生成 token 数，检查是否触发停止条件。将未完成请求标记为继续，已完成的请求返回结果。然后回到 Step 1，开始下一个 step 的调度。</p>
 
 <div class="diagram">
-每个 Decode Step:
+每个 Decode Step 的调度流程:
 
-1. 检查已完成的请求 → 从 batch 中移除，释放 KV Cache
-2. 检查等待队列 → 如果有空位，加入新请求 (做 Prefill)
-3. 对当前 batch 中所有请求执行一步 Decode
-4. 检查停止条件 → 生成了 EOS / 达到 max_tokens
+  ┌──────────────────────────────────────────────────────┐
+  │                   Scheduler Loop                      │
+  │                                                      │
+  │  Step 1: Sweep Finished                              │
+  │    for seq in running_batch:                         │
+  │      if seq.is_finished():                           │
+  │        free_kv_cache(seq)                            │
+  │        running_batch.remove(seq)                     │
+  │        send_response(seq.output)                     │
+  │                                                      │
+  │  Step 2: Fill from Waiting Queue                     │
+  │    free_blocks = block_manager.get_free_block_count()│
+  │    for req in waiting_queue:                         │
+  │      need = ceil(req.input_len / BLOCK_SIZE)         │
+  │      if need <= free_blocks:                         │
+  │        allocate_blocks(req, need)                    │
+  │        running_batch.add(req)                        │
+  │        free_blocks -= need                           │
+  │                                                      │
+  │  Step 3: Execute One Decode Step                     │
+  │    outputs = model_runner.step(running_batch)        │
+  │    # 对 Prefill 请求: 并行处理输入                    │
+  │    # 对所有请求: 一步自回归 decode                    │
+  │                                                      │
+  │  Step 4: Check & Loop                                │
+  │    for seq in running_batch:                         │
+  │      seq.update(output_token)                        │
+  │    goto Step 1                                       │
+  └──────────────────────────────────────────────────────┘
 
-┌────────────────────────────────────────────┐
-│              Scheduler                      │
-│                                            │
-│  等待队列: [D, E, F, G, ...]               │
-│                                            │
-│  当前 batch:                               │
-│  ┌──────────────────────────────────────┐  │
-│  │ A (step 5/10)  B (step 3/20)  C (step 8)│
-│  └──────────────────────────────────────┘  │
-│                                            │
-│  Step 完成后:                              │
-│  A 完成 → 释放 → D 加入 (Prefill)         │
-│  B 继续                                    │
-│  C 完成 → 释放 → E 加入 (Prefill)         │
-└────────────────────────────────────────────┘</div>
+  等待队列: [D, E, F, G, ...]
+  
+  当前 batch (示例):
+  ┌───────────────────────────────────────────────┐
+  │ A (step 5/10)  B (step 3/20)  C (step 8/50)  │
+  │ ▓▓▓▓▓░░░░░     ▓▓▓░░░░░░░░░   ▓▓▓▓▓▓▓▓░░░░░  │
+  └───────────────────────────────────────────────┘
+  
+  Step 完成后:
+  A 完成 → 释放 8 blocks → D 需要 3 blocks → D 加入
+  B 继续 decode → step 4/20
+  C 继续 decode → step 9/50
+</div>
 
-<h2>3. 性能提升<做出更合理的技术选择和优化决策。</p>
+<p>这个工作流程的关键设计决策在于：<strong>Prefill 和 Decode 在同一个 step 中交错执行</strong>。当新请求 D 在 Step 2 加入后，Step 3 需要先对 D 做 Prefill（一次性处理其所有输入 token），然后和已有请求一起做一步 Decode。这种\"混合 step\"的实现避免了 Prefill 阻塞 Decode 的问题——但前提是 Prefill 的输入不能太长（否则会拖慢整个 step）。这正是 Chunked Prefill 要解决的问题。</p>
 
-<h3>性能提升</h3>
+<div class="deep"><strong>vLLM 中的实际代码路径：</strong>
+在 vLLM v0.4+ 中，Scheduler 类的 <code>_schedule()</code> 方法实现了上述四步循环。<code>ScheduleOutputs</code> 对象包含三个列表：<code>scheduled_seq_groups</code>（本轮执行的序列组）、<code>blocks_to_swap_in</code>（需要从 CPU 换入 GPU 的 block）、<code>blocks_to_swap_out</code>（需要从 GPU 换出到 CPU 的 block）。BlockManager 使用 Copy-on-Write 机制支持序列分叉（如 Beam Search 场景），<code>fork()</code> 操作共享相同前缀的 block，<code>swap_out()</code> 在显存不足时将 block 临时换出到 CPU。
+</div>
 
+<h2>3. 性能提升：量化分析与实测数据</h2>
 
+<p>连续批处理的性能提升不是理论假设，而是在多个维度上有可量化的显著改进。理解这些数字背后的原因对于生产环境容量规划至关重要。</p>
 
-
-<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
-<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
-<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
-<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
-<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
-<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+<h3>吞吐量与 GPU 利用率</h3>
 
 <table>
-<tr><th>指标</th><th>静态批处理</th><th>连续批处理</th><th>提升</th></tr>
-<tr><td>吞吐量 (tok/s)</td><td>基准</td><td>2-4x</td><td>显著</td></tr>
-<tr><td>GPU 利用率</td><td>30-50%</td><td>60-80%</td><td>大幅提升</td></tr>
-<tr><td>请求延迟</td><td>被长请求拖慢</td><td>各自独立</td><td>更公平</td></tr>
-<tr><td>内存效率</td><td>低</td><td>高</td><td>更少浪费</td></tr>
+<tr><th>指标</th><th>静态批处理</th><th>连续批处理</th><th>提升倍数</th><th>关键因素</th></tr>
+<tr><td>吞吐量 (tok/s)</td><td>~800 (LLaMA-7B, A100)</td><td>~2400-3200</td><td>3-4x</td><td>消除 GPU 空等</td></tr>
+<tr><td>GPU 利用率</td><td>30-50%</td><td>70-85%</td><td>~2x</td><td>batch 始终满载</td></tr>
+<tr><td>请求并发数</td><td>固定 batch_size</td><td>动态,可达 100+</td><td>5-10x</td><td>即时资源回收</td></tr>
+<tr><td>短请求 TTFT</td><td>被长请求拖累</td><td>仅取决于自身长度</td><td>10-50x</td><td>无队头阻塞</td></tr>
 </table>
 
-<h2>4. 与 PagedAttention 的配合</h2>
-工程中做出更合理的技术选择和优化决策。</p>
+<p>吞吐量的提升来源于两个机制叠加：(1) GPU 消除闲置后理论利用率从 ~40% 提升到 ~80%，贡献约 2x；(2) 高利用率允许更大的有效 batch_size（因为请求即时进出，不需要凑齐固定数量才启动），又贡献约 1.5-2x。两者相乘得到 3-4x 的吞吐提升。</p>
 
-<h3>与 PagedAttention 的配合</h3>
+<p>具体到模型规模，吞吐提升倍数与模型的 Decode 计算模式密切相关。对于小模型（如 7B 参数），Decode 阶段是 memory-bound（受内存带宽限制），batch_size 增大可以更充分地利用 HBM 带宽，因此连续批处理的提升更显著（3-4x）。对于大模型（如 70B+），Decode 趋近于 compute-bound，batch_size 增大的边际收益递减，提升约为 2-3x。</p>
 
+<h3>延迟分布分析</h3>
 
-<div class="deep"><strong>深入探讨：</strong>从系统设计的<strong>底层原理</strong>看，核心思想的核心挑战是在性能、精度和资源三者之间寻找最优平衡。<strong>为什么</strong>不能同时最大化三者？因为提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），减少资源又会降低性能。理解这个三角约束，就能推导出大多数技术选择背后的逻辑。</div>
-<div class="ascii"><pre>LLM 推理全流程
-┌─────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────┐
-│  用户输入    │───▶│  Tokenizer   │───▶│  Prefill     │───▶│  Decode  │
-│  "你好"     │    │  编码        │    │  并行处理     │    │  逐token │
-└─────────────┘    └──────────────┘    │  所有输入token│    │  自回归  │
-                                       └──────────────┘    └────┬─────┘
-                     ┌──────────────┐    ┌──────────────┐      │
-                     │  用户看到    │◀───│  Tokenizer   │◀─────┘
-                     │  "你好！..." │    │  解码        │
-                     └──────────────┘    └──────────────┘</pre></div>
-<table><tr><th>维度</th><th>训练(Training)</th><th>推理(Inference)</th></tr>
-<tr><td>目标</td><td>学习参数</td><td>生成输出</td></tr>
-<tr><td>计算模式</td><td>前向+反向传播</td><td>仅前向传播</td></tr>
-<tr><td>批处理</td><td>固定大batch</td><td>动态batch(请求驱动)</td></tr>
-<tr><td>延迟要求</td><td>天/周级别</td><td>毫秒/秒级</td></tr>
-<tr><td>成本特征</td><td>一次性(GPU集群)</td><td>持续性(按QPS扩展)</td></tr></table>
+<p>连续批处理对延迟的改善不仅体现在平均值上，更重要的是<strong>延迟分布的形状</strong>。在静态批处理中，延迟分布是双峰的——短请求的延迟取决于 batch 中最长请求的长度，因此即使是短输出也有一个高延迟的\"地板\"。连续批处理消除了这个地板效应，使延迟分布变为单峰且与请求实际长度成正比。</p>
 
-<p>连续批处理 + PagedAttention 是 vLLM 的两大核心创新：</p>
-<ul>
-<li>连续批处理：动态调度，GPU 不闲置</li>
-<li>PagedAttention：按需分配内存，不浪费</li>
-<li>两者结合：高吞吐 + 高内存利用率</li>
-</ul>
-<div class="next-prev"><a href="00-总览.html">← 返回模块总览</a><a href="../index.html">📚 返回总目录</a></div>
-<footer>LLM 推理框架系统学习指南 · 模块 03 · 2026</footer></div>
-<h3>核心思想</h3>
-<p>从系统架构的<strong>底层原理</strong>来看，核心思想由多个协同工作的组件构成。
-<strong>为什么</strong>需要这样的分层设计？<strong>推导</strong>表明，
-将复杂系统分解为独立模块可以将维护成本从O(N²)降低到O(N)，
-每个模块只需关注自身的<strong>工作机制</strong>，通过标准接口与外部交互。</p>
-
-<h3>核心思想</h3>
-<p>衡量核心思想性能的核心指标包括延迟（latency）、吞吐（throughput）和资源利用率。
-从<strong>数学本质</strong>看，这三者之间存在固有权衡关系：
-吞吐 = batch_size / latency，而资源利用率 = 实际计算时间 / 总时间。
-<strong>为什么</strong>不能同时优化三者？因为提高batch_size会增加延迟，
-降低延迟会减少batch_size进而降低吞吐——这就是<strong>为什么</strong>需要
-针对具体场景选择优化目标的<strong>底层原因</strong>。</p>
-<div class="deep"><strong>核心思想的技术原理与数学推导：</strong>
-从<strong>底层</strong>硬件角度分析，核心思想的性能瓶颈通常在于内存带宽而非计算能力。
-<strong>推导</strong>：以A100为例，FP16峰值算力312 TFLOPS，HBM带宽2TB/s，
-算术强度转折点 = 312T/2T = 156 FLOPs/Byte。<strong>为什么</strong>这很重要？
-因为当实际算术强度低于此值时，任务是内存受限的——增加更多计算单元不会提升性能。
-这一<strong>数学本质</strong>决定了核心思想的所有优化策略都应围绕减少内存访问展开。
-从<strong>工作机制</strong>看，算子融合（减少中间结果写回）和批处理（共享参数读取）
-是提升算术强度的两大核心手段。
-</div>
-<div class="deep"><strong>核心思想的系统架构分析：</strong>
-从系统设计的<strong>原理</strong>出发，核心思想采用分层架构来管理复杂性。
-<strong>为什么</strong>分层是主流选择？<strong>推导</strong>如下：
-设系统有N个组件，全连接交互复杂度为O(N²)，分层后降低到O(N·L)，L为层数。
-<strong>数学本质</strong>上，这是用少量层间通信开销换取大幅降低的组件间耦合。
-在实际<strong>工作机制</strong>中，每一层只与相邻层通信，通过标准接口解耦——
-这类似于TCP/IP协议栈的设计<strong>原理</strong>，每层独立优化，层内改动不影响整体。
-</div>
-<h3>核心思想的性能优化策略</h3>
-<p>优化核心思想性能需要系统性的方法论。首先用profiling工具定位瓶颈——
-从<strong>底层</strong>看，GPU推理的瓶颈通常表现为三种模式：
-1) 计算受限（GPU利用率>80%，SM活跃）；
-2) 内存受限（带宽利用率高，但计算单元空闲）；
-3) 通信受限（多卡场景，NCCL等待时间长）。
-<strong>为什么</strong>要区分这三种模式？因为优化策略完全不同：
-计算受限→减少FLOPs（量化/剪枝）；内存受限→减少数据搬运（算子融合/缓存）；
-通信受限→优化通信拓扑（梯度压缩/异步通信）。
-这一<strong>原理</strong>是推理性能调优的基础框架。</p>
-<h3>核心思想的工程实践与最佳实践</h3>
-<p>在生产环境中部署核心思想时，需要考虑以下<strong>工作机制</strong>：
-资源规划（GPU显存预算<strong>公式</strong>：M_total = M_model + M_kv×B + M_overhead，
-B为并发数）、容错机制（健康检查、自动重启、灰度发布）、
-监控告警（延迟p99、错误率、GPU利用率）。
-<strong>为什么</strong>这些因素如此关键？因为推理服务是持续运行的，
-任何微小的效率问题在高并发下都会被放大——
-从<strong>数学本质</strong>看，总成本 = 单次成本 × QPS × 时间，
-当QPS达到百万级时，1%的优化意味着年节省数十万元。</p>
-<pre><code class="language-python"># 核心思想 - 性能基准测试
-import torch
-import time
-
-def benchmark(model, input_data, warmup=10, iters=100):
-    """测量推理延迟和吞吐"""
-    for _ in range(warmup):
-        model(input_data)
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    for _ in range(iters):
-        model(input_data)
-    torch.cuda.synchronize()
-    elapsed = (time.perf_counter() - start) / iters
-    print(f"Latency: {elapsed*1000:.2f}ms")
-    print(f"Throughput: {1/elapsed:.0f} req/s")
-    return elapsed
-</code></pre>
-<pre><code class="language-python"># 核心思想 - 性能基准测试
-import torch
-import time
-
-def benchmark(model, input_data, warmup=10, iters=100):
-    """测量推理延迟和吞吐"""
-    for _ in range(warmup):
-        model(input_data)
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    for _ in range(iters):
-        model(input_data)
-    torch.cuda.synchronize()
-    elapsed = (time.perf_counter() - start) / iters
-    print(f"Latency: {elapsed*1000:.2f}ms")
-    print(f"Throughput: {1/elapsed:.0f} req/s")
-    return elapsed
-</code></pre>
 <div class="ascii">
-核心思想 系统架构
-┌──────────┐    ┌──────────────┐    ┌──────────┐
-│  Input   │───→│  Processing  │───→│  Output  │
-│  Layer   │    │    Engine    │    │  Layer   │
-└──────────┘    └──────────────┘    └──────────┘
-     │                │                    │
-     ▼                ▼                    ▼
-  [CPU→GPU]      [GPU Compute]        [GPU→CPU]
-  PCIe传输       Tensor Core          结果回传
+延迟分布对比 (batch_size=8, 输出长度均匀分布 10-200 token)
+
+静态批处理:
+  延迟
+  ▲
+  │  ████
+  │  ████              ← 短请求被拖慢到长请求水平
+  │  ████
+  │  ████
+  │  ████████████████████████████████
+  └─────────────────────────────────────▶ 请求序
+    短请求    中等     长请求
+   (都被拖慢)
+
+连续批处理:
+  延迟
+  ▲
+  │  ██
+  │  ██    ████          ← 延迟与输出长度成正比
+  │  ██    ████    ████████████
+  │  ██    ████    ████████████████
+  │  ██    ████    ████████████████████████
+  └─────────────────────────────────────▶ 请求序
+    短请求    中等      长请求
+  (独立延迟)
 </div>
+
+<p>在实际部署中（以 ShareGPT 数据集为基准，vLLM 论文的评测设置），连续批处理在不同负载下的表现如下：当 QPS（每秒请求数）从 1 增加到 20 时，静态批处理的 p99 TTFT（首 token 时间）从 150ms 飙升到 12s（因为请求堆积在队列中等待凑满 batch），而连续批处理的 p99 TTFT 始终保持在 200-400ms 区间（因为新请求可以立即加入当前 batch）。</p>
+
+<div class="warn"><strong>性能陷阱：Prefill 延迟累积</strong>
+连续批处理虽然解决了 Decode 阶段的调度问题，但引入了新的延迟来源——Prefill 阻塞。当新请求在 Step 2 加入后，Step 3 需要先执行 Prefill（处理该请求的所有输入 token），这会延长该 step 的执行时间。如果一个 step 中有多个新请求同时加入，它们的 Prefill 会串行执行（因为 GPU 需要依次处理每个请求的输入），导致已有 Decode 请求的延迟增加。这就是 \"Prefill Interference\" 问题，Chunked Prefill（下一节）通过将 Prefill 拆分为小 chunk 来缓解此问题。
+</div>
+
+<div class="deep"><strong>性能瓶颈的 Roofline 分析：</strong>
+从 Roofline 模型看，Decode 阶段的算术强度（Arithmetic Intensity）决定了连续批处理能压榨多少性能。对于 LLaMA-7B (d=4096, 32层, 32头)，每步 decode 的 FLOPs 约为 2×7B = 14 GFLOPs（忽略注意力的小量），内存访问量为模型参数量（KV Cache 命中时只需读取参数，不重复读取 KV Cache）。A100 的 HBM 带宽为 2 TB/s，因此单请求的 t_decode ≈ 14GB / 2TB/s ≈ 7ms。当 batch_size=32 时，GPU 可以利用更宽的内存带宽（batch 越大，参数读取被更多请求共享），t_decode 降低到约 4ms。连续批处理通过保持高 batch_size，确保始终运行在 Roofline 的平坦区域（带宽充分利用），这就是为什么吞吐提升显著。
+</div>
+
+<h2>4. 与 PagedAttention 的协同设计</h2>
+
+<p>连续批处理和 PagedAttention 是 vLLM 的两大核心创新，它们分别解决推理系统的两个独立瓶颈：<strong>计算利用率</strong>和<strong>内存利用率</strong>。两者必须协同工作——连续批处理需要动态分配和回收 KV Cache，而 PagedAttention 提供了无碎片的细粒度内存管理。</p>
+
+<h3>内存碎片：连续分配的致命问题</h3>
+
+<p>理解为什么需要 PagedAttention，首先要理解传统 KV Cache 分配的内存碎片问题。在连续批处理中，每个请求在任意时刻都可能需要写入新的 KV Cache（每生成一个 token 就需要存储该 token 的 K 和 V）。如果采用连续内存分配（预先分配 max_length 的空间），会产生两种碎片：</p>
+
+<p><strong>内部碎片 (Internal Fragmentation)：</strong>预分配空间按 max_length 计算，但实际生成长度通常远小于此。实验数据显示，ShareGPT 数据集中 50% 的请求实际生成长度不足 max_length 的 20%。公式化表示：设请求 i 预分配空间为 M_max，实际使用为 Mᵢ，则浪费率 = 1 - Mᵢ/M_max。对所有请求平均，传统方式的内存浪费率可达 60-80%。</p>
+
+<p><strong>外部碎片 (External Fragmentation)：</strong>在连续批处理动态添加/移除请求的过程中，不同请求的完成时间不同，释放的内存块大小不一且位置不连续。经过一段时间运行后，即使总空闲内存足够容纳新请求，也可能找不到一块足够大的连续空间。</p>
+
+<h3>PagedAttention 的解决方案</h3>
+
+<p>PagedAttention 借鉴操作系统的虚拟内存分页机制，将 KV Cache 分解为固定大小的 block（默认 BLOCK_SIZE=16 个 token）。每个请求维护一个 block table，记录逻辑 block 到物理 block 的映射关系。核心公式：</p>
+
+<div class="formula">
+物理 block 数 = ⌈序列长度 / BLOCK_SIZE⌉
+内存浪费率 ≤ BLOCK_SIZE / (2 × 平均序列长度)
+</div>
+
+<p>当 BLOCK_SIZE=16、平均序列长度=512 token 时，浪费率 ≤ 1.56%，远低于连续分配的 60-80%。而且因为所有 block 大小相同，不存在外部碎片——任何空闲 block 都可以被任何请求使用。</p>
+
+<h3>协同工作机制</h3>
+
+<p>连续批处理和 PagedAttention 的配合体现在每个 step 的内存操作中：</p>
+
+<table>
+<tr><th>调度事件</th><th>连续批处理动作</th><th>PagedAttention 动作</th><th>协同效果</th></tr>
+<tr><td>请求 D 加入</td><td>Scheduler 决定接受新请求</td><td>BlockManager 分配 N=⌈input_len/16⌉ 个空闲 block</td><td>O(1) 分配，无碎片</td></tr>
+<tr><td>请求 D 生成 token</td><td>每步 decode 后为 D 追加 K,V</td><td>若当前 block 未满则直接写入；若满则分配新 block</td><td>按需增长，无预留</td></tr>
+<tr><td>请求 A 完成</td><td>Scheduler 从 batch 移除 A</td><td>BlockManager 将 A 的所有 block 标记为空闲</td><td>即时回收，其他请求可复用</td></tr>
+<tr><td>显存不足</td><td>无法接受新请求</td><td>BlockManager 将最旧请求的 block swap 到 CPU</td><td>支持超显存并发</td></tr>
+</table>
+
+<p>这种协同使得 vLLM 在 80GB A100 上运行 LLaMA-7B 时，可同时服务 100+ 个请求（而静态批处理通常只能支持 20-30 个），吞吐提升进一步放大到 4-5x。</p>
+
 <div class="ascii">
-核心思想 性能分析 (屋顶模型)
-                    
-  计算吞吐  │         ╱ 计算受限区
-  (TFLOPS)  │       ╱
-            │     ╱   ← 实际工作点
-            │   ╱
-            │ ╱ 带宽受限区
-            │╱
-            └──────────────── 带宽利用率
-             
-  转折点 = 峰值算力 / 峰值带宽
-  A100: 312T/2T = 156 FLOPs/Byte
-  H100: 989T/3.35T = 295 FLOPs/Byte
+vLLM 内存布局 (简化)
+
+  物理 Block Pool (GPU HBM):
+  ┌────┬────┬────┬────┬────┬────┬────┬────┬────┬────┬────┬────┐
+  │ B0 │ B1 │ B2 │ B3 │ B4 │ B5 │ B6 │ B7 │ B8 │ B9 │B10 │B11 │
+  └────┴────┴────┴────┴────┴────┴────┴────┴────┴────┴────┴────┘
+    ▲         ▲    ▲              ▲         ▲         ▲
+    │         │    │              │         │         │
+    │    ┌────┘    │     ┌────────┘         │    ┌────┘
+    │    │         │     │                  │    │
+  ┌─┴────┴──┐  ┌───┴─────┴───┐  ┌───────────┴────┴───┐
+  │ Req A:  │  │ Req B:     │  │ Req C:            │
+  │ [0,2,5] │  │ [3,4,7,11] │  │ [6,8,9,10]       │
+  │ 3 blocks│  │ 4 blocks   │  │ 4 blocks          │
+  └─────────┘  └────────────┘  └───────────────────┘
+  
+  Block Table (每个请求的逻辑→物理映射):
+    A: block[0]=B0, block[1]=B2, block[2]=B5
+    B: block[0]=B3, block[1]=B4, block[2]=B7, block[3]=B11
+    C: block[0]=B6, block[1]=B8, block[2]=B9, block[3]=B10
+  
+  ✓ 物理 block 不连续，但逻辑上对请求是连续的
+  ✓ A 完成后 B0,B2,B5 立即被 C 复用
+  ✓ 无外部碎片（所有 block 等大）
+  ✓ 内部碎片最多 BLOCK_SIZE-1 个 token 空间
+</ascii>
+
+<div class="warn"><strong>PagedAttention 的性能陷阱：</strong>
+分页引入了一次间接寻址开销——GPU kernel 在计算注意力时需要通过 block table 查找物理地址，这比直接指针访问略慢。在 FlashAttention v2 的集成中，vLLM 的 paged attention kernel 通过 shared memory 缓存 block table 条目，将间接寻址的开销控制在 2-3% 以内。但如果 block_size 设置过小（如 1），block table 变大，间接寻址开销显著增加。推荐 BLOCK_SIZE=16 作为最佳平衡点。
 </div>
-<div class="tip"><strong>相关章节：</strong>
-核心思想与以下内容密切相关：<a href="00-总览.html">00-总览</a> | <a href="01-静态vs动态批处理.html">01-静态vs动态批处理</a> | <a href="03-Chunked Prefill.html">03-Chunked Prefill</a>。
-建议结合这些章节一起学习，形成完整的知识体系。
+
+<div class="tip"><strong>vLLM 参数调优：</strong>
+在生产环境中，以下参数直接影响连续批处理的性能：<code>gpu_memory_utilization</code>（默认 0.9，控制显存用于 KV Cache 的比例）、<code>max_num_seqs</code>（最大并发请求数，默认 256）、<code>max_num_batched_tokens</code>（每步最大 token 数，默认 2048，决定 Prefill 的并行度）。增大 <code>max_num_batched_tokens</code> 可以提高 Prefill 吞吐但会增加 Decode 延迟，需要根据工作负载的 Prefill/Decode 比例来调整。
 </div>
-<div class="tip"><strong>实用技巧：</strong>
-在学习核心思想时，建议先建立整体认知框架，再深入细节。
-用最小化实验验证核心概念——比如用小模型+短序列跑通完整流程，
-确认理解正确后再扩展到生产规模。记录每一步的性能数据，
-建立自己的"优化知识库"，这些经验在后续项目中会反复用到。
+
+<h2>5. 失败模式与调试方法</h2>
+
+<p>连续批处理在生产环境中会遇到多种失败模式。理解这些陷阱是构建稳定推理服务的必要条件。</p>
+
+<h3>5.1 OOM 与显存压力</h3>
+
+<p>虽然 PagedAttention 消除了内存碎片，但连续批处理本身可能导致<strong>显存超订</strong>（Over-subscription）：当大量请求同时涌入时，Scheduler 可能接受了超过显存承载力的请求数。BlockManager 的 swap-to-CPU 机制可以缓解，但 CPU-GPU 数据传输的延迟（PCIe 4.0 x16 约 32 GB/s）会导致 step 延迟从 ~4ms 飙升到 ~50ms。</p>
+
+<p><strong>诊断方法：</strong>监控 <code>vllm:block_cache_usage_perc</code> 指标。当使用率持续 > 95% 时，说明显存压力过大。此时应降低 <code>max_num_seqs</code> 或启用 <code>enable_chunked_prefill</code> 以减少单次 Prefill 的显存需求。</p>
+
+<h3>5.2 长输入导致的 Decode 延迟尖刺</h3>
+
+<p>当新请求的输入很长（如 2048 token），其 Prefill 会阻塞整个 batch 的 Decode。假设 batch_size=64，每个 Decode step 约 4ms；但一个 2048 token 的 Prefill 需要约 100ms（注意力矩阵计算），导致该 step 内其他 63 个 Decode 请求的延迟从 4ms 增加到 100ms——<strong>这是连续批处理最严重的延迟退化场景</strong>。</p>
+
+<p><strong>解决方案：</strong>启用 Chunked Prefill（vLLM 0.4+ 支持），将长 Prefill 拆分为 256-token 的 chunk，每执行一个 chunk 后检查是否有更高优先级的 Decode 请求需要处理。这种抢占式调度将延迟尖刺从 100ms 降低到 ~10ms。</p>
+
+<h3>5.3 请求饥饿 (Starvation)</h3>
+
+<p>当持续有高优先级请求到达时，低优先级请求可能长时间滞留在 waiting_queue 中。连续批处理的 FIFO 调度策略不保证公平性——如果一个长请求在队列头部，后续短请求即使只需 1 token 也会被阻塞（因为长请求的 Prefill 占用了所有可用 block）。</p>
+
+<p><strong>解决方案：</strong>vLLM 实现了基于 token 预算的调度——每个请求有一个 <code>max_tokens</code> 预算，Scheduler 优先调度预算小的请求（类似 Shortest-Job-First）。TensorRT-LLM 则支持设置 per-request 的优先级和超时时间，确保公平性。</p>
+
+<h3>5.4 KV Cache 写入冲突</h3>
+
+<p>在连续批处理中，同一 step 内可能有多个请求同时完成 Prefill 和开始 Decode。如果这些请求的 KV Cache block 分配存在竞争（BlockManager 的锁争用），会导致调度器延迟。在高并发（>100 QPS）场景下，这种锁争用可能成为瓶颈。</p>
+
+<p><strong>诊断方法：</strong>使用 <code>nvidia-smi dmon</code> 观察 GPU 利用率波动。如果出现周期性利用率归零（每 100ms 一个 gap），很可能是 BlockManager 锁争用或 GC 停顿。vLLM 通过无锁数据结构和 pre-allocation 策略缓解此问题。</p>
+
+<div class="deep"><strong>连续批处理的替代方案对比：</strong>
+除了连续批处理，还有几种不同的调度策略各有优劣：(1) <strong>Static Batching</strong>：最简单但 GPU 利用率最低，适合离线批量推理；(2) <strong>Dynamic Batching</strong>（Triton Server）：以请求为单位调度，在每个请求完成后才接受新请求，实现简单但仍有 GPU 空等；(3) <strong>Dynamic Split-Fuse</strong>（DeepSpeed）：将长请求拆分为固定大小的 chunk，在 chunk 粒度上调度，进一步减少延迟方差但增加调度开销；(4) <strong>Disaggregated Serving</strong>（Splitwise, Mooncake）：将 Prefill 和 Decode 分离到不同 GPU，彻底消除 Prefill 对 Decode 的干扰，但需要更多硬件。连续批处理是目前开源方案中综合最优的选择，但在长输入场景下 Chunked Prefill 或 Disaggregated Serving 更有优势。
 </div>
-<h3>核心思想的关键技术要点</h3>
-<p>掌握核心思想需要理解其<strong>底层原理</strong>和<strong>工作机制</strong>。
-从<strong>数学本质</strong>看，该技术的核心是在性能、精度和资源三者之间寻找最优平衡。
-<strong>为什么</strong>这个三角约束如此重要？因为任何优化都不能同时最大化三者——
-提高性能通常需要牺牲精度（如量化），提高精度需要更多资源（如FP32），
-减少资源又会降低性能。理解这个<strong>原理</strong>，就能推导出大多数技术选择背后的逻辑。</p>
-<h2>核心思想的工程实践与总结</h2>
-<h3>生产环境部署要点</h3>
-<p>在生产环境中应用核心思想时，需要考虑资源规划、容错机制和监控告警。
-从<strong>底层原理</strong>看，推理服务的可用性 = 1 - Π(1-可用性_i)，
-当组件数增加时系统可用性指数下降——这就是<strong>为什么</strong>需要冗余设计。</p>
-<h3>常见问题与解决方案</h3>
-<p>实际工程中遇到的大多数问题都可以归为三类：性能问题（延迟/吞吐不达标）、
-精度问题（输出质量下降）、稳定性问题（偶发OOM/超时）。
-<strong>为什么</strong>要这样分类？因为每类问题的诊断<strong>工作机制</strong>完全不同：
-性能问题用profiler，精度问题用eval benchmark，稳定性问题用日志分析。</p>
+
+<h2>6. 实现参考：vLLM Scheduler 核心代码</h2>
+
+<p>以下是 vLLM 调度器的简化实现，展示连续批处理的核心逻辑。理解这段代码有助于在需要定制调度策略时进行修改。</p>
+
+<pre><code class="language-python"># 简化的 vLLM Scheduler 核心逻辑 (基于 vLLM 0.4.x 架构)
+class Scheduler:
+    def __init__(self, config, cache_config):
+        self.waiting = deque()        # 等待队列
+        self.running = deque()        # 正在执行的 batch
+        self.swapped = {}             # 被换出到 CPU 的请求
+        self.block_manager = BlockManager(
+            num_gpu_blocks=cache_config.num_gpu_blocks,
+            block_size=BLOCK_SIZE,    # 默认 16 tokens
+        )
+    
+    def schedule(self) -> SchedulerOutputs:
+        """每个 decode step 调用一次"""
+        
+        # ===== Step 1: 处理已完成请求，释放资源 =====
+        for seq_group in list(self.running):
+            if seq_group.is_finished():
+                self.running.remove(seq_group)
+                self.block_manager.free(seq_group)  # 回收 KV Cache blocks
+        
+        # ===== Step 2: 从等待队列补充新请求 =====
+        # 先处理被换出的请求（swap_in）
+        self._schedule_swapped()
+        
+        # 然后处理等待队列中的新请求
+        self._schedule_waiting()
+        
+        # ===== Step 3: 构建本 step 的输入 =====
+        # 当前 batch = running 中的所有请求
+        # 新加入的请求需要 Prefill，已有请求继续 Decode
+        return SchedulerOutputs(
+            scheduled_seq_groups=self.running,
+            blocks_to_copy=self.block_manager.get_blocks_to_copy(),
+        )
+    
+    def _schedule_waiting(self):
+        """从 waiting 队列中选择请求加入 running batch"""
+        while self.waiting:
+            seq_group = self.waiting[0]
+            
+            # 计算 Prefill 需要的 block 数
+            num_blocks = self.block_manager.get_num_required_blocks(seq_group)
+            
+            # 检查是否有足够空闲 block
+            if self.block_manager.can_allocate(seq_group):
+                # 分配 block 并加入 running
+                self.waiting.popleft()
+                self.block_manager.allocate(seq_group)
+                self.running.append(seq_group)
+            else:
+                # 显存不足，无法接受更多请求
+                break
+    
+    def _schedule_swapped(self):
+        """尝试将被换出的请求换回 GPU"""
+        for seq_group in list(self.swapped.values()):
+            if self.block_manager.can_swap_in(seq_group):
+                self.block_manager.swap_in(seq_group)
+                self.running.append(seq_group)
+                del self.swapped[seq_group.request_id]
+            else:
+                break
+</code></pre>
+
+<p>上述代码展示了连续批处理的核心循环。在实际 vLLM 实现中，还需要处理：(1) <strong>Chunked Prefill</strong>：如果启用了 chunked_prefill，<code>_schedule_waiting</code> 会将长 Prefill 拆分为 chunk，限制每步处理的 Prefill token 数不超过 <code>max_num_batched_tokens</code>；(2) <strong>Preemption</strong>：当显存极度不足时，Scheduler 需要将 running batch 中的最旧请求 swap out 或 recompute（丢弃 KV Cache，重新 Prefill）；(3) <strong>Prefix Caching</strong>：如果新请求的输入前缀与某个已完成请求共享，可以复用其 KV Cache block，避免重复计算。</p>
+
+<div class="tip"><strong>生产环境 Checklist：</strong>
+部署连续批处理推理服务时，建议按以下顺序验证：(1) 用 ShareGPT 数据集进行吞吐基准测试，确认达到论文报告的 2-4x 提升；(2) 逐步增加 QPS 直到 OOM，确定最大并发数；(3) 混合不同长度请求（短/中/长），验证延迟分布的公平性；(4) 长时间运行（>24h）测试，确认无内存泄漏；(5) 监控 <code>gpu_memory_utilization</code> 和 <code>block_cache_usage</code> 设置告警阈值。
+</div>
+
 <div class="exercise">
-<h3>📝 思考与练习</h3>
+<h3>📝 思考与验证</h3>
 <ol>
-  <li>请用自己的话解释<strong>核心思想</strong>的核心原理，并举一个实际应用场景。</li>
-  <li>请用自己的话解释<strong>工作流程</strong>的核心原理，并举一个实际应用场景。</li>
-  <li>请用自己的话解释<strong>性能提升</strong>的核心原理，并举一个实际应用场景。</li>
-  <li>请用自己的话解释<strong>与 PagedAttention 的配合</strong>的核心原理，并举一个实际应用场景。</li>
+  <li>推导连续批处理的 GPU 利用率公式：当请求长度服从均值为 μ 的指数分布时，证明连续批处理相对于静态批处理的加速比约为 e（自然对数的底）。</li>
+  <li>如果一个推理服务的平均 QPS 为 50，平均输出长度为 100 token，目标 p99 延迟为 2s，请估算需要的 GPU 数量和显存配置。</li>
+  <li>实验：在 vLLM 中分别开启和关闭 Chunked Prefill，观察长输入请求对 Decode 延迟的影响。记录两者的延迟分布差异。</li>
 </ol>
 </div>
+
 <div class="answer-toggle" onclick="toggleAnswer(this)"><span class="icon">▶</span>显示答案</div>
 <div class="box answer answer-content" style="background:linear-gradient(135deg,#1a3a2a,#0d1f17);border:1px solid #2d5a3d;border-left:3px solid #4ade80;border-radius:8px;padding:16px;margin:12px 0">
 <div class="label" style="color:#4ade80;font-weight:bold;font-size:1.05em">✅ 参考答案与详解</div>
 <ol>
-<li><strong>核心原理</strong>: 连续批处理的核心思想是将调度粒度从"请求级"提升到"iteration级"（即每个解码步）。传统静态批处理中，一个batch必须等所有请求全部生成完毕后才能处理下一个batch，导致短请求被长请求拖累、GPU在等待期间闲置。连续批处理则在每个decode step结束后立即检查：哪些请求已完成（生成了EOS或达到max_tokens），将其从batch中移除并释放KV Cache；然后从等待队列中选取新请求填补空位，对新请求先执行Prefill（并行处理所有输入token），再与已有请求一起进入下一个decode step。这种设计让GPU始终保持满载运转，就像餐厅服务员不会等所有客人吃完才去接待下一批，而是有空位就立即安排新客人入座。<br><strong>关键要点</strong>: ①调度粒度从请求级变为每个解码步；②已完成请求立即释放资源，新请求即时加入；③每个step都是一次独立的调度决策；④短请求不再被长请求阻塞。<br><strong>实际案例</strong>: 假设batch_size=3，初始batch包含请求A(需10个token)、B(需50个token)、C(需100个token)。在传统批处理中，A和C必须等待B全部完成；而连续批处理在第5步后A完成，立即加入新请求D，第10步后D完成后又加入E，GPU始终满载处理3个请求。<br><strong>关联知识</strong>: 连续批处理是vLLM论文(2023)提出的核心创新之一，它与PagedAttention配合实现高吞吐+高内存利用率；其思想也体现在TensorRT-LLM的inflight batching和DeepSpeed-FastGen的Dynamic SplitFuse中。</li>
-<li><strong>核心原理</strong>: 连续批处理的工作流程是一个循环执行的四步过程，在每个decode step中依次完成调度决策。第一步：检查当前batch中是否有已完成的请求（生成了EOS token或达到max_tokens限制），如果有则从batch中移除这些请求，同时释放其占用的KV Cache内存资源。第二步：检查等待队列中是否有待处理的请求，如果第一步释放了位置导致batch中有空位，则从队列头部取出新请求加入batch，并对其执行Prefill操作（即并行处理该请求的所有输入token，生成初始的KV Cache）。第三步：对当前batch中所有活跃请求执行一步Decode操作，每个请求各自生成一个token。第四步：检查每个请求的停止条件，标记已完成的请求。整个流程像一个精密的生产流水线，每个工位（step）都完成进料→加工→出料→检测的循环。<br><strong>关键要点</strong>: ①四步循环：移除完成请求→加入新请求→执行Decode→检查停止条件；②Prefill和Decode在同一step中交替进行；③KV Cache随请求完成即时回收；④调度器在每个step都做出完整的决策。<br><strong>实际案例</strong>: 在vLLM的实际实现中，Scheduler类维护一个waiting_queue和running_batch。每个step开始时，Scheduler调用`has_unfinished_requests()`检查队列，通过BlockManager查询可用block数，决定能接受多少新请求，然后调用`_schedule_prefills()`执行Prefill，最后将所有请求送入ModelRunner执行一步Decode。<br><strong>关联知识</strong>: 该工作流程与Chunked Prefill技术密切相关——当Prefill的输入很长时，可以将其拆分为多个chunk分步执行，避免Prefill阻塞Decode，这进一步优化了连续批处理的调度效率。</li>
-<li><strong>核心原理</strong>: 连续批处理的性能提升主要体现在四个维度。吞吐量方面，传统静态批处理的GPU利用率仅30-50%，因为短请求完成后GPU空闲等待长请求；连续批处理将GPU利用率提升到60-80%，吞吐量提升2-4倍。这是因为GPU在每个step都有完整的batch可处理，计算资源不被浪费。请求延迟方面，短请求不再被同一batch中的长请求拖累——它们完成后立即返回，用户感知的延迟与其请求实际长度成正比，而非与batch中最长请求成正比，这使得延迟分布更公平。内存效率方面，请求完成后KV Cache立即释放，新请求可以复用这些资源，避免了静态批处理中"已释放但无法被新请求使用"的内存浪费。总体而言，连续批处理通过提高资源利用率实现了"用同样的硬件服务更多请求"的目标。<br><strong>关键要点</strong>: ①GPU利用率从30-50%提升到60-80%；②吞吐量提升2-4倍；③短请求延迟不再被长请求拖累，更公平；④内存即时回收，减少浪费。<br><strong>实际案例</strong>: 在一个部署了LLaMA-7B的推理服务中，假设平均输出长度50 token，但有10%的请求需要生成500 token。静态批处理下，batch中有一个长请求时所有短请求都要等待约10倍时间；连续批处理下，短请求约200ms完成，长请求约2s完成，短请求用户几乎感受不到长请求的存在。<br><strong>关联知识</strong>: 性能提升的数据来源于vLLM原论文的基准测试，与Orca论文（2022）中提出的iteration-level scheduling理论一致；这些提升与PagedAttention的内存优化叠加，共同构成vLLM的完整性能优势。</li>
-<li><strong>核心原理</strong>: 连续批处理解决了"GPU计算资源浪费"的问题，而PagedAttention解决了"GPU内存资源浪费"的问题，两者配合实现了计算和内存的双重高效利用。PagedAttention的核心创新是将KV Cache的内存管理从"连续预分配"改为"按block分页管理"，类似操作系统的虚拟内存机制。传统方式中，每个请求需要预分配max_length的连续内存空间用于KV Cache，导致严重的内存碎片和浪费（实际生成长度通常远小于max_length）。PagedAttention将KV Cache划分为固定大小的block（如16个token一个block），通过block table进行逻辑到物理的映射，按需分配、即时回收。当连续批处理在每个step动态添加和移除请求时，PagedAttention确保内存分配和回收是细粒度且无碎片的，避免了内存分配成为调度的瓶颈。<br><strong>关键要点</strong>: ①连续批处理负责计算调度（谁在GPU上跑），PagedAttention负责内存管理（KV Cache怎么存）；②PagedAttention采用block分页，按需分配，消除内存碎片；③block table实现逻辑连续→物理分散的映射；④两者结合让GPU同时拥有高计算利用率和高内存利用率。<br><strong>实际案例</strong>: 假设GPU有80GB显存，模型权重占14GB，每个请求的KV Cache按max_length预分配需2GB。传统方式下最多同时服务(80-14)/2=33个请求；使用PagedAttention后，实际生成长度平均仅需0.5GB block空间，可同时服务(80-14)/0.5=132个请求，batch_size扩大4倍，吞吐量显著提升。<br><strong>关联知识</strong>: PagedAttention来自vLLM论文，其block管理思想源于操作系统中的虚拟内存分页机制；FlashAttention在算子层面优化注意力计算，PagedAttention在系统层面优化内存管理，两者解决不同层面的问题可叠加使用；Continuous Batching+PagedAttention+Prefix Caching构成现代LLM推理引擎的三大核心技术。</li>
+<li><strong>加速比推导</strong>: 设请求长度 L ~ Exp(λ)，均值 μ = 1/λ。静态批处理 batch 中 N 个请求的期望最大长度为 E[max(L₁,...,Lₙ)] ≈ μ × H_N，其中 H_N 是调和数（≈ ln(N) + γ）。连续批处理每步都有完整 batch，等效吞吐 ∝ N，静态批处理吞吐 ∝ N / H_N。因此加速比 ≈ H_N ≈ ln(N) + γ。当 N=8 时，H_8 ≈ 2.7，即连续批处理加速约 2.7x，与实测 2-4x 一致。</li>
+<li><strong>容量规划</strong>: 每个请求生成 100 token 约需 100 × 4ms = 400ms (batch=64 时 t_decode≈4ms)。50 QPS × 0.4s = 20 个并发请求。单个 A100 80GB 运行 LLaMA-7B 时 KV Cache 约需 0.5GB/请求，20 并发需 10GB KV Cache + 14GB 模型 = 24GB。考虑峰值余量（3x），建议 1 张 A100 即可满足，但为保证 p99 延迟建议预留 2 张。</li>
+<li><strong>实验指导</strong>: 在 vLLM 启动参数中分别设置 <code>--enable-chunked-prefill</code> 和 <code>--disable-chunked-prefill</code>，用同一组包含 2048-token 长输入的请求测试。预期结果：关闭时长输入会导致其他 Decode 请求延迟尖刺（100ms+），开启后尖刺降低到 chunk_size × t_decode_per_token ≈ 256 × 0.05ms ≈ 13ms。用 wandb 或 prometheus 记录延迟分布对比。</li>
 </ol>
 </div>
 
 <div class="tip"><strong>向前串联：</strong>
-核心思想的知识将在后续的推理框架选型、性能基准测试、生产环境调优中反复应用。
-建议在本章学习后，立即用真实模型（如LLaMA-7B）进行动手实验，
-将概念理解转化为可测量的性能数据（延迟、吞吐、显存占用），
-这些数据将成为后续优化决策的量化依据。
+连续批处理的知识将直接应用于下一节的 Chunked Prefill 学习——理解连续批处理后，你会发现 Chunked Prefill 本质上是对连续批处理的\"第二次迭代\"：将调度粒度从 step 级进一步细化到 chunk 级。此外，这些调度思想也是理解 TensorRT-LLM 和 SGLang 等其他推理框架的基础。
 </div>
 
-
-<div class="deep"><strong>学习路径建议：</strong>
-学习核心思想建议按"概念→原理→实验→调优"四步走。先理解核心概念和术语，
-再深入数学原理和工作机制，然后用最小化实验验证理解，最后在真实场景中调优参数。
-每步都应记录关键指标（延迟/吞吐/精度），建立数据驱动的优化习惯。
+<div class="deep"><strong>进一步阅读：</strong>
+(1) vLLM 原始论文: "Efficient Memory Management for Large Language Model Serving with PagedAttention" (SOSP 2023) — 第 3 节详细描述连续批处理；(2) Orca 论文: "Orca: A Distributed Serving System for Transformer-Based Generative Models" (OSDI 2022) — Iteration-Level Scheduling 的理论基础；(3) TensorRT-LLM 文档中关于 Inflight Batching 的实现细节 — 了解工业级实现的差异；(4) SGLang 论文 — 探索 RadixAttention 对连续批处理的进一步优化。
 </div>
 
-
+</div>
 <script>
-function toggleAnswer(btn) {
-  var content = btn.nextElementSibling;
-  if (content && content.classList.contains('answer-content')) {
-    if (content.classList.contains('show')) {
-      content.classList.remove('show');
-      btn.classList.remove('open');
-      btn.innerHTML = '<span class="icon">▶</span>显示答案';
-    } else {
-      content.classList.add('show');
-      btn.classList.add('open');
-      btn.innerHTML = '<span class="icon">▶</span>隐藏答案';
-    }
-  }
+function toggleAnswer(el) {
+  el.classList.toggle('open');
+  const content = el.nextElementSibling;
+  if (content) content.classList.toggle('show');
 }
 </script>
-
 </body></html>
